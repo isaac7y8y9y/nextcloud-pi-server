@@ -1,0 +1,5 @@
+cloud.example.invalid {
+    reverse_proxy nextcloud-docker-app-1:80
+    tls internal
+}
+

@@ -1,0 +1,49 @@
+services:
+  db:
+    image: mariadb:11
+    restart: always
+    command: --transaction-isolation=READ-COMMITTED --binlog-format=ROW
+    volumes:
+      # Live database files live on the Pi storage mount and are not tracked in Git.
+      - /mnt/example-storage/nextcloud_db:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+
+  app:
+    image: nextcloud:30
+    ports:
+      - 8080:80
+    depends_on:
+      - db
+    volumes:
+      # This contains the Nextcloud installation and data directory; do not commit it.
+      - /mnt/example-storage/nextcloud:/var/www/html
+    restart: unless-stopped
+    environment:
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_HOST=db
+
+  caddy:
+    image: caddy:2
+    container_name: nextcloud-docker-caddy-1
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /srv/example/nextcloud-docker/caddy/Caddyfile:/etc/caddy/Caddyfile
+      # Caddy named volumes contain runtime TLS state and must stay out of Git.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+
