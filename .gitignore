@@ -17,6 +17,7 @@ mysql/
 mariadb/
 caddy_data/
 caddy_config/
+personal_documentation/
 
 *.sql
 *.sql.gz
