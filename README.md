@@ -19,3 +19,23 @@ Start with:
 - `docs/security-boundaries.md` before adding any new files.
 - `docs/known-risks.md` before making improvements.
 
+## Development workflow
+
+This repository keeps the primary checkout on `main` and uses a separate Git
+worktree for every task. The complete lifecycle and safety rules are in
+[`AGENTS.md`](AGENTS.md).
+
+Create a task worktree from the latest `origin/main`:
+
+```bash
+./scripts/worktree-create.sh feat/example-change
+```
+
+After its GitHub pull request has merged, remove the clean local worktree and
+branch:
+
+```bash
+./scripts/worktree-cleanup.sh feat/example-change
+```
+
+Cleanup leaves the remote branch unchanged.
