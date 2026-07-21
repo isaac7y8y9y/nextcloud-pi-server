@@ -37,3 +37,32 @@ separate linked worktree for every feature or maintenance branch.
   `nextcloud-pi-server-<branch>`, replacing branch-name slashes with hyphens.
   For example, `feat/example-change` belongs at
   `nextcloud-pi-server-root/nextcloud-pi-server-feat-example-change`.
+
+## Engineering conventions
+
+- Prefer the simplest direct implementation that satisfies the current
+  requirement.
+- Apply DRY to shared logic, policy, and domain knowledge that could drift. Do
+  not add an abstraction solely to remove a few obvious repeated lines.
+- Keep comments concise. Explain intent, constraints, or risk rather than
+  restating what the code does.
+- Keep runtime data, credentials, private keys, and live configuration out of
+  Git.
+- Keep diagnostics read-only unless the user explicitly requests a mutation.
+- Structure operational changes as: validate, back up, dry-run, obtain explicit
+  approval, apply, health-check, and roll back when needed.
+- Write Bash with strict error handling, quoted expansions, validated inputs,
+  clear failures, and safe repeatable behavior.
+- Update documentation and sanitized configuration together when behavior or
+  operational assumptions change.
+
+## Code Review Rules
+
+- Follow [`docs/code-review.md`](docs/code-review.md) for the shared review
+  process, finding threshold, severity levels, and output format.
+- Preserve the security and deployment boundaries documented under `docs/`.
+- Treat `docs/known-risks.md` as baseline context. Report a known risk only when
+  the change introduces it, worsens it, or makes it newly reachable.
+- Use the project-scoped `review_my_pr` custom agent for local pull-request
+  reviews. Launch it with high reasoning and read-only permissions; it must not
+  delegate further.
