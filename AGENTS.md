@@ -32,9 +32,11 @@ separate linked worktree for every feature or maintenance branch.
 - Do not force-remove worktrees or bypass a helper's failed safety check.
 - Local cleanup does not delete the remote branch. Remote branch cleanup is
   controlled by the GitHub repository's pull-request settings.
-- Task worktrees belong under the sibling directory
-  `../nextcloud-pi-server-worktrees/` and must not be created inside this
-  repository.
+- Keep the permanent checkout and task worktrees together under
+  `nextcloud-pi-server-root/`. Name each task worktree
+  `nextcloud-pi-server-<branch>`, replacing branch-name slashes with hyphens.
+  For example, `feat/example-change` belongs at
+  `nextcloud-pi-server-root/nextcloud-pi-server-feat-example-change`.
 
 ## Engineering conventions
 
