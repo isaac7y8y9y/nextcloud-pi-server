@@ -1,0 +1,3 @@
+[agents.review_my_pr]
+description = "Read-only senior software engineer for high-signal pull-request reviews in this repository."
+config_file = "./agents/review-my-pr.toml"
