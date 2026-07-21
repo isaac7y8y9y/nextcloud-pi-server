@@ -31,6 +31,15 @@ Create a task worktree from the latest `origin/main`:
 ./scripts/worktree-create.sh feat/example-change
 ```
 
+The helper keeps worktrees beside the permanent checkout and flattens branch
+slashes into hyphens. For example:
+
+```text
+nextcloud-pi-server-root/
+├── nextcloud-pi-server
+└── nextcloud-pi-server-feat-example-change
+```
+
 After its GitHub pull request has merged, remove the clean local worktree and
 branch:
 

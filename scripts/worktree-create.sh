@@ -31,8 +31,9 @@ BRANCH="$1"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 REPO_NAME="$(basename -- "$REPO_ROOT")"
-WORKTREE_ROOT="$(dirname -- "$REPO_ROOT")/${REPO_NAME}-worktrees"
-WORKTREE_PATH="$WORKTREE_ROOT/$BRANCH"
+WORKTREE_ROOT="$(dirname -- "$REPO_ROOT")"
+WORKTREE_NAME="${REPO_NAME}-${BRANCH//\//-}"
+WORKTREE_PATH="$WORKTREE_ROOT/$WORKTREE_NAME"
 
 [[ -d "$REPO_ROOT/.git" ]] || die "run this helper from the permanent checkout, not a linked worktree"
 [[ "$(git -C "$REPO_ROOT" branch --show-current)" == "main" ]] || die "the permanent checkout must be on main"
@@ -53,7 +54,6 @@ fi
 
 [[ ! -e "$WORKTREE_PATH" ]] || die "worktree path already exists: $WORKTREE_PATH"
 
-mkdir -p -- "$(dirname -- "$WORKTREE_PATH")"
 git -C "$REPO_ROOT" worktree add -b "$BRANCH" "$WORKTREE_PATH" origin/main
 
 printf '\nCreated worktree for %s at:\n%s\n\nEnter it with:\ncd %q\n' \
