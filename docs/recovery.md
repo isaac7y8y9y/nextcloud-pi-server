@@ -12,5 +12,7 @@ High-level recovery order:
 8. Restore Caddy trust on client devices, including the Mac.
 9. Verify login, file upload, and file download.
 
-Detailed backup and restore automation is future work. This repository currently documents the live architecture and stores sanitized configuration; it does not by itself restore uploaded files or the database.
-
+The repository now provides configuration-backup creation and verification plus
+a manual, approval-gated configuration rollback procedure in
+[`backup-and-rollback.md`](backup-and-rollback.md). It does not restore
+uploaded files or the database.

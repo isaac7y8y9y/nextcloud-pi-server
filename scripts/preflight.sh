@@ -207,7 +207,7 @@ if remote "true" >/dev/null 2>&1; then
   record PASS "SSH connection succeeded: $REMOTE"
 else
   record FAIL "SSH connection failed: $REMOTE"
-  printf '\nDeployment remains blocked until a safe .env migration and remote configuration backup process are implemented.\n'
+  printf '\nDeployment remains blocked until SSH connectivity, a verified configuration backup, a safe .env migration, and Pi-side validation are complete.\n'
   exit 1
 fi
 
@@ -401,9 +401,9 @@ else
 fi
 
 record WARNING "Deployment should remain blocked"
-record WARNING "Resolve backup, .env migration, Pi-side validation, rollback, and explicit restart approval before deployment"
+record WARNING "Create and verify a configuration backup, then complete .env migration, Pi-side validation, rollback planning, and explicit restart approval before deployment"
 
 printf '\nTotals: PASS=%d WARNING=%d FAIL=%d UNKNOWN=%d DRIFT=%d\n' \
   "$PASS_COUNT" "$WARNING_COUNT" "$FAIL_COUNT" "$UNKNOWN_COUNT" "$DRIFT_COUNT"
 
-printf '\nDeployment remains blocked until a safe .env migration and remote configuration backup process are implemented.\n'
+printf '\nDeployment remains blocked until a verified configuration backup, safe .env migration, Pi-side validation, rollback planning, and explicit restart approval are complete.\n'

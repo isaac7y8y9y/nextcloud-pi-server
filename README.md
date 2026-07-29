@@ -18,6 +18,7 @@ Start with:
 - `docs/current-configuration.md` for confirmed live settings.
 - `docs/security-boundaries.md` before adding any new files.
 - `docs/known-risks.md` before making improvements.
+- `docs/backup-and-rollback.md` before backing up or recovering configuration.
 
 ## Development workflow
 

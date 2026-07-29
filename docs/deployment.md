@@ -57,5 +57,7 @@ Deployment must never overwrite or synchronize these live data paths:
 
 Those directories contain the live Nextcloud application state, uploaded user data, and MariaDB database files. They require separate backup and restore procedures, not Git synchronization.
 
-Future deployment work should add an explicit remote backup step before any file replacement, a validated `.env` migration, a dry-run comparison, rollback instructions, and a final approval gate before any restart.
-
+Future deployment work must invoke the verified configuration backup workflow
+before any file replacement, then add a validated `.env` migration, a dry-run
+comparison, rollback instructions, and a final approval gate before any
+restart. See [`backup-and-rollback.md`](backup-and-rollback.md).

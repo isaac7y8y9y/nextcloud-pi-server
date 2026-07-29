@@ -9,4 +9,6 @@ These are documented for initial fidelity. Do not treat this first repository ve
 - Because of that generated target name, the Compose project name must remain `nextcloud-docker` until the Caddy target is intentionally changed.
 - Image tags use major versions, such as `nextcloud:30`, `mariadb:11`, and `caddy:2`, rather than immutable versions or digests.
 - The live Compose file previously contained inline database credentials. This repository moves those values to `.env`.
-- Backups have not yet been designed or verified.
+- The configuration-only backup workflow does not back up or restore the
+  database, Nextcloud application state, uploaded files, or Caddy runtime TLS
+  state.
