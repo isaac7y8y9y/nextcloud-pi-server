@@ -218,7 +218,7 @@ for container in "${CONTAINERS[@]}"; do
 done
 capture_remote_command "metadata/docker-containers.txt" "$container_command"
 capture_remote_command "metadata/mount-state.txt" "findmnt -rn --target '$NEXTCLOUD_STORAGE_MOUNT' -o TARGET,SOURCE,FSTYPE,OPTIONS"
-capture_remote_command "metadata/nextcloud-status.txt" "set -e; status=\$(docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status); printf '%s\\n' \"\$status\" | grep -E '^[[:space:]]*(installed|version|versionstring|maintenance|needsDbUpgrade):'"
+capture_remote_command "metadata/nextcloud-status.txt" "set -e; status=\$(docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status); printf '%s\\n' \"\$status\" | grep -E '^[[:space:]]*-[[:space:]]*(installed|version|versionstring|maintenance|needsDbUpgrade):'"
 capture_remote_command "metadata/nextcloud-data-directory.txt" "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ config:system:get datadirectory"
 capture_remote_command "metadata/nextcloud-trusted-domains.txt" "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ config:system:get trusted_domains"
 
