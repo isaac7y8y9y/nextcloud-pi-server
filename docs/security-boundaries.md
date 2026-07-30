@@ -31,3 +31,14 @@ For this deployment, the expected live path is:
 ```
 
 Create it from `compose/.env.example`. Keep the real file untracked.
+
+The `prepare-env-migration.sh` helper derives the existing database settings
+from the running MariaDB container only after a verified configuration backup
+and an explicit `--apply` command. It creates the target file atomically with
+`0600` permissions, never prints its values, and refuses to overwrite it.
+Database values are serialized as literal single-quoted Compose values to
+prevent accidental environment-variable interpolation. Values containing a
+single quote, backslash, or line break are rejected rather than risk changing
+a credential during serialization.
+Do not redirect its output alongside secret-bearing commands or inspect the
+target `.env` in terminal transcripts.

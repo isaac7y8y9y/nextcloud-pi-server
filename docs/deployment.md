@@ -37,6 +37,40 @@ That means the repository Compose file must not be deployed over the live file u
 
 Use `compose/.env.example` as the shape of that file, but never commit the real `.env` file.
 
+## Prepare the Pi-only `.env`
+
+After creating and verifying a fresh configuration backup, use the guarded
+helper from a feature worktree:
+
+```sh
+./scripts/prepare-env-migration.sh --check
+./scripts/prepare-env-migration.sh --apply \
+  "$HOME/Projects/nextcloud-pi-backups/config-backup-YYYYMMDDTHHMMSSZ"
+```
+
+`--check` is read-only. `--apply` first verifies the selected backup, confirms
+it is no more than one hour old, and binds it to the connected Pi, user,
+project path, and current live Compose file. The backup must remain at the
+canonical path recorded in its manifest. The helper then creates a new `0600`
+`.env` from the running MariaDB container's existing database environment. It
+refuses to overwrite an existing `.env`, suppresses secret values, and does not
+replace Compose configuration or restart services. Both modes validate the
+resolved live Compose configuration with quiet output. Set
+`NEXTCLOUD_BACKUP_MAX_AGE_SECONDS` only when an intentionally reviewed
+maintenance window requires a different freshness limit.
+The generated values are single-quoted so Docker Compose preserves literal
+characters such as `$`. To avoid changing credentials through parser-specific
+escaping, the helper refuses values containing a single quote, backslash, or
+line break.
+Stop and use an intentionally reviewed manual secret-provisioning procedure if
+that check fails.
+Use `--apply` only after explicitly approving creation of the exact Pi target
+file.
+
+Re-run `--check` after the command succeeds. The later deployment phase must
+validate a staged copy of the sanitized Compose configuration before it can
+replace the current inline-credential Compose file.
+
 Deployment remains blocked until:
 
 1. The live configuration is backed up.

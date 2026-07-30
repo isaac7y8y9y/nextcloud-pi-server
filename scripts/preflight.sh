@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Read-only deployment gate. The checks below deliberately gather only safe
+# runtime facts and configuration drift; they never copy configuration, print
+# database values, or restart the Pi services.
+
+# These defaults describe the existing deployment, while environment overrides
+# let an operator validate a replacement Pi without editing the repository.
 NEXTCLOUD_PI_HOST="${NEXTCLOUD_PI_HOST:?set NEXTCLOUD_PI_HOST}"
 NEXTCLOUD_PI_USER="${NEXTCLOUD_PI_USER:?set NEXTCLOUD_PI_USER}"
 NEXTCLOUD_REMOTE_PROJECT_DIR="${NEXTCLOUD_REMOTE_PROJECT_DIR:?set NEXTCLOUD_REMOTE_PROJECT_DIR}"
@@ -14,6 +20,8 @@ WARNING_COUNT=0
 FAIL_COUNT=0
 UNKNOWN_COUNT=0
 DRIFT_COUNT=0
+ENV_PREPARED=0
+SECRETS_MIGRATED=0
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -37,6 +45,8 @@ record() {
   printf '%-7s %s\n' "$status" "$message"
 }
 
+# Keep all remote access non-interactive and centralized so a preflight run
+# cannot fall back to a password prompt or a different SSH behavior per check.
 remote() {
   ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" "$@"
 }
@@ -100,6 +110,8 @@ compare_normalized_file_to_remote_command() {
   local normalized_local="$TMP_DIR/${label//[^A-Za-z0-9_.-]/_}.local.normalized"
   local normalized_remote="$TMP_DIR/${label//[^A-Za-z0-9_.-]/_}.remote.normalized"
 
+  # Configuration comments and blank lines are not operational drift, so
+  # compare the active Caddy/systemd directives rather than raw formatting.
   if remote "$remote_command" >"$remote_file"; then
     normalize_active_config "$local_file" >"$normalized_local"
     normalize_active_config "$remote_file" >"$normalized_remote"
@@ -120,11 +132,13 @@ remote_compose_config() {
 
 section "Local repository checks"
 
+# Task worktrees are required by AGENTS.md. Accept the prescribed sibling name
+# while still rejecting unrelated repositories that happen to contain scripts.
 if git rev-parse --show-toplevel >/dev/null 2>&1; then
   repo_root="$(git rev-parse --show-toplevel)"
   repo_name="$(basename "$repo_root")"
-  if [[ "$repo_name" == "$EXPECTED_REPO_NAME" ]]; then
-    record PASS "Running from expected Git repository: $repo_root"
+  if [[ "$repo_name" == "$EXPECTED_REPO_NAME" || "$repo_name" == "$EXPECTED_REPO_NAME-"* ]]; then
+    record PASS "Running from expected Git repository or task worktree: $repo_root"
   else
     record FAIL "Unexpected Git repository: $repo_root"
   fi
@@ -270,6 +284,62 @@ for dir in \
   fi
 done
 
+remote_env_file="$NEXTCLOUD_REMOTE_PROJECT_DIR/.env"
+# Preflight validates the target's shape and permissions only. It never reads
+# or prints values from the credential-bearing file.
+if remote "test ! -e '$remote_env_file' && test ! -L '$remote_env_file'" >/dev/null 2>&1; then
+  record UNKNOWN "Pi-only .env file has not been prepared: $remote_env_file"
+elif remote "test -f '$remote_env_file' && test ! -L '$remote_env_file'" >/dev/null 2>&1; then
+  remote_env_mode="$(remote "if stat -f '%Lp' '$remote_env_file' >/dev/null 2>&1; then stat -f '%Lp' '$remote_env_file'; else stat -c '%a' '$remote_env_file'; fi" 2>/dev/null || true)"
+  if [[ "$remote_env_mode" == "600" ]]; then
+    ENV_PREPARED=1
+    record PASS "Pi-only .env file permissions are 0600"
+  else
+    record FAIL "Pi-only .env file permissions are ${remote_env_mode:-unknown}, expected 0600"
+  fi
+else
+  record FAIL "Pi-only .env path is not a regular file: $remote_env_file"
+fi
+
+# Count only active Compose list assignments, and accept a value only when the
+# entire right-hand side is exactly ${KEY}. The remote scan returns no file
+# content, rejecting inline values without printing or returning secrets.
+if (( ENV_PREPARED != 0 )) && remote "awk '
+  BEGIN {
+    expected[\"MYSQL_ROOT_PASSWORD\"] = 1
+    expected[\"MYSQL_PASSWORD\"] = 2
+    expected[\"MYSQL_DATABASE\"] = 2
+    expected[\"MYSQL_USER\"] = 2
+  }
+  {
+    line = \$0
+    sub(/^[[:space:]]*-[[:space:]]*/, \"\", line)
+    for (key in expected) {
+      prefix = key \"=\"
+      if (index(line, prefix) == 1) {
+        total[key]++
+        reference = sprintf(\"%c{%s}\", 36, key)
+        value = substr(line, length(prefix) + 1)
+        sub(/[[:space:]]*$/, \"\", value)
+        if (value == reference) references[key]++
+        else inline[key]++
+      }
+    }
+  }
+  END {
+    failed = 0
+    for (key in expected) {
+      if (total[key] != expected[key] || references[key] != total[key] || inline[key] != 0) failed = 1
+    }
+    exit failed
+  }
+' '$NEXTCLOUD_REMOTE_PROJECT_DIR/docker-compose.yml'" >/dev/null 2>&1; then
+  SECRETS_MIGRATED=1
+  record PASS "Live Compose database assignments use Pi-only .env references"
+elif (( ENV_PREPARED != 0 )); then
+  record WARNING "Live Compose database assignments are not fully migrated to .env references"
+fi
+
 section "Container checks"
 
 for container in nextcloud-docker-app-1 nextcloud-docker-db-1 nextcloud-docker-caddy-1; do
@@ -401,9 +471,17 @@ else
 fi
 
 record WARNING "Deployment should remain blocked"
-record WARNING "Create and verify a configuration backup, then complete .env migration, Pi-side validation, rollback planning, and explicit restart approval before deployment"
+if (( ENV_PREPARED != 0 && SECRETS_MIGRATED != 0 )); then
+  record WARNING "Phase 1 secret migration is prepared; Phase 2 deployment and any restart still require validation, rollback planning, and explicit approval"
+else
+  record WARNING "Create and verify a configuration backup, then complete .env migration, Pi-side validation, rollback planning, and explicit restart approval before deployment"
+fi
 
 printf '\nTotals: PASS=%d WARNING=%d FAIL=%d UNKNOWN=%d DRIFT=%d\n' \
   "$PASS_COUNT" "$WARNING_COUNT" "$FAIL_COUNT" "$UNKNOWN_COUNT" "$DRIFT_COUNT"
 
-printf '\nDeployment remains blocked until a verified configuration backup, safe .env migration, Pi-side validation, rollback planning, and explicit restart approval are complete.\n'
+if (( ENV_PREPARED != 0 && SECRETS_MIGRATED != 0 )); then
+  printf '\nPhase 1 secret migration checks passed. Phase 2 deployment and any restart remain blocked pending validation, rollback planning, and explicit approval.\n'
+else
+  printf '\nDeployment remains blocked until a verified configuration backup, safe .env migration, Pi-side validation, rollback planning, and explicit restart approval are complete.\n'
+fi
