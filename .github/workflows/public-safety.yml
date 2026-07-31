@@ -29,6 +29,7 @@ jobs:
         run: |
           bash -n scripts/*.sh scripts/lib/deployment-config.sh
           bash scripts/test-deployment-config.sh
+          bash scripts/test-compose-env-references.sh
           python3 scripts/test-public-safety.py
           # The strict history gate is enabled only after the coordinated
           # git-filter-repo rewrite. Until then, enforce the proposed tree.

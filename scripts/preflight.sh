@@ -204,16 +204,13 @@ else
   printf '%s\n' "$forbidden_tracked"
 fi
 
-mysql_scan_file="$TMP_DIR/mysql-scan.txt"
-if git grep -nE 'MYSQL_(ROOT_PASSWORD|PASSWORD|DATABASE|USER)=' -- ':!compose/.env.example' >"$mysql_scan_file" 2>/dev/null; then
-  if grep -v '\${MYSQL_' "$mysql_scan_file" >/dev/null; then
-    record FAIL "A tracked file contains direct MYSQL assignment syntax outside .env.example"
-    cut -d: -f1,2 "$mysql_scan_file" | sort -u
-  else
-    record PASS "Tracked MYSQL assignments use environment-variable references"
-  fi
+# Restrict this gate to the deployable Compose file. A repository-wide text
+# search also reads safe unit-test fixtures and incorrectly treats them as live
+# configuration assignments.
+if "$SCRIPT_DIR/check-compose-env-references.sh" "compose/docker-compose.yml"; then
+  record PASS "Tracked Compose database assignments use environment-variable references"
 else
-  record PASS "No direct MYSQL assignments found outside .env.example"
+  record FAIL "Tracked Compose database assignments are missing, extra, or not environment references"
 fi
 
 public_safety_args=(--deployment-env "$NEXTCLOUD_DEPLOYMENT_ENV_FILE")
