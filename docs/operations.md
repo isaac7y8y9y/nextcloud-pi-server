@@ -1,47 +1,13 @@
 # Operations
 
-These commands are intended for read-only checks on the Raspberry Pi. They do not upgrade, delete, or recreate anything.
+Run operational scripts from a clean linked worktree with a valid local
+deployment environment. The scripts use non-interactive SSH and validate input
+syntax before contacting the deployment target.
 
-Check containers:
+`scripts/preflight.sh` is read-only. Backup and recovery scripts require
+separate explicit approval for mutation or restart operations. Preserve the
+generated reports and backup manifests outside Git because they may identify
+the deployment.
 
-```sh
-sudo docker ps
-sudo docker compose ps
-```
-
-Check Nextcloud status:
-
-```sh
-sudo docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status
-sudo docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ config:system:get datadirectory
-```
-
-Review logs:
-
-```sh
-sudo docker logs nextcloud-docker-app-1 --tail 100
-sudo docker logs nextcloud-docker-db-1 --tail 100
-sudo docker logs nextcloud-docker-caddy-1 --tail 100
-```
-
-Check storage:
-
-```sh
-findmnt /mnt/example-storage
-df -h /mnt/example-storage
-```
-
-Check the Caddy route from the Mac:
-
-```sh
-curl -I https://cloud.example.invalid
-```
-
-If certificate trust is being diagnosed separately:
-
-```sh
-curl -k -I https://cloud.example.invalid
-```
-
-Do not paste authenticated headers, cookies, or token-bearing command output into documentation.
-
+Use `scripts/check-public-safety.py` before publishing changes. It emits only
+redacted finding references and fingerprints.

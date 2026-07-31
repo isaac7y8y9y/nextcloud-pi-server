@@ -6,11 +6,10 @@ After=docker.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/srv/example/nextcloud-docker
+WorkingDirectory=@NEXTCLOUD_REMOTE_PROJECT_DIR@
 ExecStart=/usr/local/bin/docker-compose up -d
 ExecStop=/usr/local/bin/docker-compose down
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-

@@ -1,0 +1,41 @@
+name: Public safety
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Strict public-safety scan
+    runs-on: ubuntu-latest
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out complete reachable history for Gitleaks
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Run renderer and scanner tests
+        run: |
+          bash -n scripts/*.sh scripts/lib/deployment-config.sh
+          bash scripts/test-deployment-config.sh
+          python3 scripts/test-public-safety.py
+          # The strict history gate is enabled only after the coordinated
+          # git-filter-repo rewrite. Until then, enforce the proposed tree.
+          python3 scripts/check-public-safety.py
+
+      - name: Install pinned Gitleaks
+        run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
+
+      - name: Scan complete reachable history with Gitleaks
+        run: "$(go env GOPATH)/bin/gitleaks git --redact --log-opts=--all"

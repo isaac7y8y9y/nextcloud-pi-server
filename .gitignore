@@ -2,6 +2,8 @@
 .env.*
 !.env.example
 
+config/deployment.env
+
 config.php
 
 *.key
@@ -33,4 +35,3 @@ personal_documentation/
 reports/raw/
 staging/
 .DS_Store
-

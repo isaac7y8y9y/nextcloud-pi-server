@@ -5,7 +5,7 @@ services:
     command: --transaction-isolation=READ-COMMITTED --binlog-format=ROW
     volumes:
       # Live database files live on the Pi storage mount and are not tracked in Git.
-      - /mnt/example-storage/nextcloud_db:/var/lib/mysql
+      - "@NEXTCLOUD_STORAGE_MOUNT@/nextcloud_db:/var/lib/mysql"
     environment:
       - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
@@ -20,7 +20,7 @@ services:
       - db
     volumes:
       # This contains the Nextcloud installation and data directory; do not commit it.
-      - /mnt/example-storage/nextcloud:/var/www/html
+      - "@NEXTCLOUD_STORAGE_MOUNT@/nextcloud:/var/www/html"
     restart: unless-stopped
     environment:
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
@@ -35,15 +35,13 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - /srv/example/nextcloud-docker/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile
       # Caddy named volumes contain runtime TLS state and must stay out of Git.
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
       - app
     restart: unless-stopped
-
 volumes:
   caddy_data:
   caddy_config:
-

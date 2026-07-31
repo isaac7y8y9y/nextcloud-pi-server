@@ -5,15 +5,16 @@ set -euo pipefail
 # operations are read-only, credential-bearing files are streamed directly into
 # protected files, and the completed backup is published atomically.
 
-NEXTCLOUD_PI_HOST="${NEXTCLOUD_PI_HOST:?set NEXTCLOUD_PI_HOST}"
-NEXTCLOUD_PI_USER="${NEXTCLOUD_PI_USER:?set NEXTCLOUD_PI_USER}"
-NEXTCLOUD_REMOTE_PROJECT_DIR="${NEXTCLOUD_REMOTE_PROJECT_DIR:?set NEXTCLOUD_REMOTE_PROJECT_DIR}"
-NEXTCLOUD_STORAGE_MOUNT="${NEXTCLOUD_STORAGE_MOUNT:?set NEXTCLOUD_STORAGE_MOUNT}"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+source "$SCRIPT_DIR/lib/deployment-config.sh"
+load_deployment_config "$REPOSITORY_ROOT"
+
 NEXTCLOUD_SYSTEMD_UNIT="${NEXTCLOUD_SYSTEMD_UNIT:-/etc/systemd/system/nextcloud.service}"
 NEXTCLOUD_BACKUP_ROOT="${NEXTCLOUD_BACKUP_ROOT:-$HOME/Projects/nextcloud-pi-backups}"
 
 readonly REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly CONTAINERS=(nextcloud-docker-app-1 nextcloud-docker-db-1 nextcloud-docker-caddy-1)
 readonly REQUIRED_PAYLOAD_FILES=(
   compose/docker-compose.yml
@@ -123,7 +124,7 @@ copy_optional_remote_file() {
   if remote "test ! -e '$remote_path' && test ! -L '$remote_path'" >/dev/null; then
     return
   fi
-  remote "test -f '$remote_path' && test ! -L '$remote_path'" >/dev/null || die "optional configuration file is not a regular file: $remote_path"
+  remote "test -f '$remote_path' && test ! -L '$remote_path'" >/dev/null || die "optional configuration file is not a regular file"
   copy_remote_file "$remote_path" "$relative_path"
   PAYLOAD_FILES+=("$relative_path")
 }
@@ -198,7 +199,7 @@ umask 077
 mkdir "$STAGING_DIR"
 chmod 700 "$STAGING_DIR"
 
-printf 'Collecting configuration-only backup from %s...\n' "$REMOTE"
+printf 'Collecting configuration-only backup from configured deployment target...\n'
 
 # Copy sensitive configuration without sending its contents to the terminal.
 copy_remote_file "$NEXTCLOUD_REMOTE_PROJECT_DIR/docker-compose.yml" "compose/docker-compose.yml"
@@ -222,7 +223,7 @@ capture_remote_command "metadata/nextcloud-status.txt" "set -e; status=\$(docker
 capture_remote_command "metadata/nextcloud-data-directory.txt" "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ config:system:get datadirectory"
 capture_remote_command "metadata/nextcloud-trusted-domains.txt" "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ config:system:get trusted_domains"
 
-[[ -s "$STAGING_DIR/storage/fstab-entry.txt" ]] || die "no /etc/fstab entry was found for $NEXTCLOUD_STORAGE_MOUNT"
+[[ -s "$STAGING_DIR/storage/fstab-entry.txt" ]] || die "no matching /etc/fstab entry was found"
 [[ -s "$STAGING_DIR/metadata/docker-containers.txt" ]] || die "container metadata was empty"
 [[ -s "$STAGING_DIR/metadata/mount-state.txt" ]] || die "mount metadata was empty"
 
@@ -232,7 +233,7 @@ remote_username="$(remote id -un)"
 # revision when available, but keep a usable recovery point when it is not.
 remote_commit="$(remote "if git -C '$NEXTCLOUD_REMOTE_PROJECT_DIR' rev-parse --verify HEAD >/dev/null 2>&1; then git -C '$NEXTCLOUD_REMOTE_PROJECT_DIR' rev-parse HEAD; else printf '%s\\n' unavailable; fi")"
 [[ -n "$remote_hostname" ]] || die "remote hostname was empty"
-[[ "$remote_username" == "$NEXTCLOUD_PI_USER" ]] || die "remote username did not match $NEXTCLOUD_PI_USER"
+[[ "$remote_username" == "$NEXTCLOUD_PI_USER" ]] || die "remote username did not match the configured target"
 [[ "$remote_commit" == "unavailable" || "$remote_commit" =~ ^[0-9a-f]{40}$ ]] || die "remote deployment commit had an unexpected value"
 
 # The manifest records non-secret provenance plus the size and digest of every

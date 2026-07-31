@@ -5,18 +5,23 @@ set -euo pipefail
 # disposable MariaDB container and bind directory. The live Nextcloud, database, and Caddy
 # paths are read-only throughout this drill.
 
-NEXTCLOUD_PI_HOST="${NEXTCLOUD_PI_HOST:?set NEXTCLOUD_PI_HOST}"
-NEXTCLOUD_PI_USER="${NEXTCLOUD_PI_USER:?set NEXTCLOUD_PI_USER}"
-NEXTCLOUD_DATA_ROOT="${NEXTCLOUD_DATA_ROOT:-/mnt/example-storage/nextcloud}"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+source "$SCRIPT_DIR/lib/deployment-config.sh"
+load_deployment_config "$REPOSITORY_ROOT"
+
+NEXTCLOUD_DATA_ROOT="${NEXTCLOUD_DATA_ROOT:-$NEXTCLOUD_STORAGE_MOUNT/nextcloud}"
 NEXTCLOUD_DB_CONTAINER="${NEXTCLOUD_DB_CONTAINER:-nextcloud-docker-db-1}"
 NEXTCLOUD_CADDY_DATA_VOLUME="${NEXTCLOUD_CADDY_DATA_VOLUME:-nextcloud-docker_caddy_data}"
 NEXTCLOUD_CADDY_CONFIG_VOLUME="${NEXTCLOUD_CADDY_CONFIG_VOLUME:-nextcloud-docker_caddy_config}"
 
 readonly REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 APPLY=0
+CLEANUP_ONLY=0
 BACKUP_DIR=""
+RECOVERY_TEST_ID=""
 REMOTE_TEST_ROOT=""
 TEST_DB_CONTAINER=""
 
@@ -25,10 +30,14 @@ usage() {
 Usage:
   ./scripts/test-runtime-recovery.sh --check <runtime-backup-directory>
   ./scripts/test-runtime-recovery.sh --apply <runtime-backup-directory>
+  ./scripts/test-runtime-recovery.sh --cleanup <recovery-test-id>
 
 --check validates the backup, target identity, tools, and free space without
 changing the Pi. --apply restores into disposable locations, verifies the
 restored state, and removes those locations. It never targets live paths.
+
+--cleanup retries removal of disposable targets from a failed --apply run. Use
+the recovery-test ID printed by that run; live paths are never accepted.
 EOF
 }
 
@@ -62,6 +71,18 @@ require_safe_settings() {
   is_safe_docker_name "$NEXTCLOUD_CADDY_CONFIG_VOLUME" || die "NEXTCLOUD_CADDY_CONFIG_VOLUME contains unsupported characters"
 }
 
+verify_configured_remote_identity() {
+  local connected_hostname
+  local connected_user
+
+  connected_hostname="$(remote hostname)"
+  connected_user="$(remote id -un)"
+  [[ "$connected_hostname" == "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" ]] ||
+    die "connected host does not match the configured deployment target"
+  [[ "$connected_user" == "$NEXTCLOUD_PI_USER" ]] ||
+    die "connected user does not match the configured deployment target"
+}
+
 manifest_value() {
   local key="$1"
 
@@ -82,19 +103,19 @@ cleanup_targets() {
       ! docker inspect '$TEST_DB_CONTAINER' >/dev/null 2>&1
     " >/dev/null 2>&1; then
       warn "could not verify removal of disposable container: $TEST_DB_CONTAINER"
-      warn "run: ssh $REMOTE docker rm -f $TEST_DB_CONTAINER"
+      warn "retry with: ./scripts/test-runtime-recovery.sh --cleanup $RECOVERY_TEST_ID"
       cleanup_failed=1
     fi
   fi
-  if [[ -n "$REMOTE_TEST_ROOT" && "$REMOTE_TEST_ROOT" == /mnt/example-storage/.nextcloud-recovery-test-* ]]; then
+  if [[ -n "$REMOTE_TEST_ROOT" && "$REMOTE_TEST_ROOT" == "$NEXTCLOUD_STORAGE_MOUNT"/.nextcloud-recovery-test-* ]]; then
     if ! remote "set -e
       if test -d '$REMOTE_TEST_ROOT'; then
         sudo -n find '$REMOTE_TEST_ROOT' -depth -delete
       fi
       test ! -e '$REMOTE_TEST_ROOT'
     " >/dev/null 2>&1; then
-      warn "could not verify removal of disposable recovery directory: $REMOTE_TEST_ROOT"
-      warn "run: ssh $REMOTE sudo find $REMOTE_TEST_ROOT -depth -delete"
+      warn "could not verify removal of the disposable recovery directory"
+      warn "retry with: ./scripts/test-runtime-recovery.sh --cleanup $RECOVERY_TEST_ID"
       cleanup_failed=1
     fi
   fi
@@ -146,11 +167,11 @@ verify_target_binding() {
   database_dump_bytes="$(wc -c <"$BACKUP_DIR/database/nextcloud.sql" | tr -d '[:space:]')"
   caddy_data_archive_bytes="$(wc -c <"$BACKUP_DIR/caddy/data.tar" | tr -d '[:space:]')"
   caddy_config_archive_bytes="$(wc -c <"$BACKUP_DIR/caddy/config.tar" | tr -d '[:space:]')"
-  # Every restore target, including MariaDB's bind directory, lives below
-  # /mnt/example-storage. Budget archive-sized extraction space, three times the SQL dump
+  # Every restore target, including MariaDB's bind directory, lives below the
+  # configured storage mount. Budget archive-sized extraction space, three times the SQL dump
   # for database expansion, and one GiB of operational margin.
   required_bytes=$((nextcloud_archive_bytes + database_dump_bytes * 3 + caddy_data_archive_bytes + caddy_config_archive_bytes + 1073741824))
-  available_bytes="$(remote "df -B1 --output=avail /mnt/example-storage | tail -1 | tr -d '[:space:]'")"
+  available_bytes="$(remote "df -B1 --output=avail '$NEXTCLOUD_STORAGE_MOUNT' | tail -1 | tr -d '[:space:]'")"
   [[ "$available_bytes" =~ ^[0-9]+$ ]] || die "could not determine Pi free space"
   (( available_bytes > required_bytes )) || die "insufficient Pi space for isolated recovery test"
 
@@ -167,6 +188,11 @@ case "${1:-}" in
     APPLY=1
     BACKUP_DIR="$2"
     ;;
+  --cleanup)
+    [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+    CLEANUP_ONLY=1
+    RECOVERY_TEST_ID="$2"
+    ;;
   -h|--help)
     usage
     exit 0
@@ -178,6 +204,15 @@ case "${1:-}" in
 esac
 
 require_safe_settings
+if (( CLEANUP_ONLY != 0 )); then
+  [[ "$RECOVERY_TEST_ID" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || die "recovery-test ID has an unexpected format"
+  REMOTE_TEST_ROOT="$NEXTCLOUD_STORAGE_MOUNT/.nextcloud-recovery-test-$RECOVERY_TEST_ID"
+  TEST_DB_CONTAINER="nextcloud-recovery-test-db-$RECOVERY_TEST_ID"
+  verify_configured_remote_identity
+  cleanup_targets || die "disposable recovery targets still require manual cleanup"
+  printf 'RECOVERY: disposable recovery-test targets are absent\n'
+  exit 0
+fi
 "$SCRIPT_DIR/verify-runtime-backup.sh" "$BACKUP_DIR" >/dev/null
 BACKUP_DIR="$(cd -- "$BACKUP_DIR" && pwd -P)"
 verify_target_binding
@@ -187,9 +222,10 @@ if (( APPLY == 0 )); then
   exit 0
 fi
 
-test_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-REMOTE_TEST_ROOT="/mnt/example-storage/.nextcloud-recovery-test-$test_id"
-TEST_DB_CONTAINER="nextcloud-recovery-test-db-$test_id"
+RECOVERY_TEST_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+REMOTE_TEST_ROOT="$NEXTCLOUD_STORAGE_MOUNT/.nextcloud-recovery-test-$RECOVERY_TEST_ID"
+TEST_DB_CONTAINER="nextcloud-recovery-test-db-$RECOVERY_TEST_ID"
+printf 'Recovery-test ID: %s\n' "$RECOVERY_TEST_ID"
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -228,7 +264,7 @@ remote "test -d '$REMOTE_TEST_ROOT/caddy-config-restore' && test ! -L '$REMOTE_T
   die "restored Caddy config differs from its archive"
 printf 'CHECK: isolated Caddy TLS restore matches its protected archives\n'
 
-printf 'Restoring MariaDB into a disposable container and /mnt/example-storage bind directory...\n'
+printf 'Restoring MariaDB into a disposable container and configured storage bind directory...\n'
 database_image="$(manifest_value database_image)"
 [[ "$database_image" =~ ^[A-Za-z0-9][A-Za-z0-9_./:@-]*$ ]] || die "manifest database image contains unsupported characters"
 remote "set -eu
@@ -267,4 +303,5 @@ cleanup_targets || die "disposable recovery targets require manual cleanup"
 trap - EXIT HUP INT TERM
 REMOTE_TEST_ROOT=""
 TEST_DB_CONTAINER=""
+RECOVERY_TEST_ID=""
 printf 'Controlled runtime recovery drill passed; live runtime paths were not modified.\n'

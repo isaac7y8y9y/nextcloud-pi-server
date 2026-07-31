@@ -1,5 +1,4 @@
-cloud.example.invalid {
+@NEXTCLOUD_PUBLIC_HOSTNAME@ {
     reverse_proxy nextcloud-docker-app-1:80
     tls internal
 }
-

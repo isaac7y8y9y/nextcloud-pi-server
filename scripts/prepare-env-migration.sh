@@ -6,14 +6,16 @@ set -euo pipefail
 # validate local sanitized inputs -> verify a rollback backup -> validate the
 # live stack -> atomically create a new target .env -> validate it again.
 
-NEXTCLOUD_PI_HOST="${NEXTCLOUD_PI_HOST:?set NEXTCLOUD_PI_HOST}"
-NEXTCLOUD_PI_USER="${NEXTCLOUD_PI_USER:?set NEXTCLOUD_PI_USER}"
-NEXTCLOUD_REMOTE_PROJECT_DIR="${NEXTCLOUD_REMOTE_PROJECT_DIR:?set NEXTCLOUD_REMOTE_PROJECT_DIR}"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+source "$SCRIPT_DIR/lib/deployment-config.sh"
+load_deployment_config "$REPOSITORY_ROOT"
+
 NEXTCLOUD_DB_CONTAINER="${NEXTCLOUD_DB_CONTAINER:-nextcloud-docker-db-1}"
 NEXTCLOUD_BACKUP_MAX_AGE_SECONDS="${NEXTCLOUD_BACKUP_MAX_AGE_SECONDS:-3600}"
 
 readonly REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REQUIRED_ENV_KEYS=(MYSQL_ROOT_PASSWORD MYSQL_PASSWORD MYSQL_DATABASE MYSQL_USER)
 
 APPLY=0
@@ -87,7 +89,7 @@ check_remote_env() {
   # Exit status 2 means "not prepared" rather than malformed. Callers retain
   # that distinction so --check can still validate the current live stack.
   if remote "test ! -e '$env_file' && test ! -L '$env_file'" >/dev/null 2>&1; then
-    printf 'CHECK: Pi-only .env is absent at %s\n' "$env_file"
+    printf 'CHECK: Pi-only .env is absent\n'
     return 2
   fi
 

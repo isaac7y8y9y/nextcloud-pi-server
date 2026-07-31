@@ -7,9 +7,13 @@ set -euo pipefail
 # this computer, and its trap makes a best effort to leave maintenance mode on
 # every exit path.
 
-NEXTCLOUD_PI_HOST="${NEXTCLOUD_PI_HOST:?set NEXTCLOUD_PI_HOST}"
-NEXTCLOUD_PI_USER="${NEXTCLOUD_PI_USER:?set NEXTCLOUD_PI_USER}"
-NEXTCLOUD_DATA_ROOT="${NEXTCLOUD_DATA_ROOT:-/mnt/example-storage/nextcloud}"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+source "$SCRIPT_DIR/lib/deployment-config.sh"
+load_deployment_config "$REPOSITORY_ROOT"
+
+NEXTCLOUD_DATA_ROOT="${NEXTCLOUD_DATA_ROOT:-$NEXTCLOUD_STORAGE_MOUNT/nextcloud}"
 NEXTCLOUD_APP_CONTAINER="${NEXTCLOUD_APP_CONTAINER:-nextcloud-docker-app-1}"
 NEXTCLOUD_DB_CONTAINER="${NEXTCLOUD_DB_CONTAINER:-nextcloud-docker-db-1}"
 NEXTCLOUD_CADDY_DATA_VOLUME="${NEXTCLOUD_CADDY_DATA_VOLUME:-nextcloud-docker_caddy_data}"
@@ -17,9 +21,9 @@ NEXTCLOUD_CADDY_CONFIG_VOLUME="${NEXTCLOUD_CADDY_CONFIG_VOLUME:-nextcloud-docker
 NEXTCLOUD_RUNTIME_BACKUP_ROOT="${NEXTCLOUD_RUNTIME_BACKUP_ROOT:-$HOME/Projects/nextcloud-pi-backups}"
 
 readonly REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 APPLY=0
+MAINTENANCE_RECOVERY=0
 # These variables are cleanup capabilities, not just status. They are populated
 # only after this process successfully creates or reserves the matching target.
 STAGING_DIR=""
@@ -36,6 +40,7 @@ usage() {
 Usage:
   ./scripts/backup-runtime-state.sh --check
   ./scripts/backup-runtime-state.sh --apply
+  ./scripts/backup-runtime-state.sh --maintenance-off
 
 --check validates prerequisites and reports aggregate source sizes without
 changing the Pi. --apply briefly enables Nextcloud maintenance mode and writes
@@ -43,6 +48,10 @@ a protected runtime-backup-* directory below NEXTCLOUD_RUNTIME_BACKUP_ROOT.
 
 The backup contains private user data, a database dump, configuration secrets,
 and Caddy private keys. Never store it in Git or publish it.
+
+--maintenance-off is an explicit recovery action. It disables Nextcloud
+maintenance mode and verifies that the application left maintenance mode; it
+does not create or modify a backup.
 EOF
 }
 
@@ -167,9 +176,26 @@ disable_maintenance() {
     return 0
   else
     warn "automatic maintenance-mode cleanup failed"
-    warn "run: ssh $REMOTE docker exec --user www-data $NEXTCLOUD_APP_CONTAINER php /var/www/html/occ maintenance:mode --off"
+    warn "retry with: ./scripts/backup-runtime-state.sh --maintenance-off"
     return 1
   fi
+}
+
+recover_maintenance_mode() {
+  local connected_hostname
+  local connected_user
+
+  connected_hostname="$(remote hostname)"
+  connected_user="$(remote id -un)"
+  [[ "$connected_hostname" == "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" ]] ||
+    die "connected host does not match the configured deployment target"
+  [[ "$connected_user" == "$NEXTCLOUD_PI_USER" ]] ||
+    die "connected user does not match the configured deployment target"
+
+  remote "docker exec --user www-data '$NEXTCLOUD_APP_CONTAINER' php /var/www/html/occ maintenance:mode --off" >/dev/null 2>&1 ||
+    die "could not disable Nextcloud maintenance mode"
+  maintenance_is_off || die "Nextcloud remains in maintenance mode"
+  printf 'RECOVERY: Nextcloud maintenance mode is disabled\n'
 }
 
 acquire_locks() {
@@ -188,11 +214,11 @@ acquire_locks() {
     else
       exit 73
     fi
-  " >/dev/null || die "another runtime backup may be active; inspect $REMOTE_LOCK_DIR on the Pi"
+  " >/dev/null || die "another runtime backup may be active; inspect the Pi lock directory"
 
   local_lock_candidate="$NEXTCLOUD_RUNTIME_BACKUP_ROOT/.runtime-backup.lock"
   if ! mkdir "$local_lock_candidate"; then
-    die "another runtime backup may be publishing into $NEXTCLOUD_RUNTIME_BACKUP_ROOT"
+    die "another runtime backup may be publishing into the configured backup root"
   fi
   LOCAL_LOCK_DIR="$local_lock_candidate"
 }
@@ -213,7 +239,7 @@ release_remote_lock() {
     return 0
   fi
 
-  warn "could not remove this operation's Pi lock: $REMOTE_LOCK_DIR"
+  warn "could not remove this operation's Pi lock"
   return 1
 }
 
@@ -313,6 +339,10 @@ case "${1:-}" in
     [[ $# -eq 1 ]] || { usage >&2; exit 2; }
     APPLY=1
     ;;
+  --maintenance-off)
+    [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+    MAINTENANCE_RECOVERY=1
+    ;;
   -h|--help)
     usage
     exit 0
@@ -324,6 +354,10 @@ case "${1:-}" in
 esac
 
 require_safe_settings
+if (( MAINTENANCE_RECOVERY != 0 )); then
+  recover_maintenance_mode
+  exit 0
+fi
 prepare_backup_root
 check_prerequisites
 

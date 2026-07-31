@@ -1,51 +1,26 @@
 # Nextcloud Pi Server
 
-This repository documents and preserves the configuration for an existing working Nextcloud server running on a Raspberry Pi.
+This repository contains sanitized configuration, operational scripts, and
+documentation for a Nextcloud deployment. It is not a backup of uploaded
+files, database contents, certificates, or runtime state.
 
-The MacBook is the source of truth for documentation, sanitized configuration, and future deployment scripts. A private GitHub repository can later be used for backup and version history of this configuration. The Raspberry Pi remains the live deployment target and host for Nextcloud runtime data.
+## Local deployment identity
 
-This Git repository is not a backup of uploaded Nextcloud files, the Nextcloud data directory, or the MariaDB database. Those live data sets require separate backup and restore planning.
+Copy `config/deployment.env.example` to `config/deployment.env`, replace every
+placeholder locally, and set its mode to `0600`. The file is ignored by Git.
+Operational scripts load it without evaluating shell code; environment variables
+provided by the caller take precedence.
 
-Current working URL:
-
-```text
-https://cloud.example.invalid
-```
-
-Start with:
-
-- `docs/architecture.md` for the overall system shape.
-- `docs/current-configuration.md` for confirmed live settings.
-- `docs/security-boundaries.md` before adding any new files.
-- `docs/known-risks.md` before making improvements.
-- `docs/backup-and-rollback.md` before backing up or recovering configuration.
+Use `scripts/render-deployment-config.sh --output-dir <absolute-empty-directory>`
+to render Caddy, Compose, systemd, and fstab configuration for review or drift
+comparison. Rendering is not an installation procedure; deployment remains
+blocked by [the deployment safety requirements](docs/deployment.md). Never
+commit rendered output.
 
 ## Development workflow
 
-This repository keeps the primary checkout on `main` and uses a separate Git
-worktree for every task. The complete lifecycle and safety rules are in
-[`AGENTS.md`](AGENTS.md).
+The permanent checkout stays on `main`; use a named linked worktree for every
+change. See [AGENTS.md](AGENTS.md) for the required lifecycle.
 
-Create a task worktree from the latest `origin/main`:
-
-```bash
-./scripts/worktree-create.sh feat/example-change
-```
-
-The helper keeps worktrees beside the permanent checkout and flattens branch
-slashes into hyphens. For example:
-
-```text
-nextcloud-pi-server-root/
-├── nextcloud-pi-server
-└── nextcloud-pi-server-feat-example-change
-```
-
-After its GitHub pull request has merged, remove the clean local worktree and
-branch:
-
-```bash
-./scripts/worktree-cleanup.sh feat/example-change
-```
-
-Cleanup leaves the remote branch unchanged.
+Read [security boundaries](docs/security-boundaries.md) before handling backups
+or deployment configuration.

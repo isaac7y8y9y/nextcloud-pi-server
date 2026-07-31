@@ -1,97 +1,55 @@
 # Deployment
 
-This repository is preparing for future deployment from the Mac to the Raspberry Pi, but deployment is currently blocked.
+## Current status
 
-Planned deployment model:
+Deployment is blocked. The renderer produces protected files for review and
+drift comparison, but this repository does not yet provide an approved apply
+procedure that atomically installs them and performs rollback and health
+checks. Do not copy rendered files onto the Pi or restart services from this
+branch.
 
-```text
-Mac repository
-    ↓ preflight
-Remote configuration backup
-    ↓
-Safe .env preparation
-    ↓
-Configuration synchronization
-    ↓
-Remote validation
-    ↓
-Explicitly approved restart
-    ↓
-Post-deployment health check
-```
+## Safe preparation
 
-The current live Compose file on the Pi contains inline database credentials. The repository version uses `.env` references instead:
+Prepare the ignored local deployment environment from
+`config/deployment.env.example`, replace its placeholders, and restrict it to
+mode `0600`. Shell-provided `NEXTCLOUD_*` values override that file for
+one-off automation. `NEXTCLOUD_REMOTE_PROJECT_DIR` must end in
+`nextcloud-docker`; that basename preserves the existing Compose container and
+volume names across legacy and current Compose implementations.
 
-```text
-MYSQL_ROOT_PASSWORD
-MYSQL_PASSWORD
-MYSQL_DATABASE
-MYSQL_USER
-```
-
-That means the repository Compose file must not be deployed over the live file until the Pi has a secure, untracked `.env` file prepared at:
-
-```text
-/srv/example/nextcloud-docker/.env
-```
-
-Use `compose/.env.example` as the shape of that file, but never commit the real `.env` file.
-
-## Prepare the Pi-only `.env`
-
-After creating and verifying a fresh configuration backup, use the guarded
-helper from a feature worktree:
+The tracked configuration is a template set. Render it into a new, empty,
+protected directory for inspection:
 
 ```sh
-./scripts/prepare-env-migration.sh --check
-./scripts/prepare-env-migration.sh --apply \
-  "$HOME/Projects/nextcloud-pi-backups/config-backup-YYYYMMDDTHHMMSSZ"
+scripts/render-deployment-config.sh --output-dir /absolute/private/output
 ```
 
-`--check` is read-only. `--apply` first verifies the selected backup, confirms
-it is no more than one hour old, and binds it to the connected Pi, user,
-project path, and current live Compose file. The backup must remain at the
-canonical path recorded in its manifest. The helper then creates a new `0600`
-`.env` from the running MariaDB container's existing database environment. It
-refuses to overwrite an existing `.env`, suppresses secret values, and does not
-replace Compose configuration or restart services. Both modes validate the
-resolved live Compose configuration with quiet output. Set
-`NEXTCLOUD_BACKUP_MAX_AGE_SECONDS` only when an intentionally reviewed
-maintenance window requires a different freshness limit.
-The generated values are single-quoted so Docker Compose preserves literal
-characters such as `$`. To avoid changing credentials through parser-specific
-escaping, the helper refuses values containing a single quote, backslash, or
-line break.
-Stop and use an intentionally reviewed manual secret-provisioning procedure if
-that check fails.
-Use `--apply` only after explicitly approving creation of the exact Pi target
-file.
+The output root contains `docker-compose.yml` beside `caddy/Caddyfile`, so the
+relative Caddy bind source resolves correctly. `systemd/` and `storage/` are
+separate review inputs. Rendering does not contact or modify the Pi, and the
+output must never be committed.
 
-Re-run `--check` after the command succeeds. The later deployment phase must
-validate a staged copy of the sanitized Compose configuration before it can
-replace the current inline-credential Compose file.
+Database credentials stay in the Pi project’s untracked Compose `.env`.
+`scripts/prepare-env-migration.sh --check` is read-only; its `--apply` mode
+requires a verified configuration backup and does not restart services.
 
-Deployment remains blocked until:
+## Requirements before deployment is unblocked
 
-1. The live configuration is backed up.
-2. A secure untracked `.env` is prepared on the Pi.
-3. The repository Compose file is validated on the Pi.
-4. A rollback procedure exists.
-5. The user explicitly approves restarting the stack.
+An installation procedure must provide all of the following before it can be
+used:
 
-The preflight script is read-only. It checks whether the Pi is reachable, whether Docker and storage are available, whether the expected containers exist, and whether safe configuration elements still match this repository. It must not restart services, copy files, or print live database credentials.
+1. Validate the private deployment file, rendered Compose configuration, and
+   exact target identity without printing private values.
+2. Create and verify a current configuration backup and a usable runtime
+   recovery point outside Git.
+3. Compare rendered files with live files and show a value-redacted dry run.
+4. Exclude uploaded data, database storage, Caddy runtime volumes, and the
+   Pi-only `.env` from every copy or synchronization operation.
+5. Obtain explicit approval immediately before replacing live configuration or
+   restarting services.
+6. Perform health checks for Docker, MariaDB, Nextcloud, HTTPS, storage mounts,
+   and maintenance mode.
+7. Roll back to the verified backup if installation or health checks fail.
 
-Deployment must never overwrite or synchronize these live data paths:
-
-```text
-/mnt/example-storage/nextcloud
-/mnt/example-storage/nextcloud/data
-/mnt/example-storage/nextcloud_db
-```
-
-Those directories contain the live Nextcloud application state, uploaded user data, and MariaDB database files. They require separate backup and restore procedures, not Git synchronization.
-
-Future deployment work must invoke the verified configuration backup workflow
-before any file replacement, then add a validated `.env` migration, a dry-run
-comparison, rollback instructions, and a final approval gate before any
-restart. See [`backup-and-rollback.md`](backup-and-rollback.md).
+The history-sanitization work in this branch does not authorize a Pi deployment
+or service restart.

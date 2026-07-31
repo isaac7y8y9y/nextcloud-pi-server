@@ -2,5 +2,4 @@
 # Recheck this UUID if the drive is reformatted or replaced.
 # The nofail option permits booting without the drive.
 # If Nextcloud starts without this mount, incorrect local directories may be created.
-UUID=@NEXTCLOUD_STORAGE_UUID@   /mnt/example-storage     ext4    defaults,nofail  0  2
-
+UUID=@NEXTCLOUD_STORAGE_UUID@   @NEXTCLOUD_STORAGE_MOUNT@     ext4    defaults,nofail  0  2

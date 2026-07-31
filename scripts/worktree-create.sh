@@ -54,7 +54,11 @@ fi
 
 [[ ! -e "$WORKTREE_PATH" ]] || die "worktree path already exists: $WORKTREE_PATH"
 
-git -C "$REPO_ROOT" worktree add -b "$BRANCH" "$WORKTREE_PATH" origin/main
+# Start from origin/main without making it the task branch's upstream. Otherwise
+# IDE "Push" actions can send the task branch directly to main.
+git -C "$REPO_ROOT" worktree add --no-track -b "$BRANCH" "$WORKTREE_PATH" origin/main
 
 printf '\nCreated worktree for %s at:\n%s\n\nEnter it with:\ncd %q\n' \
   "$BRANCH" "$WORKTREE_PATH" "$WORKTREE_PATH"
+
+printf '\nFirst publish with:\ngit push -u origin %q\n' "$BRANCH"

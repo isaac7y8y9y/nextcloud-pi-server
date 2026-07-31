@@ -5,12 +5,11 @@ set -euo pipefail
 # runtime facts and configuration drift; they never copy configuration, print
 # database values, or restart the Pi services.
 
-# These defaults describe the existing deployment, while environment overrides
-# let an operator validate a replacement Pi without editing the repository.
-NEXTCLOUD_PI_HOST="${NEXTCLOUD_PI_HOST:?set NEXTCLOUD_PI_HOST}"
-NEXTCLOUD_PI_USER="${NEXTCLOUD_PI_USER:?set NEXTCLOUD_PI_USER}"
-NEXTCLOUD_REMOTE_PROJECT_DIR="${NEXTCLOUD_REMOTE_PROJECT_DIR:?set NEXTCLOUD_REMOTE_PROJECT_DIR}"
-NEXTCLOUD_STORAGE_MOUNT="${NEXTCLOUD_STORAGE_MOUNT:?set NEXTCLOUD_STORAGE_MOUNT}"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+source "$SCRIPT_DIR/lib/deployment-config.sh"
+load_deployment_config "$REPOSITORY_ROOT"
 
 REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
 EXPECTED_REPO_NAME="nextcloud-pi-server"
@@ -25,6 +24,8 @@ SECRETS_MIGRATED=0
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+RENDERED_CONFIG_DIR="$TMP_DIR/rendered"
+"$SCRIPT_DIR/render-deployment-config.sh" --output-dir "$RENDERED_CONFIG_DIR"
 
 section() {
   printf '\n== %s ==\n' "$1"
@@ -138,9 +139,9 @@ if git rev-parse --show-toplevel >/dev/null 2>&1; then
   repo_root="$(git rev-parse --show-toplevel)"
   repo_name="$(basename "$repo_root")"
   if [[ "$repo_name" == "$EXPECTED_REPO_NAME" || "$repo_name" == "$EXPECTED_REPO_NAME-"* ]]; then
-    record PASS "Running from expected Git repository or task worktree: $repo_root"
+    record PASS "Running from the expected Git repository or task worktree"
   else
-    record FAIL "Unexpected Git repository: $repo_root"
+    record FAIL "Unexpected Git repository"
   fi
 else
   record FAIL "Not running inside a Git repository"
@@ -215,28 +216,38 @@ else
   record PASS "No direct MYSQL assignments found outside .env.example"
 fi
 
+public_safety_args=(--deployment-env "$NEXTCLOUD_DEPLOYMENT_ENV_FILE")
+if [[ -e "compose/.env" ]]; then
+  public_safety_args+=(--compose-env "compose/.env")
+fi
+if python3 "$SCRIPT_DIR/check-public-safety.py" "${public_safety_args[@]}" >/dev/null 2>&1; then
+  record PASS "Tracked files do not match local deployment identifiers or credentials"
+else
+  record FAIL "Public-safety scan found tracked sensitive material or an invalid private environment file"
+fi
+
 section "Remote connectivity checks"
 
 if remote "true" >/dev/null 2>&1; then
-  record PASS "SSH connection succeeded: $REMOTE"
+  record PASS "SSH connection succeeded"
 else
-  record FAIL "SSH connection failed: $REMOTE"
+  record FAIL "SSH connection failed"
   printf '\nDeployment remains blocked until SSH connectivity, a verified configuration backup, a safe .env migration, and Pi-side validation are complete.\n'
   exit 1
 fi
 
 remote_user="$(remote "id -un" 2>/dev/null || true)"
 if [[ "$remote_user" == "$NEXTCLOUD_PI_USER" ]]; then
-  record PASS "Remote username is $remote_user"
+  record PASS "Remote username matches the configured deployment target"
 else
   record FAIL "Remote username mismatch: ${remote_user:-unknown}"
 fi
 
 remote_hostname="$(remote "hostname" 2>/dev/null || true)"
-if [[ "$remote_hostname" == "example-pi-system" ]]; then
-  record PASS "Remote hostname is example-pi-system"
+if [[ "$remote_hostname" == "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" ]]; then
+  record PASS "Remote hostname matches the configured deployment target"
 else
-  record WARNING "Remote hostname is ${remote_hostname:-unknown}, expected example-pi-system"
+  record WARNING "Remote hostname does not match the configured deployment target"
 fi
 
 if remote "command -v docker >/dev/null 2>&1" >/dev/null 2>&1; then
@@ -258,18 +269,18 @@ else
 fi
 
 if remote "findmnt -rn --target '$NEXTCLOUD_STORAGE_MOUNT' >/dev/null 2>&1" >/dev/null 2>&1; then
-  record PASS "$NEXTCLOUD_STORAGE_MOUNT is mounted"
+  record PASS "Configured storage mount is present"
 else
-  record FAIL "$NEXTCLOUD_STORAGE_MOUNT is not mounted"
+  record FAIL "Configured storage mount is not present"
 fi
 
 mount_type="$(remote "findmnt -rn --target '$NEXTCLOUD_STORAGE_MOUNT' -o FSTYPE" 2>/dev/null || true)"
 if [[ "$mount_type" == "ext4" ]]; then
-  record PASS "$NEXTCLOUD_STORAGE_MOUNT filesystem is ext4"
+  record PASS "Configured storage mount filesystem is ext4"
 elif [[ -n "$mount_type" ]]; then
-  record FAIL "$NEXTCLOUD_STORAGE_MOUNT filesystem is $mount_type, expected ext4"
+  record FAIL "Configured storage mount filesystem is not ext4"
 else
-  record UNKNOWN "Unable to determine filesystem type for $NEXTCLOUD_STORAGE_MOUNT"
+  record UNKNOWN "Unable to determine configured storage mount filesystem type"
 fi
 
 for dir in \
@@ -278,9 +289,9 @@ for dir in \
   "$NEXTCLOUD_STORAGE_MOUNT/nextcloud_db" \
   "$NEXTCLOUD_REMOTE_PROJECT_DIR"; do
   if remote "test -d '$dir'" >/dev/null 2>&1; then
-    record PASS "Remote directory exists: $dir"
+    record PASS "Required remote directory exists"
   else
-    record FAIL "Remote directory missing: $dir"
+    record FAIL "Required remote directory is missing"
   fi
 done
 
@@ -288,7 +299,7 @@ remote_env_file="$NEXTCLOUD_REMOTE_PROJECT_DIR/.env"
 # Preflight validates the target's shape and permissions only. It never reads
 # or prints values from the credential-bearing file.
 if remote "test ! -e '$remote_env_file' && test ! -L '$remote_env_file'" >/dev/null 2>&1; then
-  record UNKNOWN "Pi-only .env file has not been prepared: $remote_env_file"
+  record UNKNOWN "Pi-only .env file has not been prepared"
 elif remote "test -f '$remote_env_file' && test ! -L '$remote_env_file'" >/dev/null 2>&1; then
   remote_env_mode="$(remote "if stat -f '%Lp' '$remote_env_file' >/dev/null 2>&1; then stat -f '%Lp' '$remote_env_file'; else stat -c '%a' '$remote_env_file'; fi" 2>/dev/null || true)"
   if [[ "$remote_env_mode" == "600" ]]; then
@@ -298,7 +309,7 @@ elif remote "test -f '$remote_env_file' && test ! -L '$remote_env_file'" >/dev/n
     record FAIL "Pi-only .env file permissions are ${remote_env_mode:-unknown}, expected 0600"
   fi
 else
-  record FAIL "Pi-only .env path is not a regular file: $remote_env_file"
+  record FAIL "Pi-only .env path is not a regular file"
 fi
 
 # Count only active Compose list assignments, and accept a value only when the
@@ -345,8 +356,6 @@ section "Container checks"
 for container in nextcloud-docker-app-1 nextcloud-docker-db-1 nextcloud-docker-caddy-1; do
   if remote "docker inspect '$container' >/dev/null 2>&1" >/dev/null 2>&1; then
     record PASS "Container exists: $container"
-    remote "docker inspect '$container' --format 'name={{.Name}} image={{.Config.Image}} running={{.State.Running}} restart={{.HostConfig.RestartPolicy.Name}} ports={{json .NetworkSettings.Ports}}'"
-    remote "docker inspect '$container' --format '{{range .Mounts}}mount={{.Source}} -> {{.Destination}}{{println}}{{end}}'"
   else
     record FAIL "Container missing: $container"
   fi
@@ -356,33 +365,30 @@ section "Nextcloud checks"
 
 if remote "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status" >/dev/null 2>&1; then
   record PASS "Nextcloud occ status command succeeded"
-  remote "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status | sed -n '/installed:/p;/version:/p;/versionstring:/p;/maintenance:/p;/needsDbUpgrade:/p'"
 else
   record FAIL "Nextcloud occ status command failed"
 fi
 
 if remote "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ config:system:get datadirectory" >/dev/null 2>&1; then
   record PASS "Nextcloud data directory was read"
-  remote "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ config:system:get datadirectory"
 else
   record FAIL "Unable to read Nextcloud data directory"
 fi
 
 if remote "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ config:system:get trusted_domains" >/dev/null 2>&1; then
   record PASS "Nextcloud trusted domains were read"
-  remote "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ config:system:get trusted_domains"
 else
   record UNKNOWN "Unable to read Nextcloud trusted domains"
 fi
 
 section "Safe configuration comparison"
 
-compare_normalized_file_to_remote_command "Caddyfile" "caddy/Caddyfile" "cat '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile'"
-compare_normalized_file_to_remote_command "systemd service" "systemd/nextcloud.service" "cat /etc/systemd/system/nextcloud.service"
+compare_normalized_file_to_remote_command "Caddyfile" "$RENDERED_CONFIG_DIR/caddy/Caddyfile" "cat '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile'"
+compare_normalized_file_to_remote_command "systemd service" "$RENDERED_CONFIG_DIR/systemd/nextcloud.service" "cat /etc/systemd/system/nextcloud.service"
 
-local_fstab_entry="$TMP_DIR/nextcloud.example.invalid"
+local_fstab_entry="$TMP_DIR/fstab.local"
 remote_fstab_entry="$TMP_DIR/fstab.remote"
-grep -v '^[[:space:]]*#' storage/fstab.nextcloud | sed '/^[[:space:]]*$/d' >"$local_fstab_entry"
+grep -v '^[[:space:]]*#' "$RENDERED_CONFIG_DIR/storage/fstab.nextcloud" | sed '/^[[:space:]]*$/d' >"$local_fstab_entry"
 if remote "grep -F ' $NEXTCLOUD_STORAGE_MOUNT ' /etc/fstab" >"$remote_fstab_entry"; then
   if cmp -s "$local_fstab_entry" "$remote_fstab_entry"; then
     record PASS "fstab entry matches live /etc/fstab"
@@ -390,7 +396,7 @@ if remote "grep -F ' $NEXTCLOUD_STORAGE_MOUNT ' /etc/fstab" >"$remote_fstab_entr
     drift "fstab entry differs from live /etc/fstab"
   fi
 else
-  record FAIL "Unable to read live fstab entry for $NEXTCLOUD_STORAGE_MOUNT"
+  record FAIL "Unable to read the live fstab entry"
 fi
 
 services="$(remote_compose_config "--services" 2>/dev/null || true)"
