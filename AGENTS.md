@@ -63,9 +63,13 @@ separate linked worktree for every feature or maintenance branch.
 - Preserve the security and deployment boundaries documented under `docs/`.
 - Treat `docs/known-risks.md` as baseline context. Report a known risk only when
   the change introduces it, worsens it, or makes it newly reachable.
-- Use the project-scoped `review_my_pr` custom agent for local pull-request
-  reviews. Launch it with high reasoning and read-only permissions; it must not
-  delegate further.
+- Use the project-scoped `code_review` custom agent for a general engineering
+  review of a diff. Launch it with high reasoning and read-only permissions; it
+  must not delegate further.
+- Use the project-scoped `review_my_pr` custom agent for pull-request review
+  when an implementation-plan link or reference is available. It verifies plan
+  conformance and then applies the canonical engineering standard; launch it
+  with high reasoning and read-only permissions, and do not let it delegate.
 - Use the project-scoped `plan_review` custom agent after an implementation plan
   is written and before implementation begins. Provide the original ticket and
   proposed plan; launch it with high reasoning and read-only permissions. It
