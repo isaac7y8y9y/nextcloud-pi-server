@@ -66,3 +66,8 @@ separate linked worktree for every feature or maintenance branch.
 - Use the project-scoped `review_my_pr` custom agent for local pull-request
   reviews. Launch it with high reasoning and read-only permissions; it must not
   delegate further.
+- Use the project-scoped `plan_review` custom agent after an implementation plan
+  is written and before implementation begins. Provide the original ticket and
+  proposed plan; launch it with high reasoning and read-only permissions. It
+  must not delegate further, write or revise the plan, implement changes, or
+  perform a pull-request review.
