@@ -8,8 +8,17 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
+PREFLIGHT_MODE="${1:---readiness}"
+[[ $# -le 1 && ( "$PREFLIGHT_MODE" == "--readiness" || "$PREFLIGHT_MODE" == "--conformance" ) ]] || {
+  printf 'Usage: %s [--readiness|--conformance]\n' "$0" >&2
+  exit 2
+}
+
 source "$SCRIPT_DIR/lib/deployment-config.sh"
+source "$SCRIPT_DIR/lib/image-lock.sh"
+source "$SCRIPT_DIR/lib/launcher-prerequisites.sh"
 load_deployment_config "$REPOSITORY_ROOT"
+image_lock_load "$REPOSITORY_ROOT"
 
 REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
 EXPECTED_REPO_NAME="nextcloud-pi-server"
@@ -46,6 +55,25 @@ record() {
   printf '%-7s %s\n' "$status" "$message"
 }
 
+record_authorization_boundary() {
+  [[ "$PREFLIGHT_MODE" != "--conformance" ]] || return 0
+  if (( ENV_PREPARED != 0 && SECRETS_MIGRATED != 0 )); then
+    record WARNING "Phase 1 secret migration is prepared; Phase 2 deployment and any restart still require validation, rollback planning, and explicit approval"
+  else
+    record WARNING "Create and verify a configuration backup, then complete .env migration, Pi-side validation, rollback planning, and explicit restart approval before deployment"
+  fi
+}
+
+print_authorization_boundary() {
+  if [[ "$PREFLIGHT_MODE" == "--conformance" ]]; then
+    printf '\nHardened deployment conformance passed. Future deployment, recovery, or restart mutations require their own validation, recovery plan, and explicit approval.\n'
+  elif (( ENV_PREPARED != 0 && SECRETS_MIGRATED != 0 )); then
+    printf '\nPhase 1 secret migration checks passed. Phase 2 deployment and any restart remain blocked pending validation, rollback planning, and explicit approval.\n'
+  else
+    printf '\nDeployment remains blocked until a verified configuration backup, safe .env migration, Pi-side validation, rollback planning, and explicit restart approval are complete.\n'
+  fi
+}
+
 # Keep all remote access non-interactive and centralized so a preflight run
 # cannot fall back to a password prompt or a different SSH behavior per check.
 remote() {
@@ -58,7 +86,18 @@ remote_sh() {
 
 drift() {
   DRIFT_COUNT=$((DRIFT_COUNT + 1))
-  record WARNING "$1"
+  if [[ "$PREFLIGHT_MODE" == "--readiness" ]] && readiness_transition "$1"; then
+    record WARNING "Approved readiness transition: $1"
+  else
+    record FAIL "Unexpected configuration drift: $1"
+  fi
+}
+
+readiness_transition() {
+  case "$1" in
+    "Caddyfile active configuration differs from live configuration"|"Root-only startup launcher differs from live configuration"|"Root-only active-image validator differs from live configuration"|"systemd service active configuration differs from live configuration"|"Docker storage mount drop-in differs from live configuration"|"App published port differs from the reviewed readiness baseline"|"App still exposes a host port") return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 require_local_file() {
@@ -83,6 +122,7 @@ compare_file_to_remote_command() {
   local label="$1"
   local local_file="$2"
   local remote_command="$3"
+  local allowed_absent_path="${4:-}"
   local remote_file="$TMP_DIR/${label//[^A-Za-z0-9_.-]/_}.remote"
 
   if remote "$remote_command" >"$remote_file"; then
@@ -92,7 +132,11 @@ compare_file_to_remote_command() {
       drift "$label differs from live configuration"
     fi
   else
-    record FAIL "Unable to read live $label"
+    if [[ -n "$allowed_absent_path" ]] && remote "test ! -e '$allowed_absent_path' && test ! -L '$allowed_absent_path'" >/dev/null 2>&1; then
+      drift "$label differs from live configuration"
+    else
+      record FAIL "Unable to read live $label"
+    fi
   fi
 }
 
@@ -107,6 +151,7 @@ compare_normalized_file_to_remote_command() {
   local label="$1"
   local local_file="$2"
   local remote_command="$3"
+  local allowed_absent_path="${4:-}"
   local remote_file="$TMP_DIR/${label//[^A-Za-z0-9_.-]/_}.remote"
   local normalized_local="$TMP_DIR/${label//[^A-Za-z0-9_.-]/_}.local.normalized"
   local normalized_remote="$TMP_DIR/${label//[^A-Za-z0-9_.-]/_}.remote.normalized"
@@ -122,7 +167,11 @@ compare_normalized_file_to_remote_command() {
       drift "$label active configuration differs from live configuration"
     fi
   else
-    record FAIL "Unable to read live $label"
+    if [[ -n "$allowed_absent_path" ]] && remote "test ! -e '$allowed_absent_path' && test ! -L '$allowed_absent_path'" >/dev/null 2>&1; then
+      drift "$label active configuration differs from live configuration"
+    else
+      record FAIL "Unable to read live $label"
+    fi
   fi
 }
 
@@ -165,6 +214,7 @@ require_local_file "compose/docker-compose.yml"
 require_local_file "compose/.env.example"
 require_local_file "caddy/Caddyfile"
 require_local_file "systemd/nextcloud.service"
+require_local_file "systemd/docker.service.d/nextcloud-storage.conf"
 require_local_file "storage/fstab.nextcloud"
 
 if git ls-files --error-unmatch .env >/dev/null 2>&1; then
@@ -244,7 +294,7 @@ remote_hostname="$(remote "hostname" 2>/dev/null || true)"
 if [[ "$remote_hostname" == "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" ]]; then
   record PASS "Remote hostname matches the configured deployment target"
 else
-  record WARNING "Remote hostname does not match the configured deployment target"
+  record FAIL "Remote hostname does not match the configured deployment target"
 fi
 
 if remote "command -v docker >/dev/null 2>&1" >/dev/null 2>&1; then
@@ -259,10 +309,29 @@ else
   record FAIL "Docker daemon is not reachable"
 fi
 
-if remote "docker compose version >/dev/null 2>&1 || docker-compose version >/dev/null 2>&1" >/dev/null 2>&1; then
-  record PASS "Docker Compose is available"
+check_active_image_identity() {
+  local active_image_mode
+  if remote "sudo -n /usr/local/libexec/nextcloud-pi-validate-active-images" >/dev/null 2>&1; then
+    active_image_mode="$(remote "sudo -n awk -F= '\$1 == \"NEXTCLOUD_ACTIVE_IMAGES_MODE\" { print \$2 }' /etc/nextcloud-pi/active-images.env" 2>/dev/null || true)"
+    if [[ "$active_image_mode" == source ]]; then
+      record PASS "Protected source active-image record matches local image tags"
+    elif [[ "$PREFLIGHT_MODE" == "--readiness" ]]; then
+      record FAIL "Protected active-image record is recovered; readiness requires source mode"
+    else
+      record PASS "Protected recovered active-image record matches local image tags"
+    fi
+  elif [[ "$PREFLIGHT_MODE" == "--readiness" ]] && remote "sudo -n test ! -e /etc/nextcloud-pi/active-images.env && sudo -n test ! -L /etc/nextcloud-pi/active-images.env" >/dev/null 2>&1; then
+    record WARNING "Active image record is absent; this is reviewed safety-baseline drift"
+  else
+    record FAIL "Protected active image record is invalid, unreadable, or differs"
+  fi
+}
+check_active_image_identity
+
+if launcher_prerequisites_remote >/dev/null 2>&1; then
+  record PASS "Docker Compose launcher prerequisites are available"
 else
-  record FAIL "Docker Compose is not available"
+  record FAIL "Docker Compose launcher prerequisites are unavailable"
 fi
 
 if remote "findmnt -rn --target '$NEXTCLOUD_STORAGE_MOUNT' >/dev/null 2>&1" >/dev/null 2>&1; then
@@ -380,8 +449,11 @@ fi
 
 section "Safe configuration comparison"
 
-compare_normalized_file_to_remote_command "Caddyfile" "$RENDERED_CONFIG_DIR/caddy/Caddyfile" "cat '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile'"
-compare_normalized_file_to_remote_command "systemd service" "$RENDERED_CONFIG_DIR/systemd/nextcloud.service" "cat /etc/systemd/system/nextcloud.service"
+compare_normalized_file_to_remote_command "Caddyfile" "$RENDERED_CONFIG_DIR/caddy/Caddyfile" "cat '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile'" "$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile"
+compare_file_to_remote_command "Root-only startup launcher" "$RENDERED_CONFIG_DIR/launcher/nextcloud-pi-compose-start" "sudo -n cat /usr/local/libexec/nextcloud-pi-compose-start" "/usr/local/libexec/nextcloud-pi-compose-start"
+compare_file_to_remote_command "Root-only active-image validator" "$RENDERED_CONFIG_DIR/launcher/nextcloud-pi-validate-active-images" "sudo -n cat /usr/local/libexec/nextcloud-pi-validate-active-images" "/usr/local/libexec/nextcloud-pi-validate-active-images"
+compare_normalized_file_to_remote_command "systemd service" "$RENDERED_CONFIG_DIR/systemd/nextcloud.service" "cat /etc/systemd/system/nextcloud.service" "/etc/systemd/system/nextcloud.service"
+compare_file_to_remote_command "Docker storage mount drop-in" "$RENDERED_CONFIG_DIR/systemd/docker.service.d/nextcloud-storage.conf" "cat /etc/systemd/system/docker.service.d/nextcloud-storage.conf" "/etc/systemd/system/docker.service.d/nextcloud-storage.conf"
 
 local_fstab_entry="$TMP_DIR/fstab.local"
 remote_fstab_entry="$TMP_DIR/fstab.remote"
@@ -449,7 +521,11 @@ grep -F "nextcloud-docker_caddy_config" <<<"$caddy_mounts" >/dev/null && record 
 
 app_ports="$(remote "docker inspect nextcloud-docker-app-1 --format '{{json .NetworkSettings.Ports}}'" 2>/dev/null || true)"
 caddy_ports="$(remote "docker inspect nextcloud-docker-caddy-1 --format '{{json .NetworkSettings.Ports}}'" 2>/dev/null || true)"
-grep -F '"8080"' <<<"$app_ports" >/dev/null && record PASS "App published port includes 8080" || drift "App published port differs from expected 8080"
+if [[ "$PREFLIGHT_MODE" == "--conformance" ]]; then
+  ! grep -F '"8080"' <<<"$app_ports" >/dev/null && record PASS "App has no published host port" || drift "App still exposes a host port"
+else
+  grep -F '"8080"' <<<"$app_ports" >/dev/null && record PASS "Readiness baseline app port is 8080" || drift "App published port differs from the reviewed readiness baseline"
+fi
 grep -F '"80"' <<<"$caddy_ports" >/dev/null && grep -F '"443"' <<<"$caddy_ports" >/dev/null && record PASS "Caddy published ports include 80 and 443" || drift "Caddy published ports differ from expected 80/443"
 
 section "Summary"
@@ -470,21 +546,23 @@ if (( DRIFT_COUNT == 0 )); then
   record PASS "Repository matches the checked working architecture"
   record PASS "No checked configuration drift detected"
 else
-  record WARNING "Configuration drift was detected in checked items"
+  if [[ "$PREFLIGHT_MODE" == "--conformance" ]]; then
+    record FAIL "Hardened conformance requires no checked configuration drift"
+  else
+    record WARNING "Readiness detected only reviewed candidate drift; deploy-config --plan binds the exact pre-state"
+  fi
 fi
 
-record WARNING "Deployment should remain blocked"
-if (( ENV_PREPARED != 0 && SECRETS_MIGRATED != 0 )); then
-  record WARNING "Phase 1 secret migration is prepared; Phase 2 deployment and any restart still require validation, rollback planning, and explicit approval"
+if [[ "$PREFLIGHT_MODE" == "--conformance" ]]; then
+  record PASS "Hardened conformance checks completed"
 else
-  record WARNING "Create and verify a configuration backup, then complete .env migration, Pi-side validation, rollback planning, and explicit restart approval before deployment"
+  record WARNING "Readiness is not authorization to deploy"
 fi
+record_authorization_boundary
+
+(( FAIL_COUNT == 0 )) || exit 1
 
 printf '\nTotals: PASS=%d WARNING=%d FAIL=%d UNKNOWN=%d DRIFT=%d\n' \
   "$PASS_COUNT" "$WARNING_COUNT" "$FAIL_COUNT" "$UNKNOWN_COUNT" "$DRIFT_COUNT"
 
-if (( ENV_PREPARED != 0 && SECRETS_MIGRATED != 0 )); then
-  printf '\nPhase 1 secret migration checks passed. Phase 2 deployment and any restart remain blocked pending validation, rollback planning, and explicit approval.\n'
-else
-  printf '\nDeployment remains blocked until a verified configuration backup, safe .env migration, Pi-side validation, rollback planning, and explicit restart approval are complete.\n'
-fi
+print_authorization_boundary

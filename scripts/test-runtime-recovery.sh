@@ -10,6 +10,8 @@ readonly REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 source "$SCRIPT_DIR/lib/deployment-config.sh"
 load_deployment_config "$REPOSITORY_ROOT"
+source "$SCRIPT_DIR/lib/image-lock.sh"
+image_lock_load "$REPOSITORY_ROOT"
 
 NEXTCLOUD_DATA_ROOT="${NEXTCLOUD_DATA_ROOT:-$NEXTCLOUD_STORAGE_MOUNT/nextcloud}"
 NEXTCLOUD_DB_CONTAINER="${NEXTCLOUD_DB_CONTAINER:-nextcloud-docker-db-1}"
@@ -52,6 +54,27 @@ warn() {
 
 remote() {
   ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" "$@"
+}
+
+validate_runtime_recovery_image_identity() {
+  local tag expected
+
+  # Before the safety baseline exists, the source lock is the only available
+  # identity authority. Once a validator exists, an absent or malformed record
+  # must fail there instead of silently falling back to source mode.
+  if remote "sudo -n test -x /usr/local/libexec/nextcloud-pi-validate-active-images"; then
+    remote "sudo -n /usr/local/libexec/nextcloud-pi-validate-active-images" ||
+      { die "installed active-image validator rejected the Pi image state"; return 1; }
+    return 0
+  fi
+
+  remote "sudo -n test ! -e /etc/nextcloud-pi/active-images.env && sudo -n test ! -L /etc/nextcloud-pi/active-images.env" ||
+    { die "active-image validator is absent but an active-image record exists"; return 1; }
+  while IFS= read -r tag; do
+    expected="$(image_lock_expected_id "$tag")"
+    remote "docker image inspect --format '{{.Id}}' '$tag' | grep -Fx '$expected' >/dev/null" </dev/null ||
+      { die "source-locked image is missing or differs: $tag"; return 1; }
+  done < <(image_lock_tags)
 }
 
 is_safe_remote_path() {
@@ -152,6 +175,8 @@ verify_target_binding() {
   [[ "$(manifest_value source_nextcloud)" == "$NEXTCLOUD_DATA_ROOT" ]] || die "backup Nextcloud path does not match the configured live path"
   [[ "$(manifest_value database_container)" == "$NEXTCLOUD_DB_CONTAINER" ]] || die "backup database container does not match"
   [[ "$(manifest_value database_image)" == "$current_database_image" ]] || die "backup database image does not match"
+  [[ "$current_database_image" == "$NEXTCLOUD_IMAGE_DB_TAG" ]] || die "live database tag is not locked"
+  [[ "$(remote "docker image inspect --format '{{.Id}}' '$NEXTCLOUD_IMAGE_DB_TAG'")" == "$NEXTCLOUD_IMAGE_DB_ID" ]] || die "live database image ID is not locked"
   [[ "$(manifest_value caddy_data_volume)" == "$NEXTCLOUD_CADDY_DATA_VOLUME" ]] || die "backup Caddy data volume does not match"
   [[ "$(manifest_value caddy_config_volume)" == "$NEXTCLOUD_CADDY_CONFIG_VOLUME" ]] || die "backup Caddy config volume does not match"
 
@@ -267,6 +292,7 @@ printf 'CHECK: isolated Caddy TLS restore matches its protected archives\n'
 printf 'Restoring MariaDB into a disposable container and configured storage bind directory...\n'
 database_image="$(manifest_value database_image)"
 [[ "$database_image" =~ ^[A-Za-z0-9][A-Za-z0-9_./:@-]*$ ]] || die "manifest database image contains unsupported characters"
+validate_runtime_recovery_image_identity
 remote "set -eu
   # The random test credential exists only in a 0600 remote temp file and the
   # disposable container environment; it is never returned to local output.
@@ -277,14 +303,19 @@ remote "set -eu
   recovery_password=\"\$(openssl rand -hex 32)\"
   printf 'MARIADB_ROOT_PASSWORD=%s\\nMARIADB_DATABASE=nextcloud_recovery\\n' \"\$recovery_password\" >\"\$test_environment\"
   test -d '$REMOTE_TEST_ROOT/mariadb-data' && test ! -L '$REMOTE_TEST_ROOT/mariadb-data'
-  docker run -d --name '$TEST_DB_CONTAINER' --env-file \"\$test_environment\" -v '$REMOTE_TEST_ROOT/mariadb-data:/var/lib/mysql' '$database_image' >/dev/null
+  docker image inspect '$database_image' >/dev/null
+  docker run --pull=never -d --name '$TEST_DB_CONTAINER' --env-file \"\$test_environment\" -v '$REMOTE_TEST_ROOT/mariadb-data:/var/lib/mysql' '$database_image' >/dev/null
   rm -f \"\$test_environment\"
   trap - EXIT HUP INT TERM
   ready=0
   attempt=0
   while test \"\$attempt\" -lt 60; do
     attempt=\$((attempt + 1))
-    if docker exec '$TEST_DB_CONTAINER' sh -c 'MYSQL_PWD=\"\$MARIADB_ROOT_PASSWORD\" mariadb-admin ping -uroot --silent' >/dev/null 2>&1; then
+    # The image's temporary initialization server accepts socket connections
+    # with networking disabled. Require a real TCP query so readiness proves
+    # the final server has completed the entrypoint handoff.
+    if docker exec '$TEST_DB_CONTAINER' sh -c 'MYSQL_PWD=\"\$MARIADB_ROOT_PASSWORD\" mariadb --protocol=tcp --host=127.0.0.1 -uroot --skip-column-names --batch \"\$MARIADB_DATABASE\" -e \"SELECT 1\"' |
+      grep -Fx 1 >/dev/null 2>&1; then
       ready=1
       break
     fi
@@ -293,10 +324,10 @@ remote "set -eu
   test \"\$ready\" = 1
 " >/dev/null
 
-remote "docker exec -i '$TEST_DB_CONTAINER' sh -eu -c 'export MYSQL_PWD=\"\$MARIADB_ROOT_PASSWORD\"; exec mariadb -uroot \"\$MARIADB_DATABASE\"'" <"$BACKUP_DIR/database/nextcloud.sql"
-table_count="$(remote "docker exec '$TEST_DB_CONTAINER' sh -eu -c 'export MYSQL_PWD=\"\$MARIADB_ROOT_PASSWORD\"; mariadb -N -uroot \"\$MARIADB_DATABASE\" -e \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE();\"'")"
+remote "docker exec -i '$TEST_DB_CONTAINER' sh -eu -c 'export MYSQL_PWD=\"\$MARIADB_ROOT_PASSWORD\"; exec mariadb --protocol=tcp --host=127.0.0.1 -uroot \"\$MARIADB_DATABASE\"'" <"$BACKUP_DIR/database/nextcloud.sql"
+table_count="$(remote "docker exec '$TEST_DB_CONTAINER' sh -eu -c 'export MYSQL_PWD=\"\$MARIADB_ROOT_PASSWORD\"; mariadb --protocol=tcp --host=127.0.0.1 -N -uroot \"\$MARIADB_DATABASE\" -e \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE();\"'")"
 [[ "$table_count" =~ ^[1-9][0-9]*$ ]] || die "restored MariaDB database contains no tables"
-remote "docker exec '$TEST_DB_CONTAINER' sh -eu -c 'export MYSQL_PWD=\"\$MARIADB_ROOT_PASSWORD\"; exec mariadb-check -uroot --all-databases --silent'" >/dev/null
+remote "docker exec '$TEST_DB_CONTAINER' sh -eu -c 'export MYSQL_PWD=\"\$MARIADB_ROOT_PASSWORD\"; exec mariadb-check --protocol=tcp --host=127.0.0.1 -uroot --all-databases --silent'" >/dev/null
 printf 'CHECK: isolated MariaDB restore contains %s tables and passes mariadb-check\n' "$table_count"
 
 cleanup_targets || die "disposable recovery targets require manual cleanup"

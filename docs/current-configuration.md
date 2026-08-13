@@ -11,3 +11,8 @@ deployment environment and must remain mode `0600` and untracked.
 To compare tracked intent with the live deployment, run
 `scripts/preflight.sh`. It renders sanitized templates locally and compares
 them to the remote configuration without printing credential values.
+
+`/etc/nextcloud-pi/active-images.env` is Pi-local, root-owned state. It selects
+the allowed image IDs for the next image-resolving start; it is never tracked or
+edited manually. The deployment transaction installs source mode, while the
+separately approved archive-import transaction may install recovered mode.

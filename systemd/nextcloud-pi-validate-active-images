@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Shared closed-schema validator used before every image-resolving start and by
+# health/conformance checks, so a green health check cannot mask a bad restart.
+readonly RECORD=/etc/nextcloud-pi/active-images.env
+die() { printf 'active image record error: %s\n' "$1" >&2; exit 1; }
+value() { local key="$1"; awk -F= -v key="$key" '$1 == key { count++; value=$2 } END { if (count == 1) print value; else exit 1 }' "$RECORD"; }
+[[ -f "$RECORD" && ! -L "$RECORD" && "$(stat -c '%a' "$RECORD")" == 600 && "$(stat -c '%u' "$RECORD")" == 0 ]] || die "record protection is invalid"
+while IFS= read -r line || [[ -n "$line" ]]; do
+  [[ "$line" =~ ^([A-Z][A-Z0-9_]*)=(.+)$ ]] || die "record has an invalid line"
+  case "${BASH_REMATCH[1]}" in
+    NEXTCLOUD_ACTIVE_IMAGES_FORMAT|NEXTCLOUD_ACTIVE_IMAGES_MODE|NEXTCLOUD_ACTIVE_IMAGES_HOST|NEXTCLOUD_ACTIVE_IMAGES_PROJECT|NEXTCLOUD_ACTIVE_IMAGES_STORAGE|NEXTCLOUD_ACTIVE_IMAGES_PLATFORM|NEXTCLOUD_ACTIVE_IMAGES_PROVENANCE_SHA256|NEXTCLOUD_ACTIVE_IMAGES_APP_TAG|NEXTCLOUD_ACTIVE_IMAGES_APP_ID|NEXTCLOUD_ACTIVE_IMAGES_DB_TAG|NEXTCLOUD_ACTIVE_IMAGES_DB_ID|NEXTCLOUD_ACTIVE_IMAGES_CADDY_TAG|NEXTCLOUD_ACTIVE_IMAGES_CADDY_ID) ;;
+    *) die "record has an unknown key" ;;
+  esac
+done <"$RECORD"
+for key in FORMAT MODE HOST PROJECT STORAGE PLATFORM PROVENANCE_SHA256 APP_TAG APP_ID DB_TAG DB_ID CADDY_TAG CADDY_ID; do value "NEXTCLOUD_ACTIVE_IMAGES_$key" >/dev/null || die "record is incomplete"; done
+[[ "$(value NEXTCLOUD_ACTIVE_IMAGES_FORMAT)" == nextcloud-active-images-v1 ]] || die "format is invalid"
+[[ "$(value NEXTCLOUD_ACTIVE_IMAGES_MODE)" == source || "$(value NEXTCLOUD_ACTIVE_IMAGES_MODE)" == recovered ]] || die "mode is invalid"
+[[ "$(value NEXTCLOUD_ACTIVE_IMAGES_HOST)" == @NEXTCLOUD_PI_SYSTEM_HOSTNAME@ && "$(value NEXTCLOUD_ACTIVE_IMAGES_PROJECT)" == @NEXTCLOUD_REMOTE_PROJECT_DIR@ && "$(value NEXTCLOUD_ACTIVE_IMAGES_STORAGE)" == @NEXTCLOUD_STORAGE_MOUNT@ && "$(value NEXTCLOUD_ACTIVE_IMAGES_PLATFORM)" == @NEXTCLOUD_IMAGE_PLATFORM@ ]] || die "target binding differs"
+[[ "$(value NEXTCLOUD_ACTIVE_IMAGES_PROVENANCE_SHA256)" =~ ^[0-9a-f]{64}$ ]] || die "provenance is invalid"
+for service in APP DB CADDY; do tag="$(value NEXTCLOUD_ACTIVE_IMAGES_${service}_TAG)"; id="$(value NEXTCLOUD_ACTIVE_IMAGES_${service}_ID)"; [[ "$tag" =~ ^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+$ && "$id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "mapping is invalid"; [[ "$(docker image inspect --format '{{.Id}}' "$tag" 2>/dev/null || true)" == "$id" ]] || die "mapping differs: $tag"; done

@@ -4,7 +4,9 @@
   Otherwise the host can create unintended local directories.
 - Runtime backups contain private user data, database material, and TLS state;
   they require stricter handling than configuration backups.
-- Compose image tags are version families rather than immutable digests.
+- Compose image tags are version families rather than immutable digests. Normal
+  starts use the source lock; offline archive recovery requires a separate
+  attested post-load identity because Docker may assign different image IDs.
 - Deployment identity and credentials must stay in ignored local files, never
   in Git history, issues, pull requests, or generated reports.
 

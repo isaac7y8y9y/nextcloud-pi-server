@@ -109,10 +109,10 @@ Apply [`deployment.md`](deployment.md),
 [`backup-and-rollback.md`](backup-and-rollback.md),
 [`recovery.md`](recovery.md), and [`storage.md`](storage.md) when relevant.
 
-- Deployment is currently blocked: the repository has no approved apply
-  procedure. No PR may treat rendering, preflight, backup, or migration
-  preparation as authorization to copy files to the Pi or restart services.
-- A future deploy/apply path must validate target identity and rendered
+- Deployment remains an explicitly approved operation. No PR may treat
+  rendering, preflight, backup, or migration preparation as authorization to
+  copy files to the Pi or restart services.
+- A deploy/apply path must validate target identity and rendered
   configuration without printing private values; create and verify the
   appropriate protected backup/recovery point; present a redacted dry-run/live
   comparison; obtain explicit approval immediately before replacement or
@@ -177,12 +177,13 @@ after listed pre-deployment checks`, `Not ready`, or `Not assessable from
 available evidence`. Approval means the change is acceptable to merge; it does
 not prove that the live Raspberry Pi was tested or authorize deployment.
 
-For changes that would deploy or restart services, the current documented
-deployment block normally makes readiness `Not ready` until an approved apply
-procedure exists. Otherwise disclose any environment-dependent checks needed
-before production use. Readiness requires applicable planned functionality,
-repository invariants, integration contracts, realistic failure/recovery
-behavior, validation, and sensitive-state protection to be adequately covered.
+For changes that would deploy or restart services, the documented explicit-
+approval boundary normally makes readiness `Ready after listed pre-deployment
+checks` until the exact plan and restart are approved. Otherwise disclose any
+environment-dependent checks needed before production use. Readiness requires
+applicable planned functionality, repository invariants, integration contracts,
+realistic failure/recovery behavior, validation, and sensitive-state protection
+to be adequately covered.
 
 ## Output format
 

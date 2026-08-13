@@ -18,3 +18,8 @@ The configured project directory must end in `nextcloud-docker`. Both legacy
 and current Compose derive the project name from that basename, and operational
 scripts rely on the resulting stable container and volume names. The parent
 path and all other deployment-specific identities remain local inputs only.
+
+The rendered Docker drop-in gates Docker itself on the storage mount. A
+root-only launcher validates the protected active-image record before Compose
+creates or recreates containers. The record distinguishes normal source images
+from the different tag IDs produced by a verified offline archive import.

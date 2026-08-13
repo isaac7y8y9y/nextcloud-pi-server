@@ -13,9 +13,9 @@ provided by the caller take precedence.
 
 Use `scripts/render-deployment-config.sh --output-dir <absolute-empty-directory>`
 to render Caddy, Compose, systemd, and fstab configuration for review or drift
-comparison. Rendering is not an installation procedure; deployment remains
-blocked by [the deployment safety requirements](docs/deployment.md). Never
-commit rendered output.
+comparison. Rendering is not an installation procedure; deployment is permitted
+only through [the explicitly approved deployment workflow](docs/deployment.md).
+Never commit rendered output.
 
 ## Development workflow
 

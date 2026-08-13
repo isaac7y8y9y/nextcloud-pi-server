@@ -11,13 +11,17 @@ services:
       - MYSQL_PASSWORD=${MYSQL_PASSWORD}
       - MYSQL_DATABASE=${MYSQL_DATABASE}
       - MYSQL_USER=${MYSQL_USER}
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mariadb-admin ping -uroot --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   app:
     image: nextcloud:30
-    ports:
-      - 8080:80
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     volumes:
       # This contains the Nextcloud installation and data directory; do not commit it.
       - "@NEXTCLOUD_STORAGE_MOUNT@/nextcloud:/var/www/html"

@@ -27,9 +27,20 @@ jobs:
 
       - name: Run renderer and scanner tests
         run: |
-          bash -n scripts/*.sh scripts/lib/deployment-config.sh
+          bash -n scripts/*.sh scripts/lib/*.sh
           bash scripts/test-deployment-config.sh
           bash scripts/test-compose-env-references.sh
+          bash scripts/test-image-lock.sh
+          bash scripts/test-active-images.sh
+          bash scripts/test-compose-launcher.sh
+          bash scripts/test-atomic-transaction.sh
+          bash scripts/test-image-import.sh
+          bash scripts/test-image-import-transaction.sh
+          bash scripts/test-image-recovery-attestation.sh
+          bash scripts/test-runtime-recovery-regression.sh
+          bash scripts/test-deploy-config.sh
+          bash scripts/test-health-check.sh
+          bash scripts/test-preflight.sh
           python3 scripts/test-public-safety.py
           # The strict history gate is enabled only after the coordinated
           # git-filter-repo rewrite. Until then, enforce the proposed tree.

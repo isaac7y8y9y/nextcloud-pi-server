@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This root-only launcher is the image-resolving lifecycle boundary. Docker may
+# restart an existing container independently; it never reaches this launcher
+# because that path neither resolves a tag nor creates a container.
+readonly RECORD=/etc/nextcloud-pi/active-images.env
+readonly PROJECT=@NEXTCLOUD_REMOTE_PROJECT_DIR@
+readonly COMPOSE_FILE="$PROJECT/docker-compose.yml"
+SNAPSHOT_DIR=""
+
+die() { printf 'nextcloud image identity error: %s\n' "$1" >&2; exit 1; }
+cleanup() { [[ -z "$SNAPSHOT_DIR" || ! -d "$SNAPSHOT_DIR" ]] || rm -rf "$SNAPSHOT_DIR"; }
+trap cleanup EXIT HUP INT TERM
+value() {
+  local key="$1"
+  awk -F= -v key="$key" '$1 == key { count++; value=$2 } END { if (count == 1) print value; else exit 1 }' "$RECORD"
+}
+
+/usr/local/libexec/nextcloud-pi-validate-active-images
+[[ -f "$COMPOSE_FILE" && ! -L "$COMPOSE_FILE" ]] || die "Compose file is missing or unsafe"
+for command in docker python3; do command -v "$command" >/dev/null 2>&1 || die "required command is unavailable: $command"; done
+
+# Resolve once into root-only runtime state. Validation and `up` consume this
+# same immutable snapshot, so a project-file change cannot race the check.
+umask 077
+SNAPSHOT_DIR="$(mktemp -d /run/nextcloud-pi-compose.XXXXXX)"
+readonly SNAPSHOT="$SNAPSHOT_DIR/docker-compose.json"
+docker compose --project-directory "$PROJECT" -f "$COMPOSE_FILE" config --format json >"$SNAPSHOT" || die "Compose resolution failed"
+chmod 600 "$SNAPSHOT"
+
+python3 - "$SNAPSHOT" \
+  "$(value NEXTCLOUD_ACTIVE_IMAGES_APP_TAG)" \
+  "$(value NEXTCLOUD_ACTIVE_IMAGES_DB_TAG)" \
+  "$(value NEXTCLOUD_ACTIVE_IMAGES_CADDY_TAG)" <<'PY' || die "resolved Compose services or images differ from the protected active-image record"
+import json
+import sys
+
+path, app, db, caddy = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    document = json.load(stream)
+services = document.get("services")
+expected = {"app": app, "db": db, "caddy": caddy}
+if not isinstance(services, dict) or set(services) != set(expected):
+    raise SystemExit(1)
+for name, image in expected.items():
+    service = services.get(name)
+    if not isinstance(service, dict) or service.get("image") != image:
+        raise SystemExit(1)
+PY
+
+docker compose --project-name "$(basename -- "$PROJECT")" --project-directory "$PROJECT" -f "$SNAPSHOT" up -d --pull never

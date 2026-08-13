@@ -19,3 +19,9 @@ Before a configuration change:
 
 Rollback restores only from a verified backup to the configured deployment
 target. Do not publish backup manifests or raw command output.
+
+Image archives are distinct from configuration and runtime backups. Their
+restore-readiness attestation records the post-load tag IDs, which may differ
+from the source IDs. An import failure or interruption first removes recovered
+containers, then retags captured prior images and restores the previous
+active-image record without pulling, pruning, or removing images.

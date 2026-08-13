@@ -2,11 +2,14 @@
 
 ## Current status
 
-Deployment is blocked. The renderer produces protected files for review and
-drift comparison, but this repository does not yet provide an approved apply
-procedure that atomically installs them and performs rollback and health
-checks. Do not copy rendered files onto the Pi or restart services from this
-branch.
+Deployment is controlled by `scripts/deploy-config.sh`. `--plan` is read-only
+on the Pi and requires fresh verified configuration, runtime, and image-recovery
+artifacts; it binds their manifest hashes, the candidate, the Pi pre-state, and
+both UTC clocks into one protected approval artifact. The artifact expires after
+15 minutes and rejects clock skew over 60 seconds. `--apply <artifact> ...`
+consumes that artifact before any remote mutation and cannot be replayed. It is
+never an authorization to create recovery material, import an image, or recover
+runtime data.
 
 ## Safe preparation
 
@@ -33,10 +36,21 @@ Database credentials stay in the Pi project’s untracked Compose `.env`.
 `scripts/prepare-env-migration.sh --check` is read-only; its `--apply` mode
 requires a verified configuration backup and does not restart services.
 
-## Requirements before deployment is unblocked
+## Controlled rollout
 
-An installation procedure must provide all of the following before it can be
-used:
+Before `--plan`, create and verify configuration, runtime, and image-recovery
+artifacts under their separately approved procedures. Confirm the exact plan,
+artifact fingerprint, restart, and rollback authority, then run the one-time
+apply with those same artifacts. `scripts/health-check.sh` verifies storage, locked images, service
+health, no direct app port, Caddy, Nextcloud, and HTTPS without exposing
+credentials.
+
+Before a live deployment, run `scripts/test-deploy-transaction.sh --check`
+and, under explicit approval, `--apply`. Apply creates a uniquely named `/tmp`
+directory and harmless test units only. It forces a dependency failure after a
+disposable replacement, proves rollback and that its marker did not run, then
+removes every test artifact. It does not access live Nextcloud configuration,
+Docker containers, images, volumes, mounts, runtime data, or `.env`.
 
 1. Validate the private deployment file, rendered Compose configuration, and
    exact target identity without printing private values.
@@ -49,7 +63,5 @@ used:
    restarting services.
 6. Perform health checks for Docker, MariaDB, Nextcloud, HTTPS, storage mounts,
    and maintenance mode.
-7. Roll back to the verified backup if installation or health checks fail.
-
-The history-sanitization work in this branch does not authorize a Pi deployment
-or service restart.
+7. Restore only verified configuration following a failed application change;
+   runtime recovery is always separately approved.
