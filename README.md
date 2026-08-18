@@ -24,3 +24,9 @@ change. See [AGENTS.md](AGENTS.md) for the required lifecycle.
 
 Read [security boundaries](docs/security-boundaries.md) before handling backups
 or deployment configuration.
+
+## Client access
+
+See [client access](docs/client-access.md) for the validated macOS and Windows
+11 wired-LAN browser-access procedure, including hostname mapping, private-CA
+trust, manual upload/download, cleanup, and rollback.
