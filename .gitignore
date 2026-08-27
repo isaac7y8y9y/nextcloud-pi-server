@@ -13,6 +13,9 @@ config.php
 *.crt
 
 data/
+backups/
+runtime/
+volumes/
 nextcloud/
 nextcloud_db/
 mysql/
@@ -31,6 +34,11 @@ personal_documentation/
 *.tar.gz
 *.tgz
 *.zip
+*.7z
+*.rar
+*.sqlite
+*.sqlite3
+*.db
 
 reports/raw/
 staging/

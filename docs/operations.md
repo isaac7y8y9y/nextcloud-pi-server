@@ -11,3 +11,8 @@ the deployment.
 
 Use `scripts/check-public-safety.py` before publishing changes. It emits only
 redacted finding references and fingerprints.
+
+The public-safety workflow renders configuration with synthetic values and
+validates Bash, Compose, Caddy, documentation links, repository tests, and both
+current-tree and full-history safety rules. These checks do not require the
+live Pi, private certificates, or either real environment file.
