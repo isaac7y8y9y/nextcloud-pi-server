@@ -2,7 +2,7 @@
 
 This changelog records major engineering phases rather than individual commits.
 
-## Unreleased — Public portfolio preparation
+## 1.0.0 — 2026-08-27
 
 - Reframed the repository as a sanitized engineering case study.
 - Added clean-clone configuration and publication-safety validation.
