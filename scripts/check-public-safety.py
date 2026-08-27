@@ -42,7 +42,7 @@ FORBIDDEN_PATH = re.compile(
     r"\.(?:sql(?:\.gz)?|sqlite|sqlite3|db|dump|key|pem|p12|pfx|crt|tar(?:\.gz)?|tgz|zip|7z|rar|bak|backup)$"
 )
 FORBIDDEN_DIRECTORY = re.compile(
-    r"(?i)(?:^|/)(?:reports/raw|staging|nextcloud|nextcloud_db|mysql|mariadb|caddy_data|caddy_config)(?:/|$)"
+    r"(?i)(?:^|/)(?:reports/raw|staging|data|backups|runtime|volumes|nextcloud|nextcloud_db|mysql|mariadb|caddy_data|caddy_config)(?:/|$)"
 )
 ALLOWED_ENV_TEMPLATES = {"compose/.env.example"}
 BOUNDED_DEPLOYMENT_KEYS = {

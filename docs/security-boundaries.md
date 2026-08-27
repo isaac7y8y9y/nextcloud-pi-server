@@ -15,8 +15,7 @@ The Pi-only Compose environment remains a separate mode-`0600` credential
 file. GitHub noreply addresses, explicit placeholders, and documentation IP
 ranges are allowed in public-safe material.
 
-During the pre-rewrite remediation phase, CI enforces the proposed worktree and
-Gitleaks scans reachable history. The stricter
-`scripts/check-public-safety.py --history` gate remains intentionally disabled
-until the coordinated history rewrite removes known legacy identifiers from
-every retained ref; it must be enabled and pass before remediation is complete.
+CI checks both the proposed worktree and all reachable history with
+`scripts/check-public-safety.py`. Gitleaks independently scans full history for
+secret-like material. Both history gates must pass before publication; a
+finding is a security-remediation blocker, not a reason to weaken either rule.

@@ -1,4 +1,4 @@
 @NEXTCLOUD_PUBLIC_HOSTNAME@ {
-    reverse_proxy app:80
-    tls internal
+	reverse_proxy app:80
+	tls internal
 }

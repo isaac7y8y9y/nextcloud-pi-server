@@ -47,6 +47,10 @@ def main() -> None:
         "compose/.env.production",
         "config/deployment.env",
         "nextcloud/data/user/files/photo.jpg",
+        "data/user/files/photo.jpg",
+        "backups/manifest.txt",
+        "runtime/container-state.json",
+        "volumes/database/item",
         "staging/output.txt",
         "caddy_data/certificates/item.json",
     )

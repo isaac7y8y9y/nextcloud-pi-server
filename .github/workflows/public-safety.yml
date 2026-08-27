@@ -11,6 +11,7 @@ jobs:
   scan:
     name: Strict public-safety scan
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
@@ -25,7 +26,7 @@ jobs:
           go-version: stable
           cache: false
 
-      - name: Run renderer and scanner tests
+      - name: Run repository and publication-safety tests
         run: |
           bash -n scripts/*.sh scripts/lib/*.sh
           bash scripts/test-deployment-config.sh
@@ -41,10 +42,14 @@ jobs:
           bash scripts/test-deploy-config.sh
           bash scripts/test-health-check.sh
           bash scripts/test-preflight.sh
+          python3 scripts/test-documentation-links.py
+          python3 scripts/check-documentation-links.py
           python3 scripts/test-public-safety.py
-          # The strict history gate is enabled only after the coordinated
-          # git-filter-repo rewrite. Until then, enforce the proposed tree.
           python3 scripts/check-public-safety.py
+          python3 scripts/check-public-safety.py --history
+
+      - name: Validate rendered Compose and Caddy configuration
+        run: bash scripts/test-public-config.sh
 
       - name: Install pinned Gitleaks
         run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
