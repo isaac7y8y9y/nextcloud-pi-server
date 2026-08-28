@@ -221,3 +221,30 @@ Follow the exact terminal message:
 
 Configuration rollback does not authorize runtime recovery or image import.
 Those remain separate procedures and approvals.
+
+## 9. Dispose of the rendered candidate
+
+Keep the protected rendered candidate until successful deployment or completed
+rollback has been confirmed and any required diagnosis is finished. It contains
+deployment-identifying configuration and should not remain on disk afterward.
+
+Before removal, reset the variable to the exact path chosen in step 2 and
+validate that it is an owned, non-symlink directory outside a Git worktree. The
+literal comparison is an intentional deletion guard; replace both occurrences
+when choosing a different private path:
+
+```sh
+RENDERED_CONFIG=/absolute/private/rendered-nextcloud-candidate
+test "$RENDERED_CONFIG" = /absolute/private/rendered-nextcloud-candidate
+test -d "$RENDERED_CONFIG" && test ! -L "$RENDERED_CONFIG" && test -O "$RENDERED_CONFIG"
+if git -C "$RENDERED_CONFIG" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  printf 'Refusing to remove a directory inside a Git worktree\n' >&2
+  exit 1
+fi
+find "$RENDERED_CONFIG" -depth -delete
+test ! -e "$RENDERED_CONFIG" && test ! -L "$RENDERED_CONFIG"
+unset RENDERED_CONFIG
+```
+
+Never reuse a rendered directory for a later deployment. Create a new empty
+protected directory so stale files cannot enter a future review.

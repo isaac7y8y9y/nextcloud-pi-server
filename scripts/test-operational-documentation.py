@@ -10,6 +10,142 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Every top-level executable interface must remain intentionally classified.
+# Operator commands require a canonical document and ordered invocation
+# fragments; internal regression helpers must be named explicitly instead of
+# disappearing behind a filename convention.
+OPERATOR_CONTRACTS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "backup-config.sh": (
+        "docs/backup-and-rollback.md",
+        ("scripts/backup-config.sh",),
+    ),
+    "backup-runtime-state.sh": (
+        "docs/backup-and-rollback.md",
+        (
+            "scripts/backup-runtime-state.sh --check",
+            "scripts/backup-runtime-state.sh --apply",
+            "scripts/backup-runtime-state.sh --maintenance-off",
+        ),
+    ),
+    "check-documentation-links.py": (
+        "docs/operations.md",
+        ("python3 scripts/check-documentation-links.py",),
+    ),
+    "check-public-safety.py": (
+        "docs/operations.md",
+        (
+            "python3 scripts/check-public-safety.py",
+            "python3 scripts/check-public-safety.py --history",
+        ),
+    ),
+    "deploy-config.sh": (
+        "docs/deployment.md",
+        ("scripts/deploy-config.sh --plan", "scripts/deploy-config.sh --apply"),
+    ),
+    "export-image-recovery.sh": (
+        "docs/recovery.md",
+        ("scripts/export-image-recovery.sh --output-root",),
+    ),
+    "health-check.sh": ("docs/operations.md", ("scripts/health-check.sh",)),
+    "preflight.sh": (
+        "docs/operations.md",
+        ("scripts/preflight.sh --readiness", "scripts/preflight.sh --conformance"),
+    ),
+    "prepare-env-migration.sh": (
+        "docs/deployment.md",
+        (
+            "scripts/prepare-env-migration.sh --check",
+            "scripts/prepare-env-migration.sh --apply",
+        ),
+    ),
+    "render-deployment-config.sh": (
+        "docs/deployment.md",
+        ("scripts/render-deployment-config.sh --output-dir",),
+    ),
+    "restore-image-recovery.sh": (
+        "docs/recovery.md",
+        (
+            "scripts/restore-image-recovery.sh --plan",
+            "scripts/restore-image-recovery.sh --apply",
+        ),
+    ),
+    "run-image-restore-readiness.sh": (
+        "docs/recovery.md",
+        (
+            "scripts/run-image-restore-readiness.sh --check",
+            "scripts/run-image-restore-readiness.sh --apply",
+            "scripts/run-image-restore-readiness.sh --cleanup",
+        ),
+    ),
+    "test-deploy-transaction.sh": (
+        "docs/deployment.md",
+        (
+            "scripts/test-deploy-transaction.sh --check",
+            "scripts/test-deploy-transaction.sh --apply",
+        ),
+    ),
+    "test-documentation-links.py": (
+        "docs/operations.md",
+        ("python3 scripts/test-documentation-links.py",),
+    ),
+    "test-operational-documentation.py": (
+        "docs/operations.md",
+        ("python3 scripts/test-operational-documentation.py",),
+    ),
+    "test-public-config.sh": (
+        "docs/operations.md",
+        ("bash scripts/test-public-config.sh",),
+    ),
+    "test-public-safety.py": (
+        "docs/operations.md",
+        ("python3 scripts/test-public-safety.py",),
+    ),
+    "test-runtime-recovery.sh": (
+        "docs/recovery.md",
+        (
+            "scripts/test-runtime-recovery.sh --check",
+            "scripts/test-runtime-recovery.sh --apply",
+            "scripts/test-runtime-recovery.sh --cleanup",
+        ),
+    ),
+    "verify-config-backup.sh": (
+        "docs/backup-and-rollback.md",
+        ("scripts/verify-config-backup.sh",),
+    ),
+    "verify-image-recovery.sh": (
+        "docs/recovery.md",
+        (
+            "scripts/verify-image-recovery.sh \"$IMAGE_RECOVERY\"",
+            "scripts/verify-image-recovery.sh --require-attestation",
+        ),
+    ),
+    "verify-runtime-backup.sh": (
+        "docs/backup-and-rollback.md",
+        ("scripts/verify-runtime-backup.sh",),
+    ),
+    "worktree-cleanup.sh": ("AGENTS.md", ("./scripts/worktree-cleanup.sh",)),
+    "worktree-create.sh": ("AGENTS.md", ("./scripts/worktree-create.sh",)),
+}
+
+INTERNAL_SCRIPTS = {
+    "check-compose-env-references.sh",
+    "test-active-images.sh",
+    "test-atomic-transaction.sh",
+    "test-compose-env-references.sh",
+    "test-compose-launcher.sh",
+    "test-deploy-config.sh",
+    "test-deployment-config.sh",
+    "test-health-check.sh",
+    "test-image-import-transaction.sh",
+    "test-image-import.sh",
+    "test-image-lock.sh",
+    "test-image-readiness-lifecycle.sh",
+    "test-image-recovery-attestation.sh",
+    "test-image-restore-readiness.sh",
+    "test-preflight.sh",
+    "test-runtime-recovery-regression.sh",
+}
+
 
 def read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
@@ -36,43 +172,32 @@ def main() -> int:
     operations = read("docs/operations.md")
     agents = read("AGENTS.md")
 
-    canonical_coverage = {
-        deployment: (
-            "render-deployment-config.sh",
-            "preflight.sh",
-            "prepare-env-migration.sh",
-            "test-deploy-transaction.sh",
-            "deploy-config.sh",
-            "health-check.sh",
-        ),
-        backup: (
-            "backup-config.sh",
-            "verify-config-backup.sh",
-            "backup-runtime-state.sh",
-            "verify-runtime-backup.sh",
-        ),
-        recovery: (
-            "test-runtime-recovery.sh",
-            "export-image-recovery.sh",
-            "verify-image-recovery.sh",
-            "run-image-restore-readiness.sh",
-            "test-image-restore-readiness.sh",
-            "restore-image-recovery.sh",
-            "health-check.sh",
-        ),
-        operations: (
-            "check-documentation-links.py",
-            "test-documentation-links.py",
-            "test-operational-documentation.py",
-            "check-public-safety.py",
-            "test-public-safety.py",
-            "test-public-config.sh",
-        ),
-        agents: ("worktree-create.sh", "worktree-cleanup.sh"),
+    discovered_scripts = {
+        path.name
+        for path in (ROOT / "scripts").iterdir()
+        if path.is_file() and path.suffix in {".sh", ".py"}
     }
-    for document, scripts in canonical_coverage.items():
-        for script in scripts:
-            require(document, script, "canonical operator documentation")
+    classified_scripts = set(OPERATOR_CONTRACTS) | INTERNAL_SCRIPTS
+    if discovered_scripts != classified_scripts:
+        unclassified = sorted(discovered_scripts - classified_scripts)
+        missing = sorted(classified_scripts - discovered_scripts)
+        raise AssertionError(
+            f"script classification drift; unclassified={unclassified}, missing={missing}"
+        )
+    if set(OPERATOR_CONTRACTS) & INTERNAL_SCRIPTS:
+        raise AssertionError("operator and internal script classifications overlap")
+
+    for script, (document_path, invocation_fragments) in OPERATOR_CONTRACTS.items():
+        require_order(
+            read(document_path),
+            invocation_fragments,
+            f"{script} operator command contract in {document_path}",
+        )
+
+    # This low-level implementation is deliberately not an operator entry
+    # point, but recovery documentation must still explain its socket and
+    # attestation role through the guarded lifecycle owner.
+    require(recovery, "test-image-restore-readiness.sh", "readiness implementation documentation")
 
     require_order(
         deployment,
