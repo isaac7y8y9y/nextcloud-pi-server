@@ -62,10 +62,16 @@ if bash "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery"
 fi
 
 write_attestation yes
+bash "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery" >/dev/null
+
+write_attestation no
+sed -i.bak 's/^source_image\tnextcloud:30\t.*/source_image\tnextcloud:30\tsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$recovery/restore-attestation.tsv"
+rm -f "$recovery/restore-attestation.tsv.bak"
 if bash "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery" >/dev/null 2>&1; then
-  echo 'expected source-ID substitution to be rejected' >&2
+  echo 'expected a source-image binding mismatch to be rejected' >&2
   exit 1
 fi
+
 write_attestation no
 printf 'image\tnextcloud:30\tsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\textra\n' >>"$recovery/restore-attestation.tsv"
 if bash "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery" >/dev/null 2>&1; then

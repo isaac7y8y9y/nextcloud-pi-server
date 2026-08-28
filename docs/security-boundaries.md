@@ -19,3 +19,6 @@ CI checks both the proposed worktree and all reachable history with
 `scripts/check-public-safety.py`. Gitleaks independently scans full history for
 secret-like material. Both history gates must pass before publication; a
 finding is a security-remediation blocker, not a reason to weaken either rule.
+Use the [focused local validation](operations.md#focused-local-validation)
+before publication and the canonical GitHub workflow for the full regression
+and history gates.

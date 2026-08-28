@@ -1,67 +1,223 @@
 # Deployment
 
-## Current status
+`scripts/deploy-config.sh` is the only supported production configuration
+deployment interface. Its plan is Pi-read-only and binds the rendered candidate,
+verified recovery artifacts, live Pi pre-state, and both UTC clocks into a
+protected approval artifact. Apply consumes that exact artifact before any
+remote mutation and cannot replay it.
 
-Deployment is controlled by `scripts/deploy-config.sh`. `--plan` is read-only
-on the Pi and requires fresh verified configuration, runtime, and image-recovery
-artifacts; it binds their manifest hashes, the candidate, the Pi pre-state, and
-both UTC clocks into one protected approval artifact. The artifact expires after
-15 minutes and rejects clock skew over 60 seconds. `--apply <artifact> ...`
-consumes that artifact before any remote mutation and cannot be replayed. It is
-never an authorization to create recovery material, import an image, or recover
-runtime data.
+This procedure does not authorize image import or runtime recovery. Follow it
+from the repository root in a clean linked worktree containing the exact
+reviewed candidate.
 
-## Safe preparation
+## 1. Prepare the private deployment environment
 
-Prepare the ignored local deployment environment from
-`config/deployment.env.example`, replace its placeholders, and restrict it to
-mode `0600`. Shell-provided `NEXTCLOUD_*` values override that file for
-one-off automation. `NEXTCLOUD_REMOTE_PROJECT_DIR` must end in
-`nextcloud-docker`; that basename preserves the existing Compose container and
-volume names across legacy and current Compose implementations.
-
-The tracked configuration is a template set. Render it into a new, empty,
-protected directory for inspection:
+For a new operator checkout, copy the sanitized example into the ignored local
+file, protect it, and replace every placeholder locally:
 
 ```sh
-scripts/render-deployment-config.sh --output-dir /absolute/private/output
+cp config/deployment.env.example config/deployment.env
+chmod 600 config/deployment.env
 ```
 
-The output root contains `docker-compose.yml` beside `caddy/Caddyfile`, so the
-relative Caddy bind source resolves correctly. `systemd/` and `storage/` are
-separate review inputs. Rendering does not contact or modify the Pi, and the
-output must never be committed.
+Do not print or commit the resulting file. Shell-provided `NEXTCLOUD_*` values
+may override it for one-off automation. `NEXTCLOUD_REMOTE_PROJECT_DIR` must end
+in `nextcloud-docker`; operational scripts depend on that stable Compose project
+name.
 
-Database credentials stay in the Pi project’s untracked Compose `.env`.
-`scripts/prepare-env-migration.sh --check` is read-only; its `--apply` mode
-requires a verified configuration backup and does not restart services.
+Confirm the worktree has no unintended changes before operating production:
 
-## Controlled rollout
+```sh
+git status --short --branch
+```
 
-Before `--plan`, create and verify configuration, runtime, and image-recovery
-artifacts under their separately approved procedures. Confirm the exact plan,
-artifact fingerprint, restart, and rollback authority, then run the one-time
-apply with those same artifacts. `scripts/health-check.sh` verifies storage, locked images, service
-health, no direct app port, Caddy, Nextcloud, and HTTPS without exposing
-credentials.
+## 2. Render and inspect the candidate
 
-Before a live deployment, run `scripts/test-deploy-transaction.sh --check`
-and, under explicit approval, `--apply`. Apply creates a uniquely named `/tmp`
-directory and harmless test units only. It forces a dependency failure after a
-disposable replacement, proves rollback and that its marker did not run, then
-removes every test artifact. It does not access live Nextcloud configuration,
-Docker containers, images, volumes, mounts, runtime data, or `.env`.
+Choose a new or empty absolute protected directory outside Git:
 
-1. Validate the private deployment file, rendered Compose configuration, and
-   exact target identity without printing private values.
-2. Create and verify a current configuration backup and a usable runtime
-   recovery point outside Git.
-3. Compare rendered files with live files and show a value-redacted dry run.
-4. Exclude uploaded data, database storage, Caddy runtime volumes, and the
-   Pi-only `.env` from every copy or synchronization operation.
-5. Obtain explicit approval immediately before replacing live configuration or
-   restarting services.
-6. Perform health checks for Docker, MariaDB, Nextcloud, HTTPS, storage mounts,
-   and maintenance mode.
-7. Restore only verified configuration following a failed application change;
-   runtime recovery is always separately approved.
+```sh
+RENDERED_CONFIG=/absolute/private/rendered-nextcloud-candidate
+scripts/render-deployment-config.sh --output-dir "$RENDERED_CONFIG"
+```
+
+Inspect `docker-compose.yml` beside `caddy/Caddyfile`, plus the separate
+`systemd/`, `launcher/`, `active-images/`, and `storage/` review inputs. The
+renderer does not contact the Pi. Never commit or publish its output.
+
+Run deployment-readiness preflight:
+
+```sh
+scripts/preflight.sh --readiness
+```
+
+Readiness may report the reviewed transition from the current baseline as
+warnings. Any hard failure blocks deployment. Preflight is read-only and is not
+authorization to copy files or restart services.
+
+## 3. Prepare the Pi-only Compose environment when required
+
+Database credentials remain only in the Pi project's untracked mode-`0600`
+`.env`. Check its state without changing the Pi:
+
+```sh
+scripts/prepare-env-migration.sh --check
+```
+
+Exit status `0` means the protected file already has the required schema. Exit
+status `2` with `Pi-only .env is absent` identifies the supported one-time
+migration path. Any malformed or unexpected existing file is a hard failure.
+
+For the absent-file case, first create and verify a fresh configuration backup
+using [the configuration backup procedure](backup-and-rollback.md#configuration-backup).
+Then stop for explicit human approval of the one-time `.env` creation. No
+approval artifact is generated for this migration.
+
+After approval, use the exact verified backup path:
+
+```sh
+scripts/prepare-env-migration.sh --apply "$CONFIG_BACKUP"
+scripts/prepare-env-migration.sh --check
+```
+
+Migration copies the running database container's existing values into a new
+protected Pi-only `.env`; it refuses to overwrite a file and does not replace
+Compose configuration or restart services.
+
+## 4. Prove the deployment transaction mechanics
+
+Check the disposable drill prerequisites:
+
+```sh
+scripts/test-deploy-transaction.sh --check
+```
+
+Stop until the operator approves the harmless remote test units and disposable
+`/tmp` targets. This is a human approval pause, not an approval artifact. Then
+run:
+
+```sh
+scripts/test-deploy-transaction.sh --apply
+```
+
+The drill forces a disposable dependency failure, proves atomic rollback,
+approval no-replay, and the storage gate, then removes every test target. It
+does not access live Nextcloud configuration, Docker objects, images, volumes,
+mounts, runtime data, or `.env`.
+
+## 5. Create the recovery inputs
+
+Create and verify these three protected artifacts under their separately
+approved procedures:
+
+1. [`CONFIG_BACKUP`](backup-and-rollback.md#configuration-backup)
+2. [`RUNTIME_BACKUP`](backup-and-rollback.md#runtime-backup)
+3. [`IMAGE_RECOVERY`](recovery.md#image-recovery-and-restore-readiness), including
+   its isolated restore-readiness attestation
+
+Set the exact paths printed by those procedures:
+
+```sh
+CONFIG_BACKUP=/absolute/private/nextcloud-backups/config-backup-YYYYMMDDTHHMMSSZ
+RUNTIME_BACKUP=/absolute/private/nextcloud-backups/runtime-backup-YYYYMMDDTHHMMSSZ
+IMAGE_RECOVERY=/absolute/private/nextcloud-image-recovery/image-recovery-YYYYMMDDTHHMMSSZ
+```
+
+Reverify all three without contacting or changing the Pi:
+
+```sh
+scripts/verify-config-backup.sh "$CONFIG_BACKUP"
+scripts/verify-runtime-backup.sh "$RUNTIME_BACKUP"
+scripts/verify-image-recovery.sh --require-attestation "$IMAGE_RECOVERY"
+```
+
+At plan time the configuration manifest, runtime manifest, image manifest, and
+image restore attestation must each be no more than one hour old. The deployer
+also requires the configuration backup's Compose and Caddy files to match the
+current live pre-state. Recreate any stale or mismatched artifact; do not edit a
+manifest or backup.
+
+## 6. Create and review the deployment plan
+
+Create the exact redacted plan:
+
+```sh
+scripts/deploy-config.sh --plan \
+  "$CONFIG_BACKUP" \
+  "$RUNTIME_BACKUP" \
+  "$IMAGE_RECOVERY"
+```
+
+The command validates the target, source-locked images, Pi-only `.env`, rendered
+Compose and Caddy configuration, mount gates, launcher, recovery artifacts,
+clock skew, and live pre-state. It prints a redacted file-hash transition and a
+protected approval artifact path.
+
+Set the printed path explicitly:
+
+```sh
+APPROVAL_ARTIFACT=/absolute/private/deploy-approvals/approval-SHA256-EPOCH.tsv
+```
+
+Before approval, review all of the following:
+
+- the target hostname and candidate fingerprint;
+- every live-to-candidate file hash;
+- source-locked image tags and lock hash;
+- actions: safety baseline, Compose/Caddy replacement, daemon reload, restart,
+  health check, and configuration rollback; and
+- exclusions: `.env`, runtime data, volumes, images, pulls, pruning, image
+  removal, and runtime recovery.
+
+The generated file records the exact authority but is not human approval by
+itself. Stop until the operator approves that target, candidate, restart,
+configuration rollback, and those exact actions and exclusions.
+
+## 7. Apply within 15 minutes
+
+The approval expires 15 minutes after planning. With no candidate, artifact,
+argument, or live pre-state changes, apply it once:
+
+```sh
+scripts/deploy-config.sh --apply \
+  "$APPROVAL_ARTIFACT" \
+  "$CONFIG_BACKUP" \
+  "$RUNTIME_BACKUP" \
+  "$IMAGE_RECOVERY"
+```
+
+Apply recaptures and compares the bound state, then atomically marks the
+approval consumed before staging or remote mutation. A staging or apply failure
+after consumption requires a new plan and approval.
+
+The transaction installs the safety baseline first. It then replaces only the
+tracked Compose and Caddy application configuration, reloads systemd, restarts
+`nextcloud.service`, and runs the full health check. It never copies `.env` or
+runtime data and never pulls, prunes, removes, or imports images.
+
+## 8. Confirm the outcome
+
+Successful apply prints `Deployment applied with consumed approval artifact`.
+Run the standalone read-only health check once more for the operational record:
+
+```sh
+scripts/health-check.sh
+scripts/preflight.sh --conformance
+```
+
+Health validation covers target identity, storage, active-image identity,
+containers, MariaDB, Nextcloud installation and maintenance state, direct app
+port policy, Caddy configuration, and HTTPS.
+
+If safety-baseline installation fails, the transaction restores the previous
+safety files. If application installation, restart, or health validation fails,
+it restores the verified Compose and Caddy pre-state and checks rollback health.
+Follow the exact terminal message:
+
+- `application change rolled back` means live configuration was restored; make
+  a new plan before retrying;
+- `preserve remote recovery stage` means automatic rollback or cleanup did not
+  finish and manual inspection is required; and
+- a consumed artifact is never reusable, even when no live change remains.
+
+Configuration rollback does not authorize runtime recovery or image import.
+Those remain separate procedures and approvals.
