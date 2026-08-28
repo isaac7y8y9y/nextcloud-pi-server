@@ -155,6 +155,11 @@ remain aligned. State checks not run and the resulting residual risk. A
 validation finding must name the behavior, the realistic regression it could
 miss, and the smallest suitable improvement.
 
+Use the [focused local validation](operations.md#focused-local-validation) and
+the linked canonical CI sequence when selecting repository checks. These
+commands are validation evidence only and do not authorize a deployment or
+other live mutation.
+
 ## Severity and verdict
 
 - `P0`: catastrophic data loss, broad compromise, or system-wide outage risk.

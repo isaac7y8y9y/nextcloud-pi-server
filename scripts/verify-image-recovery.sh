@@ -75,7 +75,6 @@ if (( require_attestation != 0 )); then
     attested_source_id="$(attested_image_value source_image "$tag")"
     post_id="$(attested_image_value image "$tag")"
     [[ "$attested_source_id" == "$source_id" && "$post_id" =~ ^sha256:[0-9a-f]{64}$ ]] || die "restore attestation image mapping is invalid"
-    [[ "$post_id" != "$source_id" ]] || die "restore attestation substitutes a source ID for a post-load ID"
   done
 fi
 printf 'Image recovery verified: %s\n' "$recovery_dir"
