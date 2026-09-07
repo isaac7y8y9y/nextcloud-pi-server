@@ -126,11 +126,37 @@ TEST_PHASE=success
 SCENARIO=success; export SCENARIO; reset_fixture; image_import_apply
 [[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]]
 [[ "$(cat "$TEST_DIR/active.env")" == mode=recovered && ! -e "$IMAGE_IMPORT_STAGE/failure.tsv" ]]
-# Match the fresh-process rollback dispatcher, which explicitly records that a
-# successful apply always has a prepared active-record transaction.
-IMAGE_IMPORT_ACTIVE_PREPARED=0
-IMAGE_IMPORT_ACTIVE_PREPARED=1
-image_import_rollback
+# Match restore-image-recovery.sh's health-failure path by executing the
+# remote helper's rollback dispatcher in a fresh process, with only external
+# command fakes available.
+FAKE_BIN="$TEST_DIR/fresh-process-bin"
+mkdir "$FAKE_BIN"
+cat >"$FAKE_BIN/sudo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" != -n ]] || shift
+[[ "$1" == /usr/local/libexec/nextcloud-pi-ops ]] || exit 2
+shift
+case "$1:${2:-}" in
+  service:stop) : >"$TEST_CONTAINERS" ;;
+  service:start) printf 'running\n' >"$TEST_CONTAINERS" ;;
+  active-record:rollback) cp "$TEST_STAGE/prior-active.env" "$TEST_ACTIVE" ;;
+  *) exit 2 ;;
+esac
+EOF
+cat >"$FAKE_BIN/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+tag_file() { printf '%s/%s' "$TEST_TAGS" "$(printf '%s' "$1" | tr '/:' '__')"; }
+case "${1:-}:${2:-}" in
+  compose:down|rm:-f) : >"$TEST_CONTAINERS" ;;
+  inspect:*) [[ -s "$TEST_CONTAINERS" ]] ;;
+  tag:*) printf '%s\n' "$2" >"$(tag_file "$3")" ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod 755 "$FAKE_BIN/sudo" "$FAKE_BIN/docker"
+TEST_CONTAINERS="$TEST_DIR/containers" TEST_STAGE="$IMAGE_IMPORT_STAGE" TEST_ACTIVE="$TEST_DIR/active.env" TEST_TAGS="$TEST_DIR/tags" PATH="$FAKE_BIN:$PATH" bash "$SCRIPT_DIR/lib/image-import-remote.sh" rollback 20260906T000000Z-1 "$IMAGE_IMPORT_STAGE" "$IMAGE_IMPORT_PROJECT" "$IMAGE_IMPORT_APP_TAG" "$IMAGE_IMPORT_DB_TAG" "$IMAGE_IMPORT_CADDY_TAG"
 assert_prior_restored
 
 TEST_PHASE=rollback-down-failure
