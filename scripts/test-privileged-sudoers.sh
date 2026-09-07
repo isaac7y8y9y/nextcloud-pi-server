@@ -87,6 +87,8 @@ denied /usr/bin/tar --version
 denied /usr/bin/dockerd --version
 denied /usr/local/libexec/nextcloud-pi-validate-active-images
 denied /tmp/nextcloud-pi-ops check
-sudo -u "$TEST_USER" -- test ! -w "$HELPER" "$POLICY" "$MANIFEST" "$SUDOERS"
+for path in "$HELPER" "$POLICY" "$MANIFEST" "$SUDOERS"; do
+  sudo -u "$TEST_USER" -- test ! -w "$path"
+done
 
 printf 'privileged sudoers Linux integration tests passed\n'
