@@ -103,7 +103,7 @@ EOF
   } >"$SOURCE_DIR/manifest"
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/policy" "$FIXTURE/policy"
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/manifest" "$FIXTURE/manifest"
-  sudo "$FIXTURE/ops" version | grep -Fx $'version\t1' >/dev/null
+  sudo /bin/bash -x "$FIXTURE/ops" version | grep -Fx $'version\t1' >/dev/null
   if sudo "$FIXTURE/ops" version extra >/dev/null 2>&1 || printf x | sudo "$FIXTURE/ops" version >/dev/null 2>&1 || sudo /usr/bin/env SUDO_USER=wrong "$FIXTURE/ops" version >/dev/null 2>&1; then
     printf 'dispatcher accepted invalid caller input\n' >&2
     exit 1
