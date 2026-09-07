@@ -55,6 +55,7 @@ PY
 # ephemeral Linux runner. The production locations stay untouched; this covers
 # the policy/manifest/caller gate and real command/argument/stdin denials.
 if [[ "${GITHUB_ACTIONS:-}" == true && "$(uname -s)" == Linux ]]; then
+  set -x
   sudo -n true
   FIXTURE="$(sudo mktemp -d /root/nextcloud-pi-ops-test.XXXXXX)"
   SOURCE_DIR="$(mktemp -d)"
@@ -112,5 +113,6 @@ EOF
     printf 'dispatcher accepted an unsafe policy mode\n' >&2
     exit 1
   fi
+  set +x
 fi
 printf 'privileged helper contract tests passed\n'
