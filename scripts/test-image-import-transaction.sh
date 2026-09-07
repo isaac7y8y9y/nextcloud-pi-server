@@ -126,6 +126,10 @@ TEST_PHASE=success
 SCENARIO=success; export SCENARIO; reset_fixture; image_import_apply
 [[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]]
 [[ "$(cat "$TEST_DIR/active.env")" == mode=recovered && ! -e "$IMAGE_IMPORT_STAGE/failure.tsv" ]]
+# Match the fresh-process rollback dispatcher, which explicitly records that a
+# successful apply always has a prepared active-record transaction.
+IMAGE_IMPORT_ACTIVE_PREPARED=0
+IMAGE_IMPORT_ACTIVE_PREPARED=1
 image_import_rollback
 assert_prior_restored
 

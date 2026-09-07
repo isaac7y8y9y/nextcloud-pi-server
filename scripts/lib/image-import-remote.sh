@@ -71,4 +71,11 @@ IMAGE_IMPORT_DB_TAG="$6"
 IMAGE_IMPORT_CADDY_TAG="$7"
 [[ "$IMAGE_IMPORT_ID" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || exit 2
 case "$IMAGE_IMPORT_STAGE:$IMAGE_IMPORT_PROJECT" in /*:/*) ;; *) exit 2 ;; esac
-case "$mode" in apply) image_import_apply ;; rollback) image_import_rollback ;; commit) sudo -n /usr/local/libexec/nextcloud-pi-ops active-record commit "$IMAGE_IMPORT_ID";; esac
+case "$mode" in
+  apply) image_import_apply ;;
+  # A health-failure rollback is invoked by the Mac-side owner in a new shell
+  # after apply succeeded. That transaction is necessarily prepared, so do not
+  # rely on the in-process apply trap's state flag.
+  rollback) IMAGE_IMPORT_ACTIVE_PREPARED=1; image_import_rollback ;;
+  commit) sudo -n /usr/local/libexec/nextcloud-pi-ops active-record commit "$IMAGE_IMPORT_ID" ;;
+esac
