@@ -89,7 +89,7 @@ validate_host() {
   target="$(/usr/bin/findmnt -rn --target "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}" -o TARGET)"; type="$(/usr/bin/findmnt -rn --target "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}" -o FSTYPE)"; volume="$(/usr/bin/findmnt -rn --target "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}" -o UUID)"
   [[ "$target" == "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}" && "$type" == ext4 && "${volume,,}" == "${P[NEXTCLOUD_PI_STORAGE_UUID],,}" ]] || die "storage identity differs"
 }
-reject_stdin() { local byte; if [[ ! -t 0 ]] && IFS= read -r -t 0; then IFS= read -r -n 1 -t 0.05 byte && invalid; fi; }
+reject_stdin() { local byte; if [[ ! -t 0 ]] && IFS= read -r -n 1 -t 0.05 byte; then invalid; fi; return 0; }
 valid_size() { [[ "$1" =~ ^[1-9][0-9]*$ ]] && (( 10#$1 <= 10#${P[NEXTCLOUD_PI_MAX_STAGING_BYTES]} )); }
 lock() { exec 9>"$LOCK"; /usr/bin/flock -w 30 9 || die "another operation is running"; [[ "$(uid "$LOCK")" == 0 && "$(mode "$LOCK")" == 600 ]] || die "lock is unsafe"; }
 state_dir() { printf '%s/%s' "${P[NEXTCLOUD_PI_STATE_ROOT]}" "$1"; }

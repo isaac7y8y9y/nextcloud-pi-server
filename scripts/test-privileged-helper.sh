@@ -55,7 +55,6 @@ PY
 # ephemeral Linux runner. The production locations stay untouched; this covers
 # the policy/manifest/caller gate and real command/argument/stdin denials.
 if [[ "${GITHUB_ACTIONS:-}" == true && "$(uname -s)" == Linux ]]; then
-  set -x
   sudo -n true
   FIXTURE="$(sudo mktemp -d /root/nextcloud-pi-ops-test.XXXXXX)"
   SOURCE_DIR="$(mktemp -d)"
@@ -103,7 +102,7 @@ EOF
   } >"$SOURCE_DIR/manifest"
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/policy" "$FIXTURE/policy"
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/manifest" "$FIXTURE/manifest"
-  sudo /bin/bash -x "$FIXTURE/ops" version | grep -Fx $'version\t1' >/dev/null
+  sudo "$FIXTURE/ops" version | grep -Fx $'version\t1' >/dev/null
   if sudo "$FIXTURE/ops" version extra >/dev/null 2>&1 || printf x | sudo "$FIXTURE/ops" version >/dev/null 2>&1 || sudo /usr/bin/env SUDO_USER=wrong "$FIXTURE/ops" version >/dev/null 2>&1; then
     printf 'dispatcher accepted invalid caller input\n' >&2
     exit 1
@@ -113,6 +112,5 @@ EOF
     printf 'dispatcher accepted an unsafe policy mode\n' >&2
     exit 1
   fi
-  set +x
 fi
 printf 'privileged helper contract tests passed\n'
