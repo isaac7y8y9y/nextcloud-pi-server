@@ -32,6 +32,7 @@ tag_file() { printf '%s/%s' "$TEST_DIR/tags" "$(printf '%s' "$1" | tr '/:' '__')
 write_tag() { printf '%s\n' "$2" >"$(tag_file "$1")"; }
 read_tag() { cat "$(tag_file "$1")"; }
 reset_fixture() {
+  IMAGE_IMPORT_ACTIVE_PREPARED=0
   write_tag "$IMAGE_IMPORT_APP_TAG" "$prior_app"; write_tag "$IMAGE_IMPORT_DB_TAG" "$prior_db"; write_tag "$IMAGE_IMPORT_CADDY_TAG" "$prior_caddy"
   printf 'mode=source\n' >"$TEST_DIR/active.env"; printf 'running\n' >"$TEST_DIR/containers"; : >"$TEST_DIR/systemctl.log"; printf '0\n' >"$TEST_DIR/start-count"
   : >"$IMAGE_IMPORT_STAGE/images.tar"; printf 'mode=recovered\n' >"$IMAGE_IMPORT_STAGE/recovered.env"
@@ -49,7 +50,12 @@ sudo() {
         count="$(cat "$TEST_DIR/start-count")"; count=$((count + 1)); printf '%s\n' "$count" >"$TEST_DIR/start-count"; printf 'start\n' >>"$TEST_DIR/systemctl.log"
         [[ "$SCENARIO" == restart_failure && "$count" == 1 ]] && return 1
         printf 'running\n' >"$TEST_DIR/containers"; return 0 ;;
-      active-record:prepare) cp "$TEST_DIR/active.env" "$IMAGE_IMPORT_STAGE/prior-active.env"; cat >/dev/null; return 0 ;;
+      active-record:prepare)
+        # The real validator checks the candidate's recovered IDs against the
+        # loaded tags. This makes the fixture fail if prepare moves before
+        # docker load again.
+        [[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]] || return 1
+        cp "$TEST_DIR/active.env" "$IMAGE_IMPORT_STAGE/prior-active.env"; cat >/dev/null; return 0 ;;
       active-record:apply)
         [[ "$SCENARIO" == active_record_failure ]] && return 1
         cp "$IMAGE_IMPORT_STAGE/recovered.env" "$TEST_DIR/active.env"; return 0 ;;

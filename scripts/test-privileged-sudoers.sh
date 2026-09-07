@@ -23,11 +23,14 @@ readonly POLICY=/etc/nextcloud-pi/privileged-policy.conf
 readonly MANIFEST=/etc/nextcloud-pi/bundle-manifest.tsv
 readonly SUDOERS=/etc/sudoers.d/nextcloud-pi-automation
 TMP_DIR="$(mktemp -d)"
+readonly RUNNER_SUDOERS=/etc/sudoers.d/runner
+RUNNER_SUDOERS_MODE=""
 
 cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
   sudo rm -f -- "$HELPER" "$POLICY" "$MANIFEST" "$SUDOERS"
+  [[ -z "$RUNNER_SUDOERS_MODE" ]] || sudo chmod "$RUNNER_SUDOERS_MODE" "$RUNNER_SUDOERS"
   sudo rmdir --ignore-fail-on-non-empty /etc/nextcloud-pi 2>/dev/null || true
   sudo userdel "$TEST_USER" 2>/dev/null || true
   rm -rf -- "$TMP_DIR"
@@ -38,6 +41,14 @@ trap cleanup EXIT HUP INT TERM
 for path in "$HELPER" "$POLICY" "$MANIFEST" "$SUDOERS"; do
   sudo test ! -e "$path" && sudo test ! -L "$path" || die "refusing to overwrite existing $path"
 done
+
+# ubuntu-latest intentionally ships this runner-specific drop-in with a mode
+# visudo rejects. Correct it only for this ephemeral composed-policy check and
+# restore its original mode in the trap above.
+if sudo test -f "$RUNNER_SUDOERS" && sudo test ! -L "$RUNNER_SUDOERS"; then
+  RUNNER_SUDOERS_MODE="$(sudo stat -c '%a' "$RUNNER_SUDOERS")"
+  sudo chmod 0440 "$RUNNER_SUDOERS"
+fi
 
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$TEST_USER"
 install -d -m 0700 "$TMP_DIR/bundle"

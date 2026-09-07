@@ -14,7 +14,7 @@ load_deployment_config "$ROOT"; image_lock_load "$ROOT"
 readonly REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
 readonly APPROVAL_ROOT="${NEXTCLOUD_DEPLOY_APPROVAL_ROOT:-$HOME/nextcloud-pi-deploy-approvals}"
 MODE="${1:-}"; ARTIFACT="${2:-}"; CONFIG_BACKUP="${3:-}"; RUNTIME_BACKUP="${4:-}"; IMAGE_RECOVERY="${5:-}"
-TMP_DIR="$(mktemp -d)"; TRANSACTION_ID=""; stage=""; PHASE=""; trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+TMP_DIR="$(mktemp -d)"; TRANSACTION_ID=""; stage=""; PHASE=""; ROLLBACK_ARMED=0; trap cleanup EXIT HUP INT TERM
 die() { printf 'Deployment failed: %s\n' "$1" >&2; exit 1; }
 usage() {
   printf 'Usage: %s --plan <config-backup> <runtime-backup> <image-recovery>\n       %s --apply <approval-artifact> <config-backup> <runtime-backup> <image-recovery>\n' "$0" "$0" >&2
@@ -104,8 +104,8 @@ require_interface() {
 candidate_hash() { cat "$TMP_DIR/rendered/docker-compose.yml" "$TMP_DIR/rendered/caddy/Caddyfile" "$TMP_DIR/rendered/active-images/active-images.env" "$(bundle_manifest)" "$ROOT/config/image-lock.env" >"$TMP_DIR/candidate"; printf '%s\n' "$TRANSACTION_ID" >>"$TMP_DIR/candidate"; sha256 "$TMP_DIR/candidate"; }
 prestate_hash() { local out="$TMP_DIR/prestate" logical output; : >"$out"; for logical in nextcloud-unit docker-storage-drop-in compose-launcher active-image-validator active-image-record privileged-helper privileged-policy sudoers-policy; do output="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops protected-state '$logical'")" || return 1; printf '%s\t%s\n' "$(awk -F $'\t' '$1 == "sha256" {print $2}' <<<"$output")" "$logical" >>"$out"; done; for file in docker-compose.yml caddy/Caddyfile; do remote "sha256sum '$NEXTCLOUD_REMOTE_PROJECT_DIR/$file'" >>"$out"; done; sha256 "$out"; }
 consume() { local lock="$ARTIFACT.lock" temp="$ARTIFACT.consumed"; mkdir -m 700 "$lock" 2>/dev/null || die "approval is already consumed"; [[ "$(artifact_value state)" == unused ]] || die "approval is already consumed"; sed 's/^state\tunused$/state\tconsumed/' "$ARTIFACT" >"$temp"; chmod 600 "$temp"; mv "$temp" "$ARTIFACT"; rmdir "$lock"; }
-deployment_active_prepare() { remote "sudo -n /usr/local/libexec/nextcloud-pi-ops active-record prepare '$TRANSACTION_ID' '$(sha256 "$TMP_DIR/rendered/active-images/active-images.env")' '$(size "$TMP_DIR/rendered/active-images/active-images.env")'" <"$TMP_DIR/rendered/active-images/active-images.env"; }
-deployment_active_apply() { remote "sudo -n /usr/local/libexec/nextcloud-pi-ops active-record apply '$TRANSACTION_ID'"; }
+deployment_active_prepare() { PHASE=active-prepare; remote "sudo -n /usr/local/libexec/nextcloud-pi-ops active-record prepare '$TRANSACTION_ID' '$(sha256 "$TMP_DIR/rendered/active-images/active-images.env")' '$(size "$TMP_DIR/rendered/active-images/active-images.env")'" <"$TMP_DIR/rendered/active-images/active-images.env"; PHASE=active-prepared; }
+deployment_active_apply() { PHASE=active-apply; remote "sudo -n /usr/local/libexec/nextcloud-pi-ops active-record apply '$TRANSACTION_ID'"; PHASE=active-applied; }
 deployment_active_rollback() { remote "sudo -n /usr/local/libexec/nextcloud-pi-ops active-record rollback '$TRANSACTION_ID'"; }
 deployment_active_commit() { remote "sudo -n /usr/local/libexec/nextcloud-pi-ops active-record commit '$TRANSACTION_ID'"; }
 deployment_application_install() { remote "set -eu; . '$stage/atomic-transaction.sh'; atomic_replace_preserve '$stage/docker-compose.yml' '$NEXTCLOUD_REMOTE_PROJECT_DIR/docker-compose.yml' 0644; atomic_replace_preserve '$stage/Caddyfile' '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile' 0644"; }
@@ -113,6 +113,24 @@ deployment_application_restore() { remote "set -eu; . '$stage/atomic-transaction
 deployment_restart() { remote "sudo -n /usr/local/libexec/nextcloud-pi-ops service restart"; }
 deployment_health() { bash "$SCRIPT_DIR/health-check.sh"; }
 deployment_rollback_health() { bash "$SCRIPT_DIR/health-check.sh" --caddyfile "$CONFIG_BACKUP/caddy/Caddyfile"; }
+cleanup() {
+  local status=$? rollback_failed=0
+  trap - EXIT HUP INT TERM
+  if (( ROLLBACK_ARMED )); then
+    deployment_application_restore || rollback_failed=1
+    deployment_active_rollback || rollback_failed=1
+    deployment_restart || rollback_failed=1
+    deployment_rollback_health || rollback_failed=1
+    if (( rollback_failed == 0 )); then deployment_active_commit || rollback_failed=1; fi
+    if (( rollback_failed != 0 )); then
+      printf 'Deployment interruption cleanup is incomplete; preserve transaction ID %s and remote stage %s\n' "$TRANSACTION_ID" "$stage" >&2
+    elif [[ -n "$stage" ]]; then
+      remote "rm -rf '$stage'" || printf 'Deployment rollback succeeded but stage cleanup failed: %s\n' "$stage" >&2
+    fi
+  fi
+  rm -rf "$TMP_DIR"
+  exit "$status"
+}
 plan() {
   local now remote_now fingerprint artifact prestate candidate expires
   TRANSACTION_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"; render; require_interface; remote_env_valid || die "Pi-only .env protections or key set failed"; validate_candidate
@@ -133,8 +151,15 @@ apply() {
   render; require_interface; remote_env_valid || die "Pi-only .env protections or key set failed"; validate_candidate; validate_recovery_inputs; verify_config_prestate; candidate="$(candidate_hash)"; prestate="$(prestate_hash)"; [[ "$(artifact_value candidate_sha256)" == "$candidate" && "$(artifact_value prestate_sha256)" == "$prestate" && "$(artifact_value bundle_manifest_sha256)" == "$(sha256 "$(bundle_manifest)")" && "$(artifact_value config_manifest_sha256)" == "$CONFIG_MANIFEST_SHA256" && "$(artifact_value runtime_manifest_sha256)" == "$RUNTIME_MANIFEST_SHA256" && "$(artifact_value image_manifest_sha256)" == "$IMAGE_MANIFEST_SHA256" && "$(artifact_value image_attestation_sha256)" == "$IMAGE_ATTESTATION_SHA256" && "$(artifact_value fingerprint)" == "$(approval_fingerprint "$candidate" "$prestate" "$(artifact_value created)" "$(artifact_value remote_created)" "$(artifact_value expires)")" ]] || die "candidate, recovery artifact, bundle, or pre-state changed"
   consume; cp "$CONFIG_BACKUP/compose/docker-compose.yml" "$TMP_DIR/rollback-compose.yml"; cp "$CONFIG_BACKUP/caddy/Caddyfile" "$TMP_DIR/rollback-Caddyfile"; stage="$NEXTCLOUD_REMOTE_PROJECT_DIR/.deploy-stage-$TRANSACTION_ID"; remote "umask 077; mkdir -m 0700 '$stage'" || die "could not create remote stage"
   scp -q "$TMP_DIR/rendered/docker-compose.yml" "$TMP_DIR/rendered/caddy/Caddyfile" "$TMP_DIR/rollback-compose.yml" "$TMP_DIR/rollback-Caddyfile" "$SCRIPT_DIR/lib/atomic-transaction.sh" "$REMOTE:$stage/" || die "staging failed"
+  ROLLBACK_ARMED=1
   deployment_run_application_transaction || status=$?
-  (( status == 0 )) || die "deployment failed; transaction ID: $TRANSACTION_ID"
+  if (( status == 1 )); then
+    ROLLBACK_ARMED=0
+    remote "rm -rf '$stage'" || printf 'Deployment rollback succeeded but stage cleanup failed: %s\n' "$stage" >&2
+    die "deployment failed and was rolled back; transaction ID: $TRANSACTION_ID"
+  fi
+  (( status == 0 )) || die "deployment failed; preserve transaction ID and remote stage: $TRANSACTION_ID $stage"
+  ROLLBACK_ARMED=0
   remote "rm -rf '$stage'"; printf 'Deployment applied with consumed approval artifact: %s\n' "$ARTIFACT"
 }
 case "$MODE" in

@@ -5,4 +5,9 @@ bash -n "$DEPLOYER"
 for text in deploy-approval-v2 transaction_id bundle_manifest_sha256 active-record\ prepare active-record\ rollback active-record\ commit 'service restart' root-code; do grep -Fq "$text" "$DEPLOYER"; done
 ! grep -Eq 'sudo -n (systemctl|install|cp|mv|rm|mkdir|rmdir|cat|awk|sha256sum)' "$DEPLOYER"
 grep -Fq 'atomic_replace_preserve' "$DEPLOYER"
+grep -Fq 'ROLLBACK_ARMED=1' "$DEPLOYER"
+grep -Fq 'Deployment interruption cleanup is incomplete' "$DEPLOYER"
+grep -Fq 'deployment_application_restore || rollback_failed=1' "$DEPLOYER"
+grep -Fq 'deployment_active_rollback || rollback_failed=1' "$DEPLOYER"
+grep -Fq 'deployment_rollback_health || rollback_failed=1' "$DEPLOYER"
 printf 'configuration deployment boundary tests passed\n'

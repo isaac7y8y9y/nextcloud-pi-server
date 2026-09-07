@@ -4,6 +4,7 @@ set -euo pipefail
 sha256_file() { sha256sum "$1" | awk '{print $1}'; }
 size_file() { wc -c <"$1" | tr -d '[:space:]'; }
 IMAGE_IMPORT_ID="${IMAGE_IMPORT_ID:-20260906T000000Z-1}"
+IMAGE_IMPORT_ACTIVE_PREPARED=0
 
 image_import_failure_record() {
   umask 077
@@ -30,24 +31,27 @@ image_import_rollback() {
   image_import_failure_record
   image_import_stop_and_remove
   while IFS=$'\t' read -r tag id; do docker tag "$id" "$tag"; done <"$IMAGE_IMPORT_STAGE/prior-tags.tsv"
-  sudo -n /usr/local/libexec/nextcloud-pi-ops active-record rollback "$IMAGE_IMPORT_ID"
+  if (( IMAGE_IMPORT_ACTIVE_PREPARED )); then
+    sudo -n /usr/local/libexec/nextcloud-pi-ops active-record rollback "$IMAGE_IMPORT_ID"
+  fi
   sudo -n /usr/local/libexec/nextcloud-pi-ops service start
 }
 
 image_import_apply() {
   local record_hash record_size
-  record_hash="$(sha256_file "$IMAGE_IMPORT_STAGE/recovered.env")"
-  record_size="$(size_file "$IMAGE_IMPORT_STAGE/recovered.env")"
-  sudo -n /usr/local/libexec/nextcloud-pi-ops active-record prepare "$IMAGE_IMPORT_ID" "$record_hash" "$record_size" <"$IMAGE_IMPORT_STAGE/recovered.env"
   for tag in "$IMAGE_IMPORT_APP_TAG" "$IMAGE_IMPORT_DB_TAG" "$IMAGE_IMPORT_CADDY_TAG"; do
     printf '%s\t%s\n' "$tag" "$(docker image inspect --format '{{.Id}}' "$tag")"
   done >"$IMAGE_IMPORT_STAGE/prior-tags.tsv"
   trap 'trap - EXIT HUP INT TERM; image_import_rollback; exit 1' EXIT HUP INT TERM
-  image_import_stop_and_remove
   cd "$IMAGE_IMPORT_PROJECT"
   docker load -i "$IMAGE_IMPORT_STAGE/images.tar"
   awk -F '\t' '$1 == "image" { print $2 "\t" $3 }' "$IMAGE_IMPORT_STAGE/restore-attestation.tsv" >"$IMAGE_IMPORT_STAGE/attested-tags.tsv"
   while IFS=$'\t' read -r tag id; do test "$(docker image inspect --format '{{.Id}}' "$tag")" = "$id"; done <"$IMAGE_IMPORT_STAGE/attested-tags.tsv"
+  record_hash="$(sha256_file "$IMAGE_IMPORT_STAGE/recovered.env")"
+  record_size="$(size_file "$IMAGE_IMPORT_STAGE/recovered.env")"
+  sudo -n /usr/local/libexec/nextcloud-pi-ops active-record prepare "$IMAGE_IMPORT_ID" "$record_hash" "$record_size" <"$IMAGE_IMPORT_STAGE/recovered.env"
+  IMAGE_IMPORT_ACTIVE_PREPARED=1
+  image_import_stop_and_remove
   sudo -n /usr/local/libexec/nextcloud-pi-ops active-record apply "$IMAGE_IMPORT_ID"
   sudo -n /usr/local/libexec/nextcloud-pi-ops service start
   trap - EXIT HUP INT TERM

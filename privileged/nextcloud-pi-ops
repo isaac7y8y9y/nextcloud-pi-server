@@ -140,7 +140,14 @@ with tarfile.open(sys.argv[1], 'r:*') as archive:
     seen=set()
     for member in archive:
         name=member.name; normal=posixpath.normpath(name)
-        if not name or name.startswith('/') or normal in ('', '.', '..') or normal.startswith('../') or normal in seen: raise SystemExit(1)
+        # GNU tar represents an archive made with "-C source ." using this
+        # harmless root-directory member. It is needed for the fixed Caddy
+        # volume streams; no other spelling or file type is accepted.
+        if normal == '.':
+            if name not in ('.', './') or not member.isdir() or normal in seen: raise SystemExit(1)
+            seen.add(normal)
+            continue
+        if not name or name.startswith('/') or normal in ('', '..') or normal.startswith('../') or normal in seen: raise SystemExit(1)
         seen.add(normal)
         if member.isdev() or member.isfifo() or member.uid < 0 or member.gid < 0 or member.mode & (stat.S_ISUID|stat.S_ISGID|stat.S_IWOTH): raise SystemExit(1)
         if member.issym() or member.islnk():
