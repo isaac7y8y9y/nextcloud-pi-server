@@ -3,9 +3,17 @@ set -euo pipefail
 
 # Shared closed-schema validator used before every image-resolving start and by
 # health/conformance checks, so a green health check cannot mask a bad restart.
-readonly RECORD=/etc/nextcloud-pi/active-images.env
+RECORD=/etc/nextcloud-pi/active-images.env
 die() { printf 'active image record error: %s\n' "$1" >&2; exit 1; }
 value() { local key="$1"; awk -F= -v key="$key" '$1 == key { count++; value=$2 } END { if (count == 1) print value; else exit 1 }' "$RECORD"; }
+case "$#" in
+  0) ;;
+  2)
+    [[ "$1" == --record && "$2" == /var/lib/nextcloud-pi-ops/* && "$2" != *'/../'* && "$2" != */.. ]] || die "invalid record argument"
+    RECORD="$2"
+    ;;
+  *) die "invalid arguments" ;;
+esac
 [[ -f "$RECORD" && ! -L "$RECORD" && "$(stat -c '%a' "$RECORD")" == 600 && "$(stat -c '%u' "$RECORD")" == 0 ]] || die "record protection is invalid"
 while IFS= read -r line || [[ -n "$line" ]]; do
   [[ "$line" =~ ^([A-Z][A-Z0-9_]*)=(.+)$ ]] || die "record has an invalid line"

@@ -23,3 +23,11 @@ The rendered Docker drop-in gates Docker itself on the storage mount. A
 root-only launcher validates the protected active-image record before Compose
 creates or recreates containers. The record distinguishes normal source images
 from the different tag IDs produced by a verified offline archive import.
+
+Privileged Mac-to-Pi actions cross one narrow boundary: the root-owned
+`/usr/local/libexec/nextcloud-pi-ops` dispatcher. Its root-only policy fixes
+the target identity, storage, service, names, and lifecycle roots; routine
+deployment can submit only validated active-image data and cannot replace root
+code. The deployment account's existing access to the live Docker daemon is
+residual authority. Restore-readiness instead starts an isolated daemon with a
+helper-generated socket and never uses the live Docker socket.

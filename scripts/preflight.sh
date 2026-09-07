@@ -310,9 +310,9 @@ else
 fi
 
 check_active_image_identity() {
-  local active_image_mode
-  if remote "sudo -n /usr/local/libexec/nextcloud-pi-validate-active-images" >/dev/null 2>&1; then
-    active_image_mode="$(remote "sudo -n awk -F= '\$1 == \"NEXTCLOUD_ACTIVE_IMAGES_MODE\" { print \$2 }' /etc/nextcloud-pi/active-images.env" 2>/dev/null || true)"
+  local active_image_mode output state
+  if output="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops active-images-state" 2>/dev/null)"; then
+    active_image_mode="$(awk -F $'\t' '$1 == "mode" { print $2 }' <<<"$output")"
     if [[ "$active_image_mode" == source ]]; then
       record PASS "Protected source active-image record matches local image tags"
     elif [[ "$PREFLIGHT_MODE" == "--readiness" ]]; then
@@ -320,7 +320,7 @@ check_active_image_identity() {
     else
       record PASS "Protected recovered active-image record matches local image tags"
     fi
-  elif [[ "$PREFLIGHT_MODE" == "--readiness" ]] && remote "sudo -n test ! -e /etc/nextcloud-pi/active-images.env && sudo -n test ! -L /etc/nextcloud-pi/active-images.env" >/dev/null 2>&1; then
+  elif [[ "$PREFLIGHT_MODE" == "--readiness" ]] && output="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops protected-state active-image-record" 2>/dev/null || true)" && state="$(awk -F $'\t' '$1 == "state" { print $2 }' <<<"$output")" && [[ "$state" == missing ]]; then
     record WARNING "Active image record is absent; this is reviewed safety-baseline drift"
   else
     record FAIL "Protected active image record is invalid, unreadable, or differs"
@@ -450,8 +450,13 @@ fi
 section "Safe configuration comparison"
 
 compare_normalized_file_to_remote_command "Caddyfile" "$RENDERED_CONFIG_DIR/caddy/Caddyfile" "cat '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile'" "$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile"
-compare_file_to_remote_command "Root-only startup launcher" "$RENDERED_CONFIG_DIR/launcher/nextcloud-pi-compose-start" "sudo -n cat /usr/local/libexec/nextcloud-pi-compose-start" "/usr/local/libexec/nextcloud-pi-compose-start"
-compare_file_to_remote_command "Root-only active-image validator" "$RENDERED_CONFIG_DIR/launcher/nextcloud-pi-validate-active-images" "sudo -n cat /usr/local/libexec/nextcloud-pi-validate-active-images" "/usr/local/libexec/nextcloud-pi-validate-active-images"
+for protected in compose-launcher active-image-validator; do
+  if remote "sudo -n /usr/local/libexec/nextcloud-pi-ops protected-state '$protected'" >/dev/null 2>&1; then
+    record PASS "Root-only protected resource is present: $protected"
+  else
+    record FAIL "Root-only protected resource is missing or unsafe: $protected"
+  fi
+done
 compare_normalized_file_to_remote_command "systemd service" "$RENDERED_CONFIG_DIR/systemd/nextcloud.service" "cat /etc/systemd/system/nextcloud.service" "/etc/systemd/system/nextcloud.service"
 compare_file_to_remote_command "Docker storage mount drop-in" "$RENDERED_CONFIG_DIR/systemd/docker.service.d/nextcloud-storage.conf" "cat /etc/systemd/system/docker.service.d/nextcloud-storage.conf" "/etc/systemd/system/docker.service.d/nextcloud-storage.conf"
 

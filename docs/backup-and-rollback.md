@@ -50,6 +50,10 @@ export NEXTCLOUD_RUNTIME_BACKUP_ROOT=/absolute/private/nextcloud-backups
 scripts/backup-runtime-state.sh --check
 ```
 
+The check and archive streams use the fixed `runtime-backup` helper commands.
+They select only the policy-bound data sets and do not accept an archive or
+filesystem path from the Mac.
+
 Review the reported prerequisites and aggregate sizes. This command creates no
 approval artifact. Stop here until the operator has explicitly approved the
 temporary maintenance-mode transition and private local backup creation.

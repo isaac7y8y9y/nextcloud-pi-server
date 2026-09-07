@@ -22,3 +22,19 @@ finding is a security-remediation blocker, not a reason to weaken either rule.
 Use the [focused local validation](operations.md#focused-local-validation)
 before publication and the canonical GitHub workflow for the full regression
 and history gates.
+
+## Least-privilege Pi operations
+
+Routine Mac-to-Pi automation has one passwordless entry point:
+`sudo -n /usr/local/libexec/nextcloud-pi-ops`. The root-owned dispatcher reads
+only `/etc/nextcloud-pi/privileged-policy.conf`, accepts fixed commands and
+logical names, and keeps lifecycle state beneath its root-owned state root.
+Routine deployment cannot replace the helper, sudoers policy, validator,
+launcher, systemd files, or root policy.
+
+Installing, upgrading, rolling back, revoking, or removing this interface uses
+`scripts/manage-pi-privileged-interface.sh` and interactive administrator
+authentication. The deployment account retains existing live-Docker access;
+that residual authority is intentionally unchanged. Isolated image readiness
+uses its own dispatcher-generated socket and never accesses the live Docker
+socket.

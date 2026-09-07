@@ -41,6 +41,22 @@ reset_fixture() {
 
 sudo() {
   [[ "$1" == -n ]] && shift
+  if [[ "$1" == /usr/local/libexec/nextcloud-pi-ops ]]; then
+    shift
+    case "$1:${2:-}" in
+      service:stop) printf 'stop\n' >>"$TEST_DIR/systemctl.log"; : >"$TEST_DIR/containers"; return 0 ;;
+      service:start)
+        count="$(cat "$TEST_DIR/start-count")"; count=$((count + 1)); printf '%s\n' "$count" >"$TEST_DIR/start-count"; printf 'start\n' >>"$TEST_DIR/systemctl.log"
+        [[ "$SCENARIO" == restart_failure && "$count" == 1 ]] && return 1
+        printf 'running\n' >"$TEST_DIR/containers"; return 0 ;;
+      active-record:prepare) cp "$TEST_DIR/active.env" "$IMAGE_IMPORT_STAGE/prior-active.env"; cat >/dev/null; return 0 ;;
+      active-record:apply)
+        [[ "$SCENARIO" == active_record_failure ]] && return 1
+        cp "$IMAGE_IMPORT_STAGE/recovered.env" "$TEST_DIR/active.env"; return 0 ;;
+      active-record:rollback) cp "$IMAGE_IMPORT_STAGE/prior-active.env" "$TEST_DIR/active.env"; return 0 ;;
+      active-record:commit) return 0 ;;
+    esac
+  fi
   if [[ "$1 $2" == 'systemctl stop' ]]; then printf 'stop\n' >>"$TEST_DIR/systemctl.log"; return 0; fi
   if [[ "$1 $2" == 'systemctl start' ]]; then
     count="$(cat "$TEST_DIR/start-count")"; count=$((count + 1)); printf '%s\n' "$count" >"$TEST_DIR/start-count"; printf 'start\n' >>"$TEST_DIR/systemctl.log"

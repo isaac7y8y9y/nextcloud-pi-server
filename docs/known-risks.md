@@ -13,6 +13,9 @@
   Docker socket.
 - Deployment identity and credentials must stay in ignored local files, never
   in Git history, issues, pull requests, or generated reports.
+- The deployment account retains its pre-existing live Docker-daemon access.
+  The dispatcher narrows sudo authority but cannot remove that separate Docker
+  authority; isolate and audit access to that account accordingly.
 
 Run the [read-only preflight](operations.md#read-only-pi-checks) and follow the
 [backup verification procedures](backup-and-rollback.md) before operational

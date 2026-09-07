@@ -1,0 +1,3 @@
+Defaults:@NEXTCLOUD_PI_USER@ env_reset
+Defaults:@NEXTCLOUD_PI_USER@ !setenv
+@NEXTCLOUD_PI_USER@ ALL=(root) NOPASSWD: /usr/local/libexec/nextcloud-pi-ops

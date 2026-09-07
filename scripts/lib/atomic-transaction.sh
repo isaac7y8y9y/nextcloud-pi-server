@@ -1,24 +1,12 @@
 #!/usr/bin/env bash
 
-# Shared privileged file primitives for the production deployment and its
-# disposable drill. Callers own transaction ordering and rollback policy.
-
+# Atomic replacement for deployment-user-owned Compose and Caddy files only.
 atomic_install_root() {
-  local source="$1" target="$2" mode="$3" tmp
-  tmp="$(dirname -- "$target")/.nextcloud-pi-$(basename -- "$target").$$.new"
-  if ! sudo -n install -m "$mode" "$source" "$tmp" || ! sudo -n mv -f "$tmp" "$target"; then
-    sudo -n rm -f "$tmp"
-    return 1
-  fi
-}
-
-atomic_restore_root() {
-  local source="$1" target="$2" tmp
-  tmp="$(dirname -- "$target")/.nextcloud-pi-$(basename -- "$target").$$.restore"
-  if ! sudo -n cp -p "$source" "$tmp" || ! sudo -n mv -f "$tmp" "$target"; then
-    sudo -n rm -f "$tmp"
-    return 1
-  fi
+  # Compatibility primitive for the isolated regression fixture. Production
+  # root writes are exclusively handled by nextcloud-pi-ops.
+  local source="$1" target="$2" expected_mode="$3" temp
+  temp="$(dirname -- "$target")/.nextcloud-pi-$(basename -- "$target").$$.new"
+  if ! install -m "$expected_mode" "$source" "$temp" || ! mv -f "$temp" "$target"; then rm -f "$temp"; return 1; fi
 }
 
 atomic_replace_preserve() {
@@ -27,8 +15,10 @@ atomic_replace_preserve() {
   uid="$(stat -c '%u' "$target")" || return 1
   gid="$(stat -c '%g' "$target")" || return 1
   tmp="$(dirname -- "$target")/.nextcloud-pi-$(basename -- "$target").$$.replace"
-  if ! sudo -n install -m "$mode" -o "$uid" -g "$gid" "$source" "$tmp" || ! sudo -n mv -f "$tmp" "$target"; then
-    sudo -n rm -f "$tmp"
+  if ! cp "$source" "$tmp" || ! chmod "$mode" "$tmp"; then
+    rm -f "$tmp"
     return 1
   fi
+  if [[ "$(stat -c '%g' "$tmp")" != "$gid" ]] && ! chgrp "$gid" "$tmp"; then rm -f "$tmp"; return 1; fi
+  if ! mv -f "$tmp" "$target"; then rm -f "$tmp"; return 1; fi
 }

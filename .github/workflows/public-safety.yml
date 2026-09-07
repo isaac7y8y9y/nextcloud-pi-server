@@ -28,7 +28,11 @@ jobs:
 
       - name: Run repository and publication-safety tests
         run: |
-          bash -n scripts/*.sh scripts/lib/*.sh
+          bash -n scripts/*.sh scripts/lib/*.sh privileged/nextcloud-pi-ops privileged/nextcloud-pi-bundle-installer systemd/nextcloud-pi-validate-active-images
+          bash scripts/test-privileged-helper.sh
+          bash scripts/test-privileged-installer.sh
+          bash scripts/test-privileged-sudoers.sh
+          bash scripts/check-privileged-sudo-calls.sh
           bash scripts/test-deployment-config.sh
           bash scripts/test-compose-env-references.sh
           bash scripts/test-image-lock.sh

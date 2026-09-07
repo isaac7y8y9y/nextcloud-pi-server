@@ -163,8 +163,8 @@ Before approval, review all of the following:
 - the target hostname and candidate fingerprint;
 - every live-to-candidate file hash;
 - source-locked image tags and lock hash;
-- actions: safety baseline, Compose/Caddy replacement, daemon reload, restart,
-  health check, and configuration rollback; and
+- actions: sealed active-image record, Compose/Caddy replacement, bounded
+  service restart, health check, and configuration rollback; and
 - exclusions: `.env`, runtime data, volumes, images, pulls, pruning, image
   removal, and runtime recovery.
 
@@ -189,10 +189,11 @@ Apply recaptures and compares the bound state, then atomically marks the
 approval consumed before staging or remote mutation. A staging or apply failure
 after consumption requires a new plan and approval.
 
-The transaction installs the safety baseline first. It then replaces only the
-tracked Compose and Caddy application configuration, reloads systemd, restarts
-`nextcloud.service`, and runs the full health check. It never copies `.env` or
-runtime data and never pulls, prunes, removes, or imports images.
+The transaction first seals and applies the validated active-image record in
+root-owned helper state. It then replaces only the tracked Compose and Caddy
+application configuration, restarts `nextcloud.service` through the fixed
+helper action, and runs the full health check. It never copies `.env` or runtime
+data and never pulls, prunes, removes, or imports images.
 
 ## 8. Confirm the outcome
 
@@ -208,10 +209,10 @@ Health validation covers target identity, storage, active-image identity,
 containers, MariaDB, Nextcloud installation and maintenance state, direct app
 port policy, Caddy configuration, and HTTPS.
 
-If safety-baseline installation fails, the transaction restores the previous
-safety files. If application installation, restart, or health validation fails,
-it restores the verified Compose and Caddy pre-state and checks rollback health.
-Follow the exact terminal message:
+If application installation, restart, or health validation fails, the
+transaction restores the verified Compose and Caddy pre-state, restores the
+helper-owned active-image snapshot, restarts through the helper, and checks
+rollback health. Follow the exact terminal message:
 
 - `application change rolled back` means live configuration was restored; make
   a new plan before retrying;

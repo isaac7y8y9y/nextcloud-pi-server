@@ -25,7 +25,8 @@ grep -Fq 'remote "docker image inspect --format '\''{{.Id}}'\'' '\''$tag'\''" </
 grep -Fq 'isolated_result' "$SCRIPT_DIR/verify-image-recovery.sh"
 grep -Fq 'attested_source_id' "$SCRIPT_DIR/verify-image-recovery.sh"
 grep -Fq 'isolated_docker_host' "$SCRIPT_DIR/test-image-restore-readiness.sh"
-grep -Fq 'sudo -n /usr/local/libexec/nextcloud-pi-validate-active-images' "$SCRIPT_DIR/test-runtime-recovery.sh"
+grep -Fq 'sudo -n /usr/local/libexec/nextcloud-pi-ops active-images-state' "$SCRIPT_DIR/test-runtime-recovery.sh"
+grep -Fq 'transaction_id' "$IMPORTER"
 grep -Fq 'record_value host' "$IMPORTER"
 grep -Fq 'clock_skew_ok "$(date -u +%s)" "$(remote '\''date -u +%s'\'')"' "$IMPORTER"
 

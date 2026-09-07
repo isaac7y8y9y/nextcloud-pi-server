@@ -57,24 +57,8 @@ remote() {
 }
 
 validate_runtime_recovery_image_identity() {
-  local tag expected
-
-  # Before the safety baseline exists, the source lock is the only available
-  # identity authority. Once a validator exists, an absent or malformed record
-  # must fail there instead of silently falling back to source mode.
-  if remote "sudo -n test -x /usr/local/libexec/nextcloud-pi-validate-active-images"; then
-    remote "sudo -n /usr/local/libexec/nextcloud-pi-validate-active-images" ||
-      { die "installed active-image validator rejected the Pi image state"; return 1; }
-    return 0
-  fi
-
-  remote "sudo -n test ! -e /etc/nextcloud-pi/active-images.env && sudo -n test ! -L /etc/nextcloud-pi/active-images.env" ||
-    { die "active-image validator is absent but an active-image record exists"; return 1; }
-  while IFS= read -r tag; do
-    expected="$(image_lock_expected_id "$tag")"
-    remote "docker image inspect --format '{{.Id}}' '$tag' | grep -Fx '$expected' >/dev/null" </dev/null ||
-      { die "source-locked image is missing or differs: $tag"; return 1; }
-  done < <(image_lock_tags)
+  remote "sudo -n /usr/local/libexec/nextcloud-pi-ops active-images-state" ||
+    { die "installed privileged interface rejected the Pi image state"; return 1; }
 }
 
 is_safe_remote_path() {
@@ -130,13 +114,8 @@ cleanup_targets() {
       cleanup_failed=1
     fi
   fi
-  if [[ -n "$REMOTE_TEST_ROOT" && "$REMOTE_TEST_ROOT" == "$NEXTCLOUD_STORAGE_MOUNT"/.nextcloud-recovery-test-* ]]; then
-    if ! remote "set -e
-      if test -d '$REMOTE_TEST_ROOT'; then
-        sudo -n find '$REMOTE_TEST_ROOT' -depth -delete
-      fi
-      test ! -e '$REMOTE_TEST_ROOT'
-    " >/dev/null 2>&1; then
+  if [[ -n "$RECOVERY_TEST_ID" ]]; then
+    if ! remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-recovery cleanup '$RECOVERY_TEST_ID'" >/dev/null 2>&1; then
       warn "could not verify removal of the disposable recovery directory"
       warn "retry with: ./scripts/test-runtime-recovery.sh --cleanup $RECOVERY_TEST_ID"
       cleanup_failed=1
@@ -181,9 +160,8 @@ verify_target_binding() {
   [[ "$(manifest_value caddy_config_volume)" == "$NEXTCLOUD_CADDY_CONFIG_VOLUME" ]] || die "backup Caddy config volume does not match"
 
   remote "set -e
-    command -v tar >/dev/null
     command -v openssl >/dev/null
-    sudo -n true
+    sudo -n /usr/local/libexec/nextcloud-pi-ops check >/dev/null
     docker exec '$NEXTCLOUD_DB_CONTAINER' sh -c 'command -v mariadb >/dev/null'
     docker exec '$NEXTCLOUD_DB_CONTAINER' sh -c 'command -v mariadb-check >/dev/null'
   " >/dev/null
@@ -196,7 +174,7 @@ verify_target_binding() {
   # configured storage mount. Budget archive-sized extraction space, three times the SQL dump
   # for database expansion, and one GiB of operational margin.
   required_bytes=$((nextcloud_archive_bytes + database_dump_bytes * 3 + caddy_data_archive_bytes + caddy_config_archive_bytes + 1073741824))
-  available_bytes="$(remote "df -B1 --output=avail '$NEXTCLOUD_STORAGE_MOUNT' | tail -1 | tr -d '[:space:]'")"
+  available_bytes="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-recovery check '$RECOVERY_TEST_ID' '$required_bytes'" | awk -F '\t' '$1 == "available_bytes" { print $2 }')"
   [[ "$available_bytes" =~ ^[0-9]+$ ]] || die "could not determine Pi free space"
   (( available_bytes > required_bytes )) || die "insufficient Pi space for isolated recovery test"
 
@@ -240,6 +218,9 @@ if (( CLEANUP_ONLY != 0 )); then
 fi
 "$SCRIPT_DIR/verify-runtime-backup.sh" "$BACKUP_DIR" >/dev/null
 BACKUP_DIR="$(cd -- "$BACKUP_DIR" && pwd -P)"
+RECOVERY_TEST_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+REMOTE_TEST_ROOT="$NEXTCLOUD_STORAGE_MOUNT/.nextcloud-recovery-test-$RECOVERY_TEST_ID"
+TEST_DB_CONTAINER="nextcloud-recovery-test-db-$RECOVERY_TEST_ID"
 verify_target_binding
 
 if (( APPLY == 0 )); then
@@ -247,45 +228,26 @@ if (( APPLY == 0 )); then
   exit 0
 fi
 
-RECOVERY_TEST_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-REMOTE_TEST_ROOT="$NEXTCLOUD_STORAGE_MOUNT/.nextcloud-recovery-test-$RECOVERY_TEST_ID"
-TEST_DB_CONTAINER="nextcloud-recovery-test-db-$RECOVERY_TEST_ID"
 printf 'Recovery-test ID: %s\n' "$RECOVERY_TEST_ID"
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-remote "set -e
-  test ! -e '$REMOTE_TEST_ROOT'
-  sudo -n install -d -m 0700 -o '$NEXTCLOUD_PI_USER' -g '$NEXTCLOUD_PI_USER' '$REMOTE_TEST_ROOT'
-  # Separate roots add defense in depth to the verifier's archive namespaces:
-  # one archive cannot replace another archive's extraction directory.
-  install -d -m 0700 \
-    '$REMOTE_TEST_ROOT/nextcloud-restore' \
-    '$REMOTE_TEST_ROOT/caddy-data-restore' \
-    '$REMOTE_TEST_ROOT/caddy-config-restore' \
-    '$REMOTE_TEST_ROOT/mariadb-data'
-" >/dev/null
+remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-recovery prepare '$RECOVERY_TEST_ID'" >/dev/null
+
+sha256_file() { if command -v sha256sum >/dev/null; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+size_file() { wc -c <"$1" | tr -d '[:space:]'; }
 
 printf 'Restoring Nextcloud archive into an isolated Pi directory...\n'
-remote "test -d '$REMOTE_TEST_ROOT/nextcloud-restore' && test ! -L '$REMOTE_TEST_ROOT/nextcloud-restore' &&
-  sudo -n tar --numeric-owner --acls --xattrs -xpf - -C '$REMOTE_TEST_ROOT/nextcloud-restore'" <"$BACKUP_DIR/nextcloud/nextcloud.tar"
-remote "test -d '$REMOTE_TEST_ROOT/nextcloud-restore' && test ! -L '$REMOTE_TEST_ROOT/nextcloud-restore' &&
-  sudo -n tar --compare -f - -C '$REMOTE_TEST_ROOT/nextcloud-restore' >/dev/null 2>&1" <"$BACKUP_DIR/nextcloud/nextcloud.tar" ||
+remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-recovery restore '$RECOVERY_TEST_ID' nextcloud '$(sha256_file "$BACKUP_DIR/nextcloud/nextcloud.tar")' '$(size_file "$BACKUP_DIR/nextcloud/nextcloud.tar")'" <"$BACKUP_DIR/nextcloud/nextcloud.tar" ||
   die "restored Nextcloud tree differs from its archive"
 printf 'CHECK: isolated Nextcloud restore matches its protected archive\n'
 
 printf 'Restoring and comparing Caddy TLS state in isolated directories...\n'
-remote "test -d '$REMOTE_TEST_ROOT/caddy-data-restore' && test ! -L '$REMOTE_TEST_ROOT/caddy-data-restore' &&
-  sudo -n tar --numeric-owner --acls --xattrs -xpf - -C '$REMOTE_TEST_ROOT/caddy-data-restore'" <"$BACKUP_DIR/caddy/data.tar"
-remote "test -d '$REMOTE_TEST_ROOT/caddy-config-restore' && test ! -L '$REMOTE_TEST_ROOT/caddy-config-restore' &&
-  sudo -n tar --numeric-owner --acls --xattrs -xpf - -C '$REMOTE_TEST_ROOT/caddy-config-restore'" <"$BACKUP_DIR/caddy/config.tar"
-remote "test -d '$REMOTE_TEST_ROOT/caddy-data-restore' && test ! -L '$REMOTE_TEST_ROOT/caddy-data-restore' &&
-  sudo -n tar --compare -f - -C '$REMOTE_TEST_ROOT/caddy-data-restore' >/dev/null 2>&1" <"$BACKUP_DIR/caddy/data.tar" ||
+remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-recovery restore '$RECOVERY_TEST_ID' caddy-data '$(sha256_file "$BACKUP_DIR/caddy/data.tar")' '$(size_file "$BACKUP_DIR/caddy/data.tar")'" <"$BACKUP_DIR/caddy/data.tar" ||
   die "restored Caddy data differs from its archive"
-remote "test -d '$REMOTE_TEST_ROOT/caddy-config-restore' && test ! -L '$REMOTE_TEST_ROOT/caddy-config-restore' &&
-  sudo -n tar --compare -f - -C '$REMOTE_TEST_ROOT/caddy-config-restore' >/dev/null 2>&1" <"$BACKUP_DIR/caddy/config.tar" ||
+remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-recovery restore '$RECOVERY_TEST_ID' caddy-config '$(sha256_file "$BACKUP_DIR/caddy/config.tar")' '$(size_file "$BACKUP_DIR/caddy/config.tar")'" <"$BACKUP_DIR/caddy/config.tar" ||
   die "restored Caddy config differs from its archive"
 printf 'CHECK: isolated Caddy TLS restore matches its protected archives\n'
 

@@ -56,6 +56,10 @@ script that restores a runtime backup into live Nextcloud, MariaDB, and Caddy
 state. A passed drill is recovery evidence, not authority or tooling for a live
 runtime restore.
 
+The helper derives every disposable recovery path from that ID beneath the
+policy-bound storage mount. It validates the mount and UUID again before each
+creation, restoration, or recursive cleanup; never substitute a path manually.
+
 ## Image recovery and restore-readiness
 
 Image recovery has four distinct stages: export, offline verification,

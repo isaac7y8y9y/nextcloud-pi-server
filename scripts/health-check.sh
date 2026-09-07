@@ -68,7 +68,8 @@ fi
 prepare_health_config "$@"
 
 retry_remote "target identity and storage mount" "test \"\$(hostname)\" = '$NEXTCLOUD_PI_SYSTEM_HOSTNAME' && findmnt -rn --target '$NEXTCLOUD_STORAGE_MOUNT' >/dev/null"
-retry_remote "active image identity" "sudo -n /usr/local/libexec/nextcloud-pi-validate-active-images"
+retry_remote "privileged interface" "sudo -n /usr/local/libexec/nextcloud-pi-ops check"
+retry_remote "active image identity" "sudo -n /usr/local/libexec/nextcloud-pi-ops active-images-state"
 for container in nextcloud-docker-db-1 nextcloud-docker-app-1 nextcloud-docker-caddy-1; do
   retry_remote "container $container" "test \"\$(docker inspect --format '{{.State.Running}}' '$container' 2>/dev/null || true)\" = true"
 done

@@ -1,0 +1,159 @@
+#!/bin/bash
+set -euo pipefail
+
+# This file is copied to a root-owned temporary path and run through an
+# interactive administrator sudo session. It is never a sudoers command.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C
+umask 077
+unset CDPATH ENV BASH_ENV GLOBIGNORE 2>/dev/null || true
+[[ "$EUID" == 0 ]] || exit 1
+
+readonly STATE=/var/lib/nextcloud-pi-ops
+readonly BACKUPS="$STATE/installer-backups"
+readonly INSTALL_LOCK=/run/lock/nextcloud-pi-installer.lock
+readonly OPS_LOCK=/run/lock/nextcloud-pi-ops.lock
+managed=(
+  /usr/local/libexec/nextcloud-pi-ops
+  /usr/local/libexec/nextcloud-pi-validate-active-images
+  /usr/local/libexec/nextcloud-pi-compose-start
+  /etc/nextcloud-pi/privileged-policy.conf
+  /etc/nextcloud-pi/bundle-manifest.tsv
+  /etc/systemd/system/nextcloud.service
+  /etc/systemd/system/docker.service.d/nextcloud-storage.conf
+  /etc/sudoers.d/nextcloud-pi-automation
+)
+
+die() { printf 'nextcloud-pi installer: %s\n' "$1" >&2; exit 1; }
+sha256() { sha256sum "$1" | awk '{print $1}'; }
+atomic_install() {
+  local source="$1" target="$2" expected_mode="$3" parent temp
+  parent="$(dirname -- "$target")"; install -d -m 0755 -o root -g root "$parent"
+  temp="$(mktemp "$parent/.nextcloud-pi-$(basename -- "$target").XXXXXX")"
+  if ! install -m "$expected_mode" -o root -g root "$source" "$temp" || ! mv -f -- "$temp" "$target"; then rm -f -- "$temp"; return 1; fi
+}
+snapshot() {
+  local root="$1" index=0 path
+  mkdir -m 700 "$root" "$root/files"; : >"$root/metadata.tsv"
+  for path in "${managed[@]}"; do
+    if [[ -f "$path" && ! -L "$path" ]]; then
+      printf 'present\t%s\t%s\t%s\t%s\n' "$path" "$(stat -c '%a' "$path")" "$(stat -c '%u' "$path")" "$(stat -c '%g' "$path")" >>"$root/metadata.tsv"
+      cp -p "$path" "$root/files/$index"
+    elif [[ ! -e "$path" && ! -L "$path" ]]; then
+      printf 'absent\t%s\t-\t-\t-\n' "$path" >>"$root/metadata.tsv"
+    else
+      return 1
+    fi
+    index=$((index + 1))
+  done
+  chmod 600 "$root/metadata.tsv"
+}
+restore() {
+  local root="$1" entry path mode uid gid index=0
+  [[ -d "$root" && ! -L "$root" && "$(stat -c '%u:%a' "$root")" == 0:700 ]] || return 1
+  while IFS=$'\t' read -r entry path mode uid gid; do
+    case "$entry" in
+      present) atomic_install "$root/files/$index" "$path" "$mode" ;;
+      absent) rm -f -- "$path" ;;
+      *) return 1 ;;
+    esac
+    index=$((index + 1))
+  done <"$root/metadata.tsv"
+  visudo -c >/dev/null
+  systemctl daemon-reload
+}
+validate_manifest() {
+  local file="$1"
+  awk -F '\t' '
+    BEGIN {
+      p["privileged-helper"]="/usr/local/libexec/nextcloud-pi-ops"; m["privileged-helper"]="0700"
+      p["active-image-validator"]="/usr/local/libexec/nextcloud-pi-validate-active-images"; m["active-image-validator"]="0700"
+      p["compose-launcher"]="/usr/local/libexec/nextcloud-pi-compose-start"; m["compose-launcher"]="0700"
+      p["nextcloud-unit"]="/etc/systemd/system/nextcloud.service"; m["nextcloud-unit"]="0644"
+      p["docker-storage-drop-in"]="/etc/systemd/system/docker.service.d/nextcloud-storage.conf"; m["docker-storage-drop-in"]="0644"
+    }
+    $1 == "format" && $2 == "nextcloud-pi-bundle-manifest-v1" && NF == 2 { f++; next }
+    $1 == "version" && $2 == "1" && NF == 2 { v++; next }
+    $1 == "file" && NF == 6 && ($2 in p) && $4 == p[$2] && $5 == m[$2] && $6 ~ /^[0-9a-f]{64}$/ { c[$2]++; next }
+    { bad=1 }
+    END { for (x in p) if (c[x] != 1) bad=1; exit !(f == 1 && v == 1 && !bad) }
+  ' "$file"
+}
+policy_value() { awk -F= -v key="$1" '$1 == key { n++; v=$2 } END { if (n == 1) print v; else exit 1 }' "$2"; }
+validate_stage() {
+  local stage="$1" expected="$2" user="$3" host="$4" mount="$5" uuid="$6" platform="$7" project="$8" kind name digest extra logical source installed mode row_hash
+  [[ -d "$stage" && ! -L "$stage" && "$(sha256 "$stage/package-manifest.tsv")" == "$expected" ]] || return 1
+  awk -F '\t' '$1 == "format" && $2 == "nextcloud-pi-package-manifest-v1" && NF == 2 { f++; next } $1 == "file" && ($2 == "bundle-manifest.tsv" || $2 == "privileged-policy.conf" || $2 == "nextcloud-pi-automation.sudoers" || $2 == "nextcloud-pi-bundle-installer") && $3 ~ /^[0-9a-f]{64}$/ && NF == 3 { c[$2]++; next } { bad=1 } END { exit !(f == 1 && c["bundle-manifest.tsv"] == 1 && c["privileged-policy.conf"] == 1 && c["nextcloud-pi-automation.sudoers"] == 1 && c["nextcloud-pi-bundle-installer"] == 1 && !bad) }' "$stage/package-manifest.tsv" || return 1
+  while IFS=$'\t' read -r kind name digest extra; do
+    [[ "$kind" == format ]] && continue
+    [[ -z "${extra:-}" && "$(sha256 "$stage/$name")" == "$digest" ]] || return 1
+  done <"$stage/package-manifest.tsv"
+  [[ "$(policy_value NEXTCLOUD_PI_POLICY_FORMAT "$stage/privileged-policy.conf")" == nextcloud-pi-privileged-policy-v1 && "$(policy_value NEXTCLOUD_PI_DEPLOYMENT_USER "$stage/privileged-policy.conf")" == "$user" && "$(policy_value NEXTCLOUD_PI_SYSTEM_HOSTNAME "$stage/privileged-policy.conf")" == "$host" && "$(policy_value NEXTCLOUD_PI_PROJECT_DIR "$stage/privileged-policy.conf")" == "$project" && "$(policy_value NEXTCLOUD_PI_STORAGE_MOUNT "$stage/privileged-policy.conf")" == "$mount" && "$(policy_value NEXTCLOUD_PI_STORAGE_UUID "$stage/privileged-policy.conf")" == "$uuid" && "$(policy_value NEXTCLOUD_PI_IMAGE_PLATFORM "$stage/privileged-policy.conf")" == "$platform" ]] || return 1
+  [[ "$(grep -Fxc "$user ALL=(root) NOPASSWD: /usr/local/libexec/nextcloud-pi-ops" "$stage/nextcloud-pi-automation.sudoers")" == 1 ]] || return 1
+  bash -n "$stage/files/privileged-helper" "$stage/files/active-image-validator" "$stage/files/compose-launcher" "$stage/nextcloud-pi-bundle-installer" || return 1
+  visudo -cf "$stage/nextcloud-pi-automation.sudoers" >/dev/null || return 1
+  validate_manifest "$stage/bundle-manifest.tsv" || return 1
+  while IFS=$'\t' read -r kind logical source installed mode row_hash; do
+    [[ "$kind" == file ]] || continue
+    [[ -f "$stage/files/$logical" && ! -L "$stage/files/$logical" && "$(sha256 "$stage/files/$logical")" == "$row_hash" ]] || return 1
+  done <"$stage/bundle-manifest.tsv"
+  mkdir -m 700 "$stage/systemd-verify"
+  sed "s|^ExecStart=/usr/local/libexec/nextcloud-pi-compose-start$|ExecStart=$stage/files/compose-launcher|" "$stage/files/nextcloud-unit" >"$stage/systemd-verify/nextcloud.service"
+  systemd-analyze verify "$stage/systemd-verify/nextcloud.service"
+}
+
+action="${1:-}"; shift || true
+exec 9>"$INSTALL_LOCK"; flock -w 30 9
+exec 8>"$OPS_LOCK"; flock -w 30 8
+chmod 600 "$INSTALL_LOCK" "$OPS_LOCK"
+
+case "$action" in
+  install)
+    [[ $# == 9 ]] || die "invalid install arguments"
+    source_stage="$1"; backup_id="$2"; expected="$3"; user="$4"; host="$5"; mount="$6"; uuid="$7"; platform="$8"; project="$9"
+    [[ "$backup_id" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ && "$expected" =~ ^[0-9a-f]{64}$ && "$user" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ && "$project" =~ ^/[A-Za-z0-9._/-]+$ && "${project##*/}" == nextcloud-docker ]] || die "unsafe install arguments"
+    [[ "$(hostname)" == "$host" && "$(id -un "$user")" == "$user" && "$(findmnt -rn --target "$mount" -o TARGET)" == "$mount" && "$(findmnt -rn --target "$mount" -o FSTYPE)" == ext4 && "$(findmnt -rn --target "$mount" -o UUID | tr '[:upper:]' '[:lower:]')" == "${uuid,,}" ]] || die "host policy does not match"
+    if [[ -e "$STATE" || -L "$STATE" ]]; then [[ -d "$STATE" && ! -L "$STATE" && "$(stat -c '%u' "$STATE")" == 0 ]] || die "state root is unsafe"; else mkdir -m 700 "$STATE"; fi
+    if [[ -e "$BACKUPS" || -L "$BACKUPS" ]]; then [[ -d "$BACKUPS" && ! -L "$BACKUPS" && "$(stat -c '%u' "$BACKUPS")" == 0 ]] || die "backup root is unsafe"; else mkdir -m 700 "$BACKUPS"; fi
+    root_stage="$(mktemp -d "$STATE/.installer.XXXXXX")"; chmod 700 "$root_stage"
+    cleanup_stage() { local status=$?; trap - EXIT HUP INT TERM; rm -rf -- "$root_stage"; exit "$status"; }
+    trap cleanup_stage EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+    [[ -d "$source_stage" && ! -L "$source_stage" && "$(stat -c '%U' "$source_stage")" == "$user" ]] || die "administrator stage is unsafe"
+    cp -a "$source_stage/." "$root_stage/"; chown -R root:root "$root_stage"; chmod -R go-rwx "$root_stage"
+    validate_stage "$root_stage" "$expected" "$user" "$host" "$mount" "$uuid" "$platform" "$project" || die "approved bundle validation failed"
+    backup="$BACKUPS/$backup_id"; [[ ! -e "$backup" && ! -L "$backup" ]] || die "backup identifier already exists"; snapshot "$backup"
+    rollback=1
+    rollback_install() { local status=$?; trap - EXIT HUP INT TERM; if (( rollback )); then restore "$backup" || printf 'nextcloud-pi installer: complete rollback failed: %s\n' "$backup" >&2; fi; rm -rf -- "$root_stage"; exit "$status"; }
+    trap rollback_install EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+    install -d -m 0755 -o root -g root /usr/local/libexec /etc/nextcloud-pi /etc/systemd/system/docker.service.d
+    atomic_install "$root_stage/privileged-policy.conf" /etc/nextcloud-pi/privileged-policy.conf 0600
+    atomic_install "$root_stage/bundle-manifest.tsv" /etc/nextcloud-pi/bundle-manifest.tsv 0600
+    while IFS=$'\t' read -r kind logical source installed mode digest; do [[ "$kind" == file ]] || continue; atomic_install "$root_stage/files/$logical" "$installed" "$mode"; done <"$root_stage/bundle-manifest.tsv"
+    SUDO_USER="$user" /usr/local/libexec/nextcloud-pi-ops check >/dev/null
+    atomic_install "$root_stage/nextcloud-pi-automation.sudoers" /etc/sudoers.d/nextcloud-pi-automation 0440
+    visudo -c >/dev/null
+    systemctl daemon-reload
+    sudo -u "$user" sudo -n /usr/local/libexec/nextcloud-pi-ops check >/dev/null
+    rollback=0; trap - EXIT HUP INT TERM; rm -rf -- "$root_stage"; printf 'Installed privileged interface; rollback ID: %s\n' "$backup_id"
+    ;;
+  rollback)
+    [[ $# == 1 && "$1" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || die "invalid rollback identifier"
+    current="$(mktemp -d "$STATE/.rollback.XXXXXX")"; rmdir "$current"; snapshot "$current"; armed=1
+    rollback_current() { local status=$?; trap - EXIT HUP INT TERM; (( armed )) && restore "$current" || true; rm -rf -- "$current"; exit "$status"; }
+    trap rollback_current EXIT HUP INT TERM; restore "$BACKUPS/$1"; armed=0; trap - EXIT HUP INT TERM; rm -rf -- "$current"; printf 'Rolled back privileged interface: %s\n' "$1"
+    ;;
+  revoke)
+    [[ $# == 0 ]] || die "invalid revoke arguments"
+    old="$(mktemp /var/tmp/.nextcloud-pi-sudoers.XXXXXX)"; if [[ -f /etc/sudoers.d/nextcloud-pi-automation && ! -L /etc/sudoers.d/nextcloud-pi-automation ]]; then cp -p /etc/sudoers.d/nextcloud-pi-automation "$old"; else : >"$old.absent"; fi
+    rm -f -- /etc/sudoers.d/nextcloud-pi-automation
+    if ! visudo -c >/dev/null; then [[ -f "$old.absent" ]] || atomic_install "$old" /etc/sudoers.d/nextcloud-pi-automation 0440; rm -f -- "$old" "$old.absent"; die "sudoers validation failed"; fi
+    rm -f -- "$old" "$old.absent"; printf 'Revoked passwordless privileged interface\n'
+    ;;
+  remove)
+    [[ $# == 0 ]] || die "invalid remove arguments"
+    [[ ! -e /etc/sudoers.d/nextcloud-pi-automation && ! -L /etc/sudoers.d/nextcloud-pi-automation ]] || die "revoke sudoers before removal"
+    ! grep -Fq /usr/local/libexec/nextcloud-pi-compose-start /etc/systemd/system/nextcloud.service 2>/dev/null || die "service still references managed launcher"
+    [[ ! -e "$STATE/active-record-current" && ! -L "$STATE/active-record-current" ]] || die "active transaction is unresolved"
+    for path in "${managed[@]}"; do rm -f -- "$path"; done; rm -f -- /etc/nextcloud-pi/active-images.env; systemctl daemon-reload; printf 'Removed privileged interface\n'
+    ;;
+  *) die "unknown action" ;;
+esac

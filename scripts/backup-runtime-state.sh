@@ -298,15 +298,10 @@ append_manifest_payload() {
 }
 
 check_prerequisites() {
-  local app_mounts
-  local caddy_data_path
-  local caddy_config_path
+  local app_mounts protected_sizes
 
   remote "set -e
-    test -d '$NEXTCLOUD_DATA_ROOT' && test ! -L '$NEXTCLOUD_DATA_ROOT'
-    command -v tar >/dev/null
-    command -v sudo >/dev/null
-    sudo -n true
+    sudo -n /usr/local/libexec/nextcloud-pi-ops check >/dev/null
     docker inspect '$NEXTCLOUD_APP_CONTAINER' >/dev/null
     docker inspect '$NEXTCLOUD_DB_CONTAINER' >/dev/null
     docker exec '$NEXTCLOUD_DB_CONTAINER' sh -c 'command -v mariadb-dump >/dev/null'
@@ -318,17 +313,9 @@ check_prerequisites() {
   [[ "$(grep -Fxc "$NEXTCLOUD_DATA_ROOT -> /var/www/html" <<<"$app_mounts")" == 1 ]] ||
     die "NEXTCLOUD_DATA_ROOT does not match the app container's /var/www/html mount"
 
-  caddy_data_path="$(remote "docker volume inspect '$NEXTCLOUD_CADDY_DATA_VOLUME' --format '{{.Mountpoint}}'")"
-  caddy_config_path="$(remote "docker volume inspect '$NEXTCLOUD_CADDY_CONFIG_VOLUME' --format '{{.Mountpoint}}'")"
-  is_safe_remote_path "$caddy_data_path" || die "Caddy data volume has an unsafe mount path"
-  is_safe_remote_path "$caddy_config_path" || die "Caddy config volume has an unsafe mount path"
-
-  remote "set -e
-    test -d '$caddy_data_path' && test ! -L '$caddy_data_path'
-    test -d '$caddy_config_path' && test ! -L '$caddy_config_path'
-    sudo -n du -sh '$NEXTCLOUD_DATA_ROOT' '$caddy_data_path' '$caddy_config_path'
-    docker exec '$NEXTCLOUD_DB_CONTAINER' sh -c 'du -sh /var/lib/mysql'
-  "
+  protected_sizes="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-backup size")" || die "protected runtime sources are unavailable"
+  [[ "$(grep -Ec '^(nextcloud|caddy-data|caddy-config)_bytes[[:space:]][1-9][0-9]*$' <<<"$protected_sizes")" == 3 ]] || die "protected runtime-size record is invalid"
+  remote "docker exec '$NEXTCLOUD_DB_CONTAINER' sh -c 'du -sh /var/lib/mysql'"
 }
 
 case "${1:-}" in
@@ -386,10 +373,6 @@ chmod 700 "$STAGING_DIR" "$STAGING_DIR/nextcloud" "$STAGING_DIR/database" "$STAG
 remote_host="$(remote hostname)"
 remote_user="$(remote id -un)"
 database_image="$(remote "docker inspect '$NEXTCLOUD_DB_CONTAINER' --format '{{.Config.Image}}'")"
-caddy_data_path="$(remote "docker volume inspect '$NEXTCLOUD_CADDY_DATA_VOLUME' --format '{{.Mountpoint}}'")"
-caddy_config_path="$(remote "docker volume inspect '$NEXTCLOUD_CADDY_CONFIG_VOLUME' --format '{{.Mountpoint}}'")"
-data_parent="$(dirname -- "$NEXTCLOUD_DATA_ROOT")"
-data_name="$(basename -- "$NEXTCLOUD_DATA_ROOT")"
 
 printf 'Entering Nextcloud maintenance mode for consistent runtime capture...\n'
 # Arm cleanup before the remote command because a lost SSH response cannot tell
@@ -399,7 +382,7 @@ remote "docker exec --user www-data '$NEXTCLOUD_APP_CONTAINER' php /var/www/html
 maintenance_is_off && die "Nextcloud did not enter maintenance mode"
 
 printf 'Capturing Nextcloud files without listing private paths...\n'
-remote "sudo -n tar --numeric-owner --acls --xattrs -cpf - -C '$data_parent' '$data_name'" >"$STAGING_DIR/nextcloud/nextcloud.tar"
+remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-backup stream nextcloud" >"$STAGING_DIR/nextcloud/nextcloud.tar"
 chmod 600 "$STAGING_DIR/nextcloud/nextcloud.tar"
 [[ -s "$STAGING_DIR/nextcloud/nextcloud.tar" ]] || die "Nextcloud archive is empty"
 
@@ -414,8 +397,8 @@ chmod 600 "$STAGING_DIR/database/nextcloud.sql"
 [[ -s "$STAGING_DIR/database/nextcloud.sql" ]] || die "MariaDB dump is empty"
 
 printf 'Capturing Caddy TLS state without listing private paths...\n'
-remote "sudo -n tar --numeric-owner --acls --xattrs -cpf - -C '$caddy_data_path' ." >"$STAGING_DIR/caddy/data.tar"
-remote "sudo -n tar --numeric-owner --acls --xattrs -cpf - -C '$caddy_config_path' ." >"$STAGING_DIR/caddy/config.tar"
+remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-backup stream caddy-data" >"$STAGING_DIR/caddy/data.tar"
+remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-backup stream caddy-config" >"$STAGING_DIR/caddy/config.tar"
 chmod 600 "$STAGING_DIR/caddy/data.tar" "$STAGING_DIR/caddy/config.tar"
 [[ -s "$STAGING_DIR/caddy/data.tar" && -s "$STAGING_DIR/caddy/config.tar" ]] || die "Caddy archive is empty"
 
