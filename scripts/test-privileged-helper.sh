@@ -60,7 +60,7 @@ if [[ "${GITHUB_ACTIONS:-}" == true && "$(uname -s)" == Linux ]]; then
   SOURCE_DIR="$(mktemp -d)"
   cleanup_fixture() { local status=$?; trap - EXIT HUP INT TERM; sudo rm -rf -- "$FIXTURE"; rm -rf -- "$SOURCE_DIR"; exit "$status"; }
   trap cleanup_fixture EXIT HUP INT TERM
-  sed -e "s|/etc/nextcloud-pi/privileged-policy.conf|$FIXTURE/policy|g" -e "s|/etc/nextcloud-pi/bundle-manifest.tsv|$FIXTURE/manifest|g" -e "s|/usr/local/libexec/nextcloud-pi-ops|$FIXTURE/ops|g" -e "s|/usr/local/libexec/nextcloud-pi-validate-active-images|$FIXTURE/validator|g" -e "s|/etc/nextcloud-pi/active-images.env|$FIXTURE/active-images.env|g" -e "s|/run/lock/nextcloud-pi-ops.lock|$FIXTURE/lock|g" "$HELPER" >"$SOURCE_DIR/ops"
+  sed -e "s|/etc/nextcloud-pi/privileged-policy.conf|$FIXTURE/policy|g" -e "s|/etc/nextcloud-pi/bundle-manifest.tsv|$FIXTURE/manifest|g" -e "s|/usr/local/libexec/nextcloud-pi-ops|$FIXTURE/ops|g" -e "s|/usr/local/libexec/nextcloud-pi-validate-active-images|$FIXTURE/validator|g" -e "s|/etc/nextcloud-pi/active-images.env|$FIXTURE/active-images.env|g" -e "s|/run/lock/nextcloud-pi-ops.lock|$FIXTURE/lock|g" -e "s|/var/lib/nextcloud-pi-ops|$FIXTURE/state|g" -e "s|/run/nextcloud-pi-ops|$FIXTURE/socket|g" "$HELPER" >"$SOURCE_DIR/ops"
   printf '#!/bin/sh\nexit 0\n' >"$SOURCE_DIR/validator"
   printf '#!/bin/sh\nexit 0\n' >"$SOURCE_DIR/launcher"
   printf 'unit\n' >"$SOURCE_DIR/unit"
@@ -97,7 +97,7 @@ EOF
     printf 'format\tnextcloud-pi-bundle-manifest-v1\nversion\t1\n'
     for entry in "privileged-helper:$FIXTURE/ops:0700" "active-image-validator:$FIXTURE/validator:0700" "compose-launcher:$FIXTURE/launcher:0700" "nextcloud-unit:$FIXTURE/unit:0644" "docker-storage-drop-in:$FIXTURE/dropin:0644"; do
       logical="${entry%%:*}"; remainder="${entry#*:}"; path="${remainder%:*}"; mode="${entry##*:}"
-      printf 'file\t%s\ttest\t%s\t%s\t%s\n' "$logical" "$path" "$mode" "$(sha256sum "$path" | awk '{print $1}')"
+      printf 'file\t%s\ttest\t%s\t%s\t%s\n' "$logical" "$path" "$mode" "$(sudo sha256sum "$path" | awk '{print $1}')"
     done
   } >"$SOURCE_DIR/manifest"
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/policy" "$FIXTURE/policy"
