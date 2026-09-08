@@ -37,6 +37,31 @@ with tempfile.TemporaryDirectory() as directory:
         archive.addfile(link)
     sys.argv = ["validate_archive", str(safe_link)]
     exec(compile(validator, "validate_archive", "exec"), {"__name__": "__main__"})
+    safe_sticky = pathlib.Path(directory, "safe-sticky.tar")
+    with tarfile.open(safe_sticky, "w") as archive:
+        sticky = tarfile.TarInfo("runtime-tmp")
+        sticky.type = tarfile.DIRTYPE
+        sticky.uid = 0
+        sticky.gid = 0
+        sticky.mode = 0o1777
+        archive.addfile(sticky)
+    sys.argv = ["validate_archive", str(safe_sticky)]
+    exec(compile(validator, "validate_archive", "exec"), {"__name__": "__main__"})
+    unsafe_sticky = pathlib.Path(directory, "unsafe-sticky.tar")
+    with tarfile.open(unsafe_sticky, "w") as archive:
+        sticky = tarfile.TarInfo("runtime-tmp")
+        sticky.type = tarfile.DIRTYPE
+        sticky.uid = 1000
+        sticky.gid = 1000
+        sticky.mode = 0o1777
+        archive.addfile(sticky)
+    sys.argv = ["validate_archive", str(unsafe_sticky)]
+    try:
+        exec(compile(validator, "validate_archive", "exec"), {"__name__": "__main__"})
+    except SystemExit:
+        pass
+    else:
+        raise SystemExit("non-root sticky directory was accepted")
     unsafe = pathlib.Path(directory, "unsafe.tar")
     with tarfile.open(unsafe, "w") as archive:
         payload = b"bad"

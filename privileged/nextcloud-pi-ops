@@ -149,7 +149,8 @@ with tarfile.open(sys.argv[1], 'r:*') as archive:
             continue
         if not name or name.startswith('/') or normal in ('', '..') or normal.startswith('../') or normal in seen: raise SystemExit(1)
         seen.add(normal)
-        if member.isdev() or member.isfifo() or member.uid < 0 or member.gid < 0 or ((not member.issym() and not member.islnk()) and member.mode & (stat.S_ISUID|stat.S_ISGID|stat.S_IWOTH)): raise SystemExit(1)
+        sticky_root_dir = member.isdir() and member.uid == 0 and member.gid == 0 and member.mode & stat.S_ISVTX and not member.mode & (stat.S_ISUID|stat.S_ISGID)
+        if member.isdev() or member.isfifo() or member.uid < 0 or member.gid < 0 or ((not member.issym() and not member.islnk()) and member.mode & (stat.S_ISUID|stat.S_ISGID|stat.S_IWOTH) and not sticky_root_dir): raise SystemExit(1)
         if member.issym() or member.islnk():
             target=member.linkname
             resolved=posixpath.normpath(posixpath.join(posixpath.dirname(normal),target)) if member.issym() else posixpath.normpath(target)
