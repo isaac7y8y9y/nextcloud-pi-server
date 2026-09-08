@@ -23,7 +23,7 @@ trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 die() { printf 'Image import failed: %s\n' "$1" >&2; exit 1; }
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
-remote() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" "$@"; }
+remote() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=12 "$REMOTE" "$@"; }
 clock_skew_ok() {
   local local_epoch="$1" remote_epoch="$2" delta
   [[ "$local_epoch" =~ ^[0-9]+$ && "$remote_epoch" =~ ^[0-9]+$ ]] || return 1

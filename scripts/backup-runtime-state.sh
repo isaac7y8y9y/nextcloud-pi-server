@@ -65,7 +65,7 @@ warn() {
 }
 
 remote() {
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" "$@"
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=12 "$REMOTE" "$@"
 }
 
 is_safe_remote_path() {

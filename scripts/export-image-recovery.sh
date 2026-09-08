@@ -20,7 +20,7 @@ usage() { printf 'Usage: %s [--output-root <absolute-directory>]\n' "$0" >&2; }
 die() { printf 'Image recovery export failed: %s\n' "$1" >&2; exit 1; }
 mode_of() { if stat -f '%Lp' "$1" >/dev/null 2>&1; then stat -f '%Lp' "$1"; else stat -c '%a' "$1"; fi; }
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
-remote() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" "$@"; }
+remote() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=12 "$REMOTE" "$@"; }
 cleanup() { [[ -z "$STAGING_DIR" || ! -d "$STAGING_DIR" ]] || rm -rf "$STAGING_DIR"; }
 reject_git_target() {
   local target="$1" ancestor="$1" git_root

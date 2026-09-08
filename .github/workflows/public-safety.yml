@@ -44,6 +44,7 @@ jobs:
           bash scripts/test-image-recovery-attestation.sh
           bash scripts/test-image-readiness-lifecycle.sh
           bash scripts/test-runtime-recovery-regression.sh
+          bash scripts/test-ssh-keepalive.sh
           bash scripts/test-deploy-config.sh
           bash scripts/test-health-check.sh
           bash scripts/test-preflight.sh

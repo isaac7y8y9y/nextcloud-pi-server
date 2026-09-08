@@ -14,13 +14,13 @@ usage() {
   printf 'Usage:\n  ./scripts/run-image-restore-readiness.sh --check <recovery-directory>\n  ./scripts/run-image-restore-readiness.sh --apply <recovery-directory>\n  ./scripts/run-image-restore-readiness.sh --cleanup <readiness-id>\n' >&2
 }
 valid_id() { [[ "$1" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]]; }
-remote() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" "$@"; }
+remote() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=12 "$REMOTE" "$@"; }
 set_id() { valid_id "$1" || die "readiness ID is invalid"; ID="$1"; REMOTE_SOCKET="/run/nextcloud-pi-ops/image-readiness-$ID.sock"; LOCAL_SOCKET="/tmp/nextcloud-image-readiness-$ID.sock"; }
 stop_tunnel() { if [[ -n "$TUNNEL_PID" ]]; then kill "$TUNNEL_PID" 2>/dev/null || true; wait "$TUNNEL_PID" 2>/dev/null || true; fi; [[ -z "$LOCAL_SOCKET" ]] || rm -f -- "$LOCAL_SOCKET"; }
 cleanup() { local status=$?; trap - EXIT HUP INT TERM; stop_tunnel; if (( ARMED )); then remote "sudo -n /usr/local/libexec/nextcloud-pi-ops image-readiness stop '$ID'" >/dev/null 2>&1 || true; remote "sudo -n /usr/local/libexec/nextcloud-pi-ops image-readiness cleanup '$ID'" >/dev/null 2>&1 || printf 'Retry cleanup with readiness ID: %s\n' "$ID" >&2; fi; exit "$status"; }
 start_tunnel() {
   [[ ! -e "$LOCAL_SOCKET" && ! -L "$LOCAL_SOCKET" ]] || return 1
-  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ExitOnForwardFailure=yes -N -L "$LOCAL_SOCKET:$REMOTE_SOCKET" "$REMOTE" & TUNNEL_PID=$!
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=12 -o ExitOnForwardFailure=yes -N -L "$LOCAL_SOCKET:$REMOTE_SOCKET" "$REMOTE" & TUNNEL_PID=$!
   local attempt=0
   while (( attempt < 30 )); do
     ((attempt++)); [[ -S "$LOCAL_SOCKET" ]] && docker -H "unix://$LOCAL_SOCKET" info >/dev/null 2>&1 && return 0

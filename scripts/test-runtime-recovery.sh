@@ -53,7 +53,7 @@ warn() {
 }
 
 remote() {
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" "$@"
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=12 "$REMOTE" "$@"
 }
 
 validate_runtime_recovery_image_identity() {
