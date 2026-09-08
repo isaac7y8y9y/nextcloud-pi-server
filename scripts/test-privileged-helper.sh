@@ -24,6 +24,19 @@ with tempfile.TemporaryDirectory() as directory:
         archive.addfile(root)
     sys.argv = ["validate_archive", str(safe)]
     exec(compile(validator, "validate_archive", "exec"), {"__name__": "__main__"})
+    safe_link = pathlib.Path(directory, "safe-link.tar")
+    with tarfile.open(safe_link, "w") as archive:
+        payload = b"safe"
+        target = tarfile.TarInfo("safe-target")
+        target.size = len(payload)
+        archive.addfile(target, io.BytesIO(payload))
+        link = tarfile.TarInfo("safe-link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "safe-target"
+        link.mode = 0o777
+        archive.addfile(link)
+    sys.argv = ["validate_archive", str(safe_link)]
+    exec(compile(validator, "validate_archive", "exec"), {"__name__": "__main__"})
     unsafe = pathlib.Path(directory, "unsafe.tar")
     with tarfile.open(unsafe, "w") as archive:
         payload = b"bad"
