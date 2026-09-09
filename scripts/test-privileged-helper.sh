@@ -15,6 +15,23 @@ import tarfile
 import tempfile
 
 helper = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+readiness = helper.split("readiness_args() {", 1)[1].split("\nverify_readiness()", 1)[0]
+for required in (
+    '"--containerd-namespace=nextcloud-pi-readiness-$id"',
+    '"--containerd-plugins-namespace=nextcloud-pi-readiness-plugins-$id"',
+):
+    if required not in readiness:
+        raise SystemExit(f"readiness daemon is missing ID-bound namespace: {required}")
+if "--containerd-namespace=moby" in readiness or "--containerd-plugins-namespace=plugins.moby" in readiness:
+    raise SystemExit("readiness daemon reuses a live Docker containerd namespace")
+verify_readiness = helper.split("verify_readiness() {", 1)[1].split("\ncmd_readiness_check()", 1)[0]
+for required in (
+    'mapfile -t expected < <(readiness_args "$id")',
+    'mapfile -d \'\' -t actual <"/proc/$pid/cmdline"',
+    '[[ "${expected[$i]}" == "${actual[$i]}" ]]',
+):
+    if required not in verify_readiness:
+        raise SystemExit("readiness process identity does not compare the complete expected command")
 prefix = "validate_archive() { /usr/bin/python3 - \"$1\" <<'PY'\n"
 validator = helper.split(prefix, 1)[1].split("\nPY\n}", 1)[0]
 with tempfile.TemporaryDirectory() as directory:

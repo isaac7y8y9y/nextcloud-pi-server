@@ -36,5 +36,6 @@ Installing, upgrading, rolling back, revoking, or removing this interface uses
 `scripts/manage-pi-privileged-interface.sh` and interactive administrator
 authentication. The deployment account retains existing live-Docker access;
 that residual authority is intentionally unchanged. Isolated image readiness
-uses its own dispatcher-generated socket and never accesses the live Docker
-socket.
+uses its own dispatcher-generated socket and readiness-ID-bound containerd
+image and plugin namespaces. It never accesses the live Docker socket or the
+live daemon's default containerd namespaces.

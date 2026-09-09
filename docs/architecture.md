@@ -30,4 +30,5 @@ the target identity, storage, service, names, and lifecycle roots; routine
 deployment can submit only validated active-image data and cannot replace root
 code. The deployment account's existing access to the live Docker daemon is
 residual authority. Restore-readiness instead starts an isolated daemon with a
-helper-generated socket and never uses the live Docker socket.
+helper-generated socket, separate readiness-ID-bound containerd image and
+plugin namespaces, and no use of the live Docker socket.

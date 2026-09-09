@@ -8,9 +8,10 @@
   starts use the source lock; offline archive recovery requires a separate
   attested post-load identity because Docker may assign different image IDs.
 - Image restore-readiness starts a second privileged Docker daemon with isolated
-  state and networking controls disabled. Use only the guarded lifecycle helper,
-  preserve its printed ID until cleanup succeeds, and never substitute a live
-  Docker socket.
+  paths and ID-bound containerd image and plugin namespaces, with networking
+  controls disabled. Separate paths alone do not isolate Docker 29's containerd
+  image metadata. Use only the guarded lifecycle helper, preserve its printed ID
+  until cleanup succeeds, and never substitute a live Docker socket.
 - Deployment identity and credentials must stay in ignored local files, never
   in Git history, issues, pull requests, or generated reports.
 - The deployment account retains its pre-existing live Docker-daemon access.

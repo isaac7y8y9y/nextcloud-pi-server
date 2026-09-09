@@ -91,8 +91,11 @@ Continue only after `Image recovery verified`.
 
 The lifecycle helper uses a second Docker daemon on the configured Pi. It has
 separate data, execution, PID, and Unix-socket paths; disables its bridge,
-iptables management, IP forwarding, masquerading, and userland proxy; and is
-never connected to the live Docker socket.
+iptables management, IP forwarding, masquerading, and userland proxy; uses
+readiness-ID-bound containerd image and plugin namespaces; and is never
+connected to the live Docker socket. Both containerd namespaces are part of the
+recorded process identity, so status and stop reject a daemon missing either
+isolation flag.
 
 Its check mode validates the unattested archive, Pi identity, storage mount,
 `dockerd` prerequisites, disposable paths, and free space without changing the
