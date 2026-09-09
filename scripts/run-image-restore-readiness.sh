@@ -42,7 +42,7 @@ apply() {
   remote "sudo -n /usr/local/libexec/nextcloud-pi-ops image-readiness start '$ID'" >/dev/null
   remote "sudo -n /usr/local/libexec/nextcloud-pi-ops image-readiness status '$ID'" >/dev/null
   start_tunnel || die "could not forward isolated daemon socket"
-  NEXTCLOUD_IMAGE_READINESS_SOCKET="$LOCAL_SOCKET" "$SCRIPT_DIR/test-image-restore-readiness.sh" "$recovery"
+  "$SCRIPT_DIR/test-image-restore-readiness.sh" --docker-host "unix://$LOCAL_SOCKET" "$recovery"
   stop_tunnel
   remote "sudo -n /usr/local/libexec/nextcloud-pi-ops image-readiness stop '$ID'" >/dev/null
   remote "sudo -n /usr/local/libexec/nextcloud-pi-ops image-readiness cleanup '$ID'" >/dev/null
