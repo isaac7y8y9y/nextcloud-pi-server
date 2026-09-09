@@ -43,6 +43,21 @@ remote_env_valid() {
     END { for (key in expected) if (!seen[key]) invalid = 1; exit invalid }
   ' \"\$env_file\""
 }
+application_paths_replaceable() {
+  remote "set -eu
+    deployment_uid=\$(id -u)
+    for directory in '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy'; do
+      test -d \"\$directory\"
+      test ! -L \"\$directory\"
+      test -w \"\$directory\"
+      test \"\$(stat -c '%u' \"\$directory\")\" = \"\$deployment_uid\"
+    done
+    for file in '$NEXTCLOUD_REMOTE_PROJECT_DIR/docker-compose.yml' '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile'; do
+      test -f \"\$file\"
+      test ! -L \"\$file\"
+      test \"\$(stat -c '%u' \"\$file\")\" = \"\$deployment_uid\"
+    done"
+}
 validate_candidate() {
   remote "cd '$NEXTCLOUD_REMOTE_PROJECT_DIR' && docker compose -f - config >/dev/null" <"$TMP_DIR/rendered/docker-compose.yml" || die "candidate Compose validation failed"
   remote "docker exec -i nextcloud-docker-caddy-1 caddy adapt --config /dev/stdin --adapter caddyfile >/dev/null 2>&1" <"$TMP_DIR/rendered/caddy/Caddyfile" || die "candidate Caddy validation failed"
@@ -98,6 +113,7 @@ require_interface() {
   expected="$(sha256 "$(bundle_manifest)")"
   [[ "$(awk -F $'\t' '$1 == "version" {print $2}' <<<"$output")" == 1 && "$(awk -F $'\t' '$1 == "manifest_sha256" {print $2}' <<<"$output")" == "$expected" ]] || die "installed privileged bundle differs; run administrator upgrade"
   remote "sudo -n /usr/local/libexec/nextcloud-pi-ops check" >/dev/null || die "privileged interface check failed"
+  application_paths_replaceable || die "live application configuration is not safely replaceable by the deployment user"
   output="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops active-images-state")" || die "active image record is invalid"
   mode="$(awk -F $'\t' '$1 == "mode" {print $2}' <<<"$output")"; [[ "$mode" == source ]] || die "recovered active image record requires recovery approval"
   launcher_prerequisites_remote || die "launcher prerequisites failed"

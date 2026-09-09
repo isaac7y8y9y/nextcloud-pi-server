@@ -25,6 +25,14 @@ may override it for one-off automation. `NEXTCLOUD_REMOTE_PROJECT_DIR` must end
 in `nextcloud-docker`; operational scripts depend on that stable Compose project
 name.
 
+Atomic application replacement requires the project directory and its `caddy`
+directory to be real directories owned and writable by the deployment user.
+The live `docker-compose.yml` and `caddy/Caddyfile` must be regular, non-symlink
+files owned by that user. `deploy-config.sh --plan` verifies these conditions
+before creating an approval artifact. An ownership mismatch requires a
+separately authenticated administrator correction; routine deployment never
+changes directory ownership or permissions through the passwordless helper.
+
 Confirm the worktree has no unintended changes before operating production:
 
 ```sh
