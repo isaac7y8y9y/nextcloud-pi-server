@@ -16,3 +16,18 @@ Docker's automatic restart of an existing container does not resolve a tag or
 pull; it remains protected by the Docker mount gate. The systemd stop action
 uses `docker compose stop`, not `down`, so shutdown retains the container
 objects and their image identities for that automatic restart path.
+
+## Privileged startup boundary
+
+Systemd invokes the root-owned launcher and active-image validator directly.
+Routine Mac-to-Pi automation has no general-purpose passwordless sudo access:
+its only privileged entry point is
+`sudo -n /usr/local/libexec/nextcloud-pi-ops service ACTION`, where `ACTION`
+is the fixed `start`, `stop`, or `restart` action for `nextcloud.service`.
+The dispatcher rechecks the configured storage mount and UUID before a start
+or restart. It cannot accept a unit name, path, shell command, or daemon flag.
+
+The helper, launcher, validator, systemd unit/drop-in, policy, and sudoers
+rule are installed or upgraded only through the separately authenticated
+privileged-interface administrator workflow. Routine configuration deployment
+cannot replace startup-related root code.
