@@ -5,6 +5,7 @@ bash -n "$HELPER"
 for command in cmd_recovery_check cmd_active_prepare cmd_readiness_start cmd_drill_apply; do grep -Fq "$command" "$HELPER"; done
 grep -Fq 'valid_id' "$HELPER"; grep -Fq 'reject_stdin' "$HELPER"; grep -Fq 'active-record-current' "$HELPER"; grep -Fq 'no_nested_mounts' "$HELPER"
 grep -Fq 'required_unit="nextcloud-pi-drill-required-$id.service"' "$HELPER"; grep -Fq 'Requires=%s' "$HELPER"
+grep -Fq '/usr/bin/nohup "${args[@]}" 9>&- </dev/null' "$HELPER"
 ! grep -Fq 'eval ' "$HELPER"
 python3 - "$HELPER" <<'PY'
 import io
