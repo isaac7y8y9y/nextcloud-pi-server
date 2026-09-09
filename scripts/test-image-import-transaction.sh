@@ -21,6 +21,7 @@ IMAGE_IMPORT_APP_TAG=nextcloud:30
 IMAGE_IMPORT_DB_TAG=mariadb:11
 IMAGE_IMPORT_CADDY_TAG=caddy:2
 mkdir -p "$IMAGE_IMPORT_STAGE" "$IMAGE_IMPORT_PROJECT" "$TEST_DIR/tags"
+mkdir -p "$TEST_DIR/images"
 prior_app=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 prior_db=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 prior_caddy=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -31,9 +32,12 @@ recovered_caddy=sha256:fffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 tag_file() { printf '%s/%s' "$TEST_DIR/tags" "$(printf '%s' "$1" | tr '/:' '__')"; }
 write_tag() { printf '%s\n' "$2" >"$(tag_file "$1")"; }
 read_tag() { cat "$(tag_file "$1")"; }
+image_file() { printf '%s/%s' "$TEST_DIR/images" "${1#sha256:}"; }
+make_image() { : >"$(image_file "$1")"; }
 reset_fixture() {
   IMAGE_IMPORT_ACTIVE_PREPARED=0
   write_tag "$IMAGE_IMPORT_APP_TAG" "$prior_app"; write_tag "$IMAGE_IMPORT_DB_TAG" "$prior_db"; write_tag "$IMAGE_IMPORT_CADDY_TAG" "$prior_caddy"
+  make_image "$prior_app"; make_image "$prior_db"; make_image "$prior_caddy"
   printf 'mode=source\n' >"$TEST_DIR/active.env"; printf 'running\n' >"$TEST_DIR/containers"; : >"$TEST_DIR/systemctl.log"; printf '0\n' >"$TEST_DIR/start-count"
   : >"$IMAGE_IMPORT_STAGE/images.tar"; printf 'mode=recovered\n' >"$IMAGE_IMPORT_STAGE/recovered.env"
   printf 'image\t%s\t%s\nimage\t%s\t%s\nimage\t%s\t%s\n' "$IMAGE_IMPORT_APP_TAG" "$recovered_app" "$IMAGE_IMPORT_DB_TAG" "$recovered_db" "$IMAGE_IMPORT_CADDY_TAG" "$recovered_caddy" >"$IMAGE_IMPORT_STAGE/restore-attestation.tsv"
@@ -55,6 +59,7 @@ sudo() {
         # loaded tags. This makes the fixture fail if prepare moves before
         # docker load again.
         [[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]] || return 1
+        [[ "$SCENARIO" != prepare_failure ]] || return 1
         cp "$TEST_DIR/active.env" "$IMAGE_IMPORT_STAGE/prior-active.env"; cat >/dev/null; return 0 ;;
       active-record:apply)
         [[ "$SCENARIO" == active_record_failure ]] && return 1
@@ -85,16 +90,28 @@ docker() {
   fi
   if [[ "$1 $2" == 'rm -f' ]]; then : >"$TEST_DIR/containers"; return 0; fi
   if [[ "$1" == inspect ]]; then [[ -s "$TEST_DIR/containers" ]]; return $?; fi
-  if [[ "$1 $2" == 'image inspect' ]]; then read_tag "${@: -1}"; return 0; fi
+  if [[ "$1 $2" == 'image inspect' ]]; then
+    ref="${@: -1}"
+    if [[ "$ref" == sha256:* ]]; then [[ -f "$(image_file "$ref")" ]] && printf '%s\n' "$ref"; else read_tag "$ref"; fi
+    return $?
+  fi
   if [[ "$1" == load ]]; then
-    write_tag "$IMAGE_IMPORT_APP_TAG" "$recovered_app"
+    make_image "$recovered_app"
     if [[ "$SCENARIO" == partial_load ]]; then return 1; fi
     if [[ "$SCENARIO" == interrupted ]]; then kill -TERM "$BASHPID"; return 1; fi
-    write_tag "$IMAGE_IMPORT_DB_TAG" "$recovered_db"; write_tag "$IMAGE_IMPORT_CADDY_TAG" "$recovered_caddy"
-    if [[ "$SCENARIO" == mapping_mismatch ]]; then write_tag "$IMAGE_IMPORT_CADDY_TAG" "$prior_caddy"; fi
+    make_image "$recovered_db"
+    [[ "$SCENARIO" == mapping_mismatch ]] || make_image "$recovered_caddy"
+    # Match Docker 29's containerd image-store behavior when the existing
+    # multi-platform tag is retained after a successful archive load.
+    if [[ "$SCENARIO" != load_preserves_existing_tags ]]; then
+      write_tag "$IMAGE_IMPORT_APP_TAG" "$recovered_app"; write_tag "$IMAGE_IMPORT_DB_TAG" "$recovered_db"; write_tag "$IMAGE_IMPORT_CADDY_TAG" "$recovered_caddy"
+    fi
     return 0
   fi
-  if [[ "$1" == tag ]]; then write_tag "$3" "$2"; return 0; fi
+  if [[ "$1" == tag ]]; then
+    [[ "$SCENARIO" != retag_failure || "$2" != "$recovered_caddy" ]] || return 1
+    write_tag "$3" "$2"; return 0
+  fi
   return 2
 }
 assert_prior_restored() {
@@ -109,7 +126,7 @@ assert_prior_restored() {
   grep -F $'state\tfailed' "$IMAGE_IMPORT_STAGE/failure.tsv" >/dev/null || { echo 'failure record was not preserved' >&2; return 1; }
 }
 
-for SCENARIO in partial_load interrupted mapping_mismatch active_record_failure restart_failure; do
+for SCENARIO in partial_load interrupted mapping_mismatch retag_failure prepare_failure active_record_failure restart_failure; do
   TEST_PHASE="failure-$SCENARIO"
   export SCENARIO; reset_fixture
   set +e
@@ -122,6 +139,9 @@ for SCENARIO in partial_load interrupted mapping_mismatch active_record_failure 
     exit 1
   fi
 done
+TEST_PHASE=load-preserves-existing-tags
+SCENARIO=load_preserves_existing_tags; export SCENARIO; reset_fixture; image_import_apply
+[[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]]
 TEST_PHASE=success
 SCENARIO=success; export SCENARIO; reset_fixture; image_import_apply
 [[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]]

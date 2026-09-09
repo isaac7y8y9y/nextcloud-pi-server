@@ -6,7 +6,24 @@ for command in cmd_recovery_check cmd_active_prepare cmd_readiness_start cmd_dri
 grep -Fq 'valid_id' "$HELPER"; grep -Fq 'reject_stdin' "$HELPER"; grep -Fq 'active-record-current' "$HELPER"; grep -Fq 'no_nested_mounts' "$HELPER"
 grep -Fq 'required_unit="nextcloud-pi-drill-required-$id.service"' "$HELPER"; grep -Fq 'Requires=%s' "$HELPER"
 grep -Fq '/usr/bin/nohup "${args[@]}" 9>&- </dev/null' "$HELPER"
+grep -Fq 'ACTIVE_PREPARE_ABORT_TX="$tx"' "$HELPER"
+grep -Fq 'trap '\''active_prepare_abort "$?"'\'' EXIT HUP INT TERM' "$HELPER"
+! grep -Fq 'rm -rf --one-file-system -- "$tx"; exit "$s"' "$HELPER"
 ! grep -Fq 'eval ' "$HELPER"
+abort_fixture="$(mktemp -d)"
+mkdir "$abort_fixture/transaction"
+ACTIVE_PREPARE_ABORT_TX="$abort_fixture/transaction"
+abort_function="$(awk '$0 ~ /^active_prepare_abort\(\)/ { print; exit }' "$HELPER")"
+if [[ ! -x /usr/bin/rm ]]; then
+  abort_function="${abort_function//\/usr\/bin\/rm -rf --one-file-system --/\/bin\/rm -rf --}"
+fi
+eval "$abort_function"
+set +e
+(active_prepare_abort 23)
+abort_status=$?
+set -e
+[[ "$abort_status" == 23 && ! -e "$ACTIVE_PREPARE_ABORT_TX" ]]
+rmdir "$abort_fixture"
 python3 - "$HELPER" <<'PY'
 import io
 import pathlib

@@ -1,7 +1,7 @@
 format	nextcloud-pi-bundle-manifest-v1
 version	1
 # file<TAB>logical-name<TAB>repository-path<TAB>installed-path<TAB>mode<TAB>sha256
-file	privileged-helper	privileged/nextcloud-pi-ops	/usr/local/libexec/nextcloud-pi-ops	0700	5e99eaa23b26a036e0c248beda6017c7cc1c957733be51302246c99ee5d902ad
+file	privileged-helper	privileged/nextcloud-pi-ops	/usr/local/libexec/nextcloud-pi-ops	0700	78ad626da681b4ce2377c2697f191d275b490eba89a59223e4a63fb5486cb615
 file	active-image-validator	systemd/nextcloud-pi-validate-active-images	/usr/local/libexec/nextcloud-pi-validate-active-images	0700	ded766a247967e65c3e148de5e04e546cf6de230e6976b4497d0752c4e9bf4e7
 file	compose-launcher	systemd/nextcloud-pi-compose-start	/usr/local/libexec/nextcloud-pi-compose-start	0700	89e0ecc86b6acea8de6c235a068f73492665d9d6f4b1a06b087be5f640951916
 file	nextcloud-unit	systemd/nextcloud.service	/etc/systemd/system/nextcloud.service	0644	e6a59c79dfafea05f145932a1f59a0fa626879ddf812687934d50de9e00cfcd0

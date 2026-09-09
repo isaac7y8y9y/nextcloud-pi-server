@@ -194,10 +194,12 @@ scripts/restore-image-recovery.sh --apply \
 ```
 
 Apply recaptures the live pre-state before atomically consuming the single-use
-approval. If transfer, loading, mapping, activation, restart, interruption, or
-health checks fail, the transaction attempts to restore the prior tags,
-containers, and active-image record. A consumed approval cannot be replayed;
-create a new plan after any failed attempt. The importer runs
+approval. After loading, it proves each attested manifest exists and explicitly
+retags it; this also handles daemons that retain an existing multi-platform tag
+during archive load. If transfer, loading, mapping, activation, restart,
+interruption, or health checks fail, the transaction attempts to restore the
+prior tags, containers, and active-image record. A consumed approval cannot be
+replayed; create a new plan after any failed attempt. The importer runs
 `scripts/health-check.sh` automatically after restart and again after rollback
 when recovery is required.
 

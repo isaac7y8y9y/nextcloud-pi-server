@@ -46,7 +46,14 @@ image_import_apply() {
   cd "$IMAGE_IMPORT_PROJECT"
   docker load -i "$IMAGE_IMPORT_STAGE/images.tar"
   awk -F '\t' '$1 == "image" { print $2 "\t" $3 }' "$IMAGE_IMPORT_STAGE/restore-attestation.tsv" >"$IMAGE_IMPORT_STAGE/attested-tags.tsv"
-  while IFS=$'\t' read -r tag id; do test "$(docker image inspect --format '{{.Id}}' "$tag")" = "$id"; done <"$IMAGE_IMPORT_STAGE/attested-tags.tsv"
+  # Loading an OCI archive into a daemon that already holds a multi-platform
+  # tag may retain the existing index reference. Prove each attested manifest
+  # is present, then perform the approval-bound retag explicitly.
+  while IFS=$'\t' read -r tag id; do
+    test "$(docker image inspect --format '{{.Id}}' "$id")" = "$id"
+    docker tag "$id" "$tag"
+    test "$(docker image inspect --format '{{.Id}}' "$tag")" = "$id"
+  done <"$IMAGE_IMPORT_STAGE/attested-tags.tsv"
   record_hash="$(sha256_file "$IMAGE_IMPORT_STAGE/recovered.env")"
   record_size="$(size_file "$IMAGE_IMPORT_STAGE/recovered.env")"
   sudo -n /usr/local/libexec/nextcloud-pi-ops active-record prepare "$IMAGE_IMPORT_ID" "$record_hash" "$record_size" <"$IMAGE_IMPORT_STAGE/recovered.env"
