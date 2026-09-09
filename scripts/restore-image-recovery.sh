@@ -13,7 +13,9 @@ load_deployment_config "$REPOSITORY_ROOT"
 image_lock_load "$REPOSITORY_ROOT"
 readonly REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
 readonly APPROVAL_ROOT="${NEXTCLOUD_IMAGE_IMPORT_APPROVAL_ROOT:-$HOME/nextcloud-pi-image-import-approvals}"
-readonly IMAGE_IMPORT_ACTIONS=stop,load,verify,retag,record-install,restart,rollback
+readonly IMAGE_IMPORT_NORMAL_ACTIONS=stop,load,verify,retag,record-install,restart,rollback
+readonly IMAGE_IMPORT_ROLLBACK_TEST_ACTIONS=stop,load,verify,retag,record-install,restart,force-health-failure,rollback
+IMAGE_IMPORT_ACTIONS=""
 MODE="${1:-}"; ARGUMENT="${2:-}"; ARCHIVE="${3:-}"
 TMP_DIR="$(mktemp -d)"; IMAGE_IMPORT_APPROVAL_LOCK=""
 cleanup() { [[ -z "$IMAGE_IMPORT_APPROVAL_LOCK" || ! -d "$IMAGE_IMPORT_APPROVAL_LOCK" ]] || rmdir "$IMAGE_IMPORT_APPROVAL_LOCK" 2>/dev/null || true; rm -rf "$TMP_DIR"; }
@@ -107,9 +109,14 @@ plan() {
   printf '  actions: %s\nImage import plan ready: %s\nFingerprint: %s\nExpires (UTC epoch): %s\n' "$IMAGE_IMPORT_ACTIONS" "$artifact" "$fingerprint" "$expiry"
 }
 apply() {
-  local recovery="$ARCHIVE" now stage transfer_status
+  local recovery="$ARCHIVE" now stage transfer_status rollback_reason=none
   [[ -f "$ARGUMENT" && ! -L "$ARGUMENT" ]] || die "import approval artifact is required"
   validate_approval_artifact
+  IMAGE_IMPORT_ACTIONS="$(record_value actions)"
+  case "$IMAGE_IMPORT_ACTIONS" in
+    "$IMAGE_IMPORT_NORMAL_ACTIONS"|"$IMAGE_IMPORT_ROLLBACK_TEST_ACTIONS") ;;
+    *) die "import approval actions are invalid" ;;
+  esac
   [[ "$(record_value format)" == image-import-approval-v1 && "$(record_value state)" == unused && "$(record_value transaction_id)" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ && "$(record_value fingerprint)" =~ ^[0-9a-f]{64}$ && "$(record_value created)" =~ ^[0-9]+$ && "$(record_value expires)" =~ ^[0-9]+$ && $(record_value expires) -eq $(($(record_value created) + 900)) && $(date -u +%s) -le $(record_value expires) && "$(record_value actions)" == "$IMAGE_IMPORT_ACTIONS" ]] || die "import approval is invalid or expired"
   [[ "$(record_value host)" == "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" && "$(record_value remote_created)" =~ ^[0-9]+$ ]] && clock_skew_ok "$(record_value created)" "$(record_value remote_created)" || die "import approval target or timestamp binding differs"
   clock_skew_ok "$(date -u +%s)" "$(remote 'date -u +%s')" || die "local and Pi clocks differ by more than 60 seconds"
@@ -138,10 +145,21 @@ apply() {
     die "could not stage image recovery payload; incomplete stage was removed"
   fi
   remote "bash '$stage/image-import-remote.sh' apply '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'" || die "image import failed; rollback was attempted"
-  if ! bash "$SCRIPT_DIR/health-check.sh"; then
+  if [[ "$IMAGE_IMPORT_ACTIONS" == "$IMAGE_IMPORT_ROLLBACK_TEST_ACTIONS" ]]; then
+    printf 'Forcing the approval-bound image-import health-failure rollback test\n'
+    rollback_reason=forced-test
+  elif ! bash "$SCRIPT_DIR/health-check.sh"; then
+    rollback_reason=health-failure
+  fi
+  if [[ "$rollback_reason" != none ]]; then
     remote "bash '$stage/image-import-remote.sh' rollback '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'" || die "image import health rollback failed"
     bash "$SCRIPT_DIR/health-check.sh" || die "image import rollback health check failed"
     remote "bash '$stage/image-import-remote.sh' commit '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'" || die "image import rollback helper cleanup failed"
+    remote "rm -rf '$stage'" || die "image import rollback succeeded but staging cleanup failed"
+    if [[ "$rollback_reason" == forced-test ]]; then
+      printf 'Image import forced health-failure rollback passed with consumed approval: %s\n' "$ARGUMENT"
+      return
+    fi
     die "image import health check failed and was rolled back"
   fi
   remote "bash '$stage/image-import-remote.sh' commit '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'" || die "image import helper cleanup failed"
@@ -149,7 +167,8 @@ apply() {
   printf 'Image import applied with consumed approval: %s\n' "$ARGUMENT"
 }
 case "$MODE" in
-  --plan) [[ $# -eq 2 ]] || die 'usage: restore-image-recovery.sh --plan <recovery-directory>'; plan ;;
+  --plan) [[ $# -eq 2 ]] || die 'usage: restore-image-recovery.sh --plan|--plan-rollback-test <recovery-directory>'; IMAGE_IMPORT_ACTIONS="$IMAGE_IMPORT_NORMAL_ACTIONS"; plan ;;
+  --plan-rollback-test) [[ $# -eq 2 ]] || die 'usage: restore-image-recovery.sh --plan|--plan-rollback-test <recovery-directory>'; IMAGE_IMPORT_ACTIONS="$IMAGE_IMPORT_ROLLBACK_TEST_ACTIONS"; plan ;;
   --apply) [[ $# -eq 3 ]] || die 'usage: restore-image-recovery.sh --apply <approval-artifact> <recovery-directory>'; apply ;;
-  *) die 'usage: restore-image-recovery.sh --plan <recovery-directory> | --apply <approval-artifact> <recovery-directory>' ;;
+  *) die 'usage: restore-image-recovery.sh --plan|--plan-rollback-test <recovery-directory> | --apply <approval-artifact> <recovery-directory>' ;;
 esac

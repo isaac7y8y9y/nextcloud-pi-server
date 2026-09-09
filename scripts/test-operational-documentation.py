@@ -115,8 +115,13 @@ def main() -> int:
     importer = read("scripts/restore-image-recovery.sh")
     require(
         importer,
-        "--plan <recovery-directory> | --apply <approval-artifact> <recovery-directory>",
+        "--plan|--plan-rollback-test <recovery-directory> | --apply <approval-artifact> <recovery-directory>",
         "image import script usage",
+    )
+    require(
+        recovery,
+        'restore-image-recovery.sh --plan-rollback-test "$IMAGE_RECOVERY"',
+        "image import rollback-test runbook",
     )
 
     for mode in ("--check", "--apply", "--cleanup"):

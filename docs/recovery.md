@@ -167,6 +167,21 @@ Review that the target, hashes, image mappings, running container pre-state, and
 actions match the intended recovery. The file is not human approval by itself.
 Stop until the operator explicitly approves this exact import and restart.
 
+For approved Pi integration evidence of the rollback path without leaving the
+deployment in recovered-image mode, create a distinct plan instead:
+
+```sh
+scripts/restore-image-recovery.sh --plan-rollback-test "$IMAGE_RECOVERY"
+```
+
+This artifact binds `force-health-failure` into its action list. Its apply loads
+and activates the recovered mappings, then deliberately takes the same branch
+as a failed health decision, restores the captured tags and active record,
+restarts the prior deployment, verifies rollback health, and removes the remote
+stage. It does not simulate an unhealthy service or weaken the health check.
+Review and explicitly approve this rollback-test artifact independently; a
+normal import approval cannot enable the forced branch.
+
 ### 4. Apply the approved image import
 
 Within the 15-minute approval window, use the unchanged approval and recovery
@@ -185,6 +200,11 @@ containers, and active-image record. A consumed approval cannot be replayed;
 create a new plan after any failed attempt. The importer runs
 `scripts/health-check.sh` automatically after restart and again after rollback
 when recovery is required.
+
+Applying a `--plan-rollback-test` artifact uses the same `--apply` command. Its
+successful terminal message is `Image import forced health-failure rollback
+passed with consumed approval`. Confirm source-mode image state and standalone
+health afterward.
 
 Normal shutdown is different from import: systemd uses `docker compose stop`
 so existing container objects retain their image identities. Approved import
