@@ -194,9 +194,11 @@ scripts/restore-image-recovery.sh --apply \
 ```
 
 Apply recaptures the live pre-state before atomically consuming the single-use
-approval. After loading, it proves each attested manifest exists and explicitly
-retags it; this also handles daemons that retain an existing multi-platform tag
-during archive load. If transfer, loading, mapping, activation, restart,
+approval. After loading, it proves each attested platform manifest exists and
+explicitly retags it. Docker may retain a multi-platform index as the tag's
+default identity, so recovered-record validation resolves the record's bound
+platform rather than comparing that index with the attested platform manifest.
+If transfer, loading, mapping, activation, restart,
 interruption, or health checks fail, the transaction attempts to restore the
 prior tags, containers, and active-image record. A consumed approval cannot be
 replayed; create a new plan after any failed attempt. The importer runs

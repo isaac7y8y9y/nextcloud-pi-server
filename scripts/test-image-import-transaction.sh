@@ -20,6 +20,7 @@ IMAGE_IMPORT_PROJECT="$TEST_DIR/nextcloud-docker"
 IMAGE_IMPORT_APP_TAG=nextcloud:30
 IMAGE_IMPORT_DB_TAG=mariadb:11
 IMAGE_IMPORT_CADDY_TAG=caddy:2
+NEXTCLOUD_IMAGE_PLATFORM=linux/arm64/v8
 mkdir -p "$IMAGE_IMPORT_STAGE" "$IMAGE_IMPORT_PROJECT" "$TEST_DIR/tags"
 mkdir -p "$TEST_DIR/images"
 prior_app=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -34,6 +35,19 @@ write_tag() { printf '%s\n' "$2" >"$(tag_file "$1")"; }
 read_tag() { cat "$(tag_file "$1")"; }
 image_file() { printf '%s/%s' "$TEST_DIR/images" "${1#sha256:}"; }
 make_image() { : >"$(image_file "$1")"; }
+recovered_id_for_tag() {
+  case "$1" in
+    "$IMAGE_IMPORT_APP_TAG") printf '%s\n' "$recovered_app" ;;
+    "$IMAGE_IMPORT_DB_TAG") printf '%s\n' "$recovered_db" ;;
+    "$IMAGE_IMPORT_CADDY_TAG") printf '%s\n' "$recovered_caddy" ;;
+    *) return 1 ;;
+  esac
+}
+platform_tag_id() {
+  local id
+  id="$(recovered_id_for_tag "$1")"
+  [[ -f "$(image_file "$id")" ]] && printf '%s\n' "$id"
+}
 reset_fixture() {
   IMAGE_IMPORT_ACTIVE_PREPARED=0
   write_tag "$IMAGE_IMPORT_APP_TAG" "$prior_app"; write_tag "$IMAGE_IMPORT_DB_TAG" "$prior_db"; write_tag "$IMAGE_IMPORT_CADDY_TAG" "$prior_caddy"
@@ -58,7 +72,7 @@ sudo() {
         # The real validator checks the candidate's recovered IDs against the
         # loaded tags. This makes the fixture fail if prepare moves before
         # docker load again.
-        [[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]] || return 1
+        [[ "$(platform_tag_id "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(platform_tag_id "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(platform_tag_id "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]] || return 1
         [[ "$SCENARIO" != prepare_failure ]] || return 1
         cp "$TEST_DIR/active.env" "$IMAGE_IMPORT_STAGE/prior-active.env"; cat >/dev/null; return 0 ;;
       active-record:apply)
@@ -92,7 +106,13 @@ docker() {
   if [[ "$1" == inspect ]]; then [[ -s "$TEST_DIR/containers" ]]; return $?; fi
   if [[ "$1 $2" == 'image inspect' ]]; then
     ref="${@: -1}"
-    if [[ "$ref" == sha256:* ]]; then [[ -f "$(image_file "$ref")" ]] && printf '%s\n' "$ref"; else read_tag "$ref"; fi
+    if [[ "$ref" == sha256:* ]]; then
+      [[ -f "$(image_file "$ref")" ]] && printf '%s\n' "$ref"
+    elif [[ " $* " == *" --platform $NEXTCLOUD_IMAGE_PLATFORM "* ]]; then
+      platform_tag_id "$ref"
+    else
+      read_tag "$ref"
+    fi
     return $?
   fi
   if [[ "$1" == load ]]; then
@@ -110,6 +130,9 @@ docker() {
   fi
   if [[ "$1" == tag ]]; then
     [[ "$SCENARIO" != retag_failure || "$2" != "$recovered_caddy" ]] || return 1
+    if [[ "$SCENARIO" == load_preserves_existing_tags && ( "$2" == "$recovered_app" || "$2" == "$recovered_db" || "$2" == "$recovered_caddy" ) ]]; then
+      return 0
+    fi
     write_tag "$3" "$2"; return 0
   fi
   return 2
@@ -141,7 +164,8 @@ for SCENARIO in partial_load interrupted mapping_mismatch retag_failure prepare_
 done
 TEST_PHASE=load-preserves-existing-tags
 SCENARIO=load_preserves_existing_tags; export SCENARIO; reset_fixture; image_import_apply
-[[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]]
+[[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$prior_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$prior_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$prior_caddy" ]]
+[[ "$(platform_tag_id "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(platform_tag_id "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(platform_tag_id "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]]
 TEST_PHASE=success
 SCENARIO=success; export SCENARIO; reset_fixture; image_import_apply
 [[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]]

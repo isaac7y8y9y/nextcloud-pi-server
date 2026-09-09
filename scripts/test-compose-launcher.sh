@@ -40,7 +40,7 @@ cat >"$TEST_DIR/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1 $2" == 'image inspect' ]]; then
-  if [[ "${LAUNCHER_IMAGE_MODE:-source}" == recovered ]]; then
+  if [[ "${LAUNCHER_IMAGE_MODE:-source}" == recovered && " $* " == *' --platform linux/arm64/v8 '* ]]; then
     case "${@: -1}" in
       nextcloud:30) printf 'sha256:%064d\n' 4 ;;
       mariadb:11) printf 'sha256:%064d\n' 5 ;;
