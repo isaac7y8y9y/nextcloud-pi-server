@@ -132,7 +132,7 @@ def main() -> int:
         "not human approval by itself",
         "single-use",
         "15 minutes",
-        "one hour old",
+        "24 hours old",
         "There is no script that restores a runtime backup into live",
         "consumed approval cannot be replayed",
     )

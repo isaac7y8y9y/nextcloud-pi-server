@@ -131,7 +131,7 @@ scripts/verify-image-recovery.sh --require-attestation "$IMAGE_RECOVERY"
 ```
 
 At plan time the configuration manifest, runtime manifest, image manifest, and
-image restore attestation must each be no more than one hour old. The deployer
+image restore attestation must each be no more than 24 hours old. The deployer
 also requires the configuration backup's Compose and Caddy files to match the
 current live pre-state. Recreate any stale or mismatched artifact; do not edit a
 manifest or backup.

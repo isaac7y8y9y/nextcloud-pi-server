@@ -135,7 +135,7 @@ scripts/verify-image-recovery.sh --require-attestation "$IMAGE_RECOVERY"
 ```
 
 For configuration deployment, both the image manifest and restore attestation
-must be no more than one hour old when `deploy-config.sh --plan` runs. Their
+must be no more than 24 hours old when `deploy-config.sh --plan` runs. Their
 timestamps are independent; recreate the archive and attestation if either is
 stale.
 

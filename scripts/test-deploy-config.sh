@@ -3,6 +3,8 @@ set -euo pipefail
 readonly DEPLOYER="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/deploy-config.sh"
 bash -n "$DEPLOYER"
 for text in deploy-approval-v2 transaction_id bundle_manifest_sha256 active-record\ prepare active-record\ rollback active-record\ commit 'service restart' root-code; do grep -Fq "$text" "$DEPLOYER"; done
+grep -Fq 'readonly RECOVERY_ARTIFACT_MAX_AGE_SECONDS=86400' "$DEPLOYER"
+grep -Fq 'backup is older than 24 hours' "$DEPLOYER"
 ! grep -Eq 'sudo -n (systemctl|install|cp|mv|rm|mkdir|rmdir|cat|awk|sha256sum)' "$DEPLOYER"
 grep -Fq 'atomic_replace_preserve' "$DEPLOYER"
 grep -Fq 'ROLLBACK_ARMED=1' "$DEPLOYER"

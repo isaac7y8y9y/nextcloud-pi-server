@@ -13,6 +13,7 @@ source "$SCRIPT_DIR/lib/deployment-transaction.sh"
 load_deployment_config "$ROOT"; image_lock_load "$ROOT"
 readonly REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
 readonly APPROVAL_ROOT="${NEXTCLOUD_DEPLOY_APPROVAL_ROOT:-$HOME/nextcloud-pi-deploy-approvals}"
+readonly RECOVERY_ARTIFACT_MAX_AGE_SECONDS=86400
 MODE="${1:-}"; ARTIFACT="${2:-}"; CONFIG_BACKUP="${3:-}"; RUNTIME_BACKUP="${4:-}"; IMAGE_RECOVERY="${5:-}"
 TMP_DIR="$(mktemp -d)"; TRANSACTION_ID=""; stage=""; PHASE=""; ROLLBACK_ARMED=0; trap cleanup EXIT HUP INT TERM
 die() { printf 'Deployment failed: %s\n' "$1" >&2; exit 1; }
@@ -33,7 +34,7 @@ require_fresh_manifest() {
   local manifest="$1" timestamp epoch now
   timestamp="$(manifest_value "$manifest" timestamp)"; [[ "$timestamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "backup timestamp is invalid"
   epoch="$(utc_epoch "$timestamp")" || die "backup timestamp cannot be parsed"; now="$(date -u +%s)"
-  (( epoch <= now && now - epoch <= 3600 )) || die "backup is older than one hour"
+  (( epoch <= now && now - epoch <= RECOVERY_ARTIFACT_MAX_AGE_SECONDS )) || die "backup is older than 24 hours"
 }
 remote_env_valid() {
   remote "set -eu; env_file='$NEXTCLOUD_REMOTE_PROJECT_DIR/.env'; test -f \"\$env_file\" && test ! -L \"\$env_file\" && test \"\$(stat -c '%a' \"\$env_file\")\" = 600; awk -F= '
