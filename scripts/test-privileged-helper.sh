@@ -8,6 +8,7 @@ grep -Fq 'required_unit="nextcloud-pi-drill-required-$id.service"' "$HELPER"; gr
 grep -Fq '/usr/bin/nohup "${args[@]}" 9>&- </dev/null' "$HELPER"
 grep -Fq 'ACTIVE_PREPARE_ABORT_TX="$tx"' "$HELPER"
 grep -Fq 'trap '\''active_prepare_abort "$?"'\'' EXIT HUP INT TERM' "$HELPER"
+grep -Fq 'else protected_file "$ACTIVE_RECORD" 0600; /usr/bin/cp -p "$ACTIVE_RECORD" "$tx/snapshot"; fi' "$HELPER"
 ! grep -Fq 'rm -rf --one-file-system -- "$tx"; exit "$s"' "$HELPER"
 ! grep -Fq 'eval ' "$HELPER"
 abort_fixture="$(mktemp -d)"
