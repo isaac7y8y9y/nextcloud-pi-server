@@ -144,7 +144,7 @@ apply() {
     (( transfer_status == 1 )) || die "image recovery transfer cleanup failed; preserve remote stage $stage"
     die "could not stage image recovery payload; incomplete stage was removed"
   fi
-  remote "bash '$stage/image-import-remote.sh' apply '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'" || die "image import failed; rollback was attempted"
+  remote "bash '$stage/image-import-remote.sh' apply '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG' '$NEXTCLOUD_IMAGE_PLATFORM'" </dev/null || die "image import failed; rollback was attempted"
   if [[ "$IMAGE_IMPORT_ACTIONS" == "$IMAGE_IMPORT_ROLLBACK_TEST_ACTIONS" ]]; then
     printf 'Forcing the approval-bound image-import health-failure rollback test\n'
     rollback_reason=forced-test
@@ -152,18 +152,18 @@ apply() {
     rollback_reason=health-failure
   fi
   if [[ "$rollback_reason" != none ]]; then
-    remote "bash '$stage/image-import-remote.sh' rollback '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'" || die "image import health rollback failed"
+    remote "bash '$stage/image-import-remote.sh' rollback '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG' '$NEXTCLOUD_IMAGE_PLATFORM'" </dev/null || die "image import health rollback failed"
     bash "$SCRIPT_DIR/health-check.sh" || die "image import rollback health check failed"
-    remote "bash '$stage/image-import-remote.sh' commit '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'" || die "image import rollback helper cleanup failed"
-    remote "rm -rf '$stage'" || die "image import rollback succeeded but staging cleanup failed"
+    remote "bash '$stage/image-import-remote.sh' commit '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG' '$NEXTCLOUD_IMAGE_PLATFORM'" </dev/null || die "image import rollback helper cleanup failed"
+    remote "rm -rf '$stage'" </dev/null || die "image import rollback succeeded but staging cleanup failed"
     if [[ "$rollback_reason" == forced-test ]]; then
       printf 'Image import forced health-failure rollback passed with consumed approval: %s\n' "$ARGUMENT"
       return
     fi
     die "image import health check failed and was rolled back"
   fi
-  remote "bash '$stage/image-import-remote.sh' commit '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'" || die "image import helper cleanup failed"
-  remote "rm -rf '$stage'" || die "image import succeeded but staging cleanup failed"
+  remote "bash '$stage/image-import-remote.sh' commit '$(record_value transaction_id)' '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG' '$NEXTCLOUD_IMAGE_PLATFORM'" </dev/null || die "image import helper cleanup failed"
+  remote "rm -rf '$stage'" </dev/null || die "image import succeeded but staging cleanup failed"
   printf 'Image import applied with consumed approval: %s\n' "$ARGUMENT"
 }
 case "$MODE" in
