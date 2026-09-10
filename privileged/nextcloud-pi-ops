@@ -8,7 +8,8 @@ readonly MANIFEST=/etc/nextcloud-pi/bundle-manifest.tsv
 readonly HELPER=/usr/local/libexec/nextcloud-pi-ops
 readonly VALIDATOR=/usr/local/libexec/nextcloud-pi-validate-active-images
 readonly ACTIVE_RECORD=/etc/nextcloud-pi/active-images.env
-readonly LOCK=/run/lock/nextcloud-pi-ops.lock
+readonly LOCK_ROOT=/run/nextcloud-pi-locks
+readonly LOCK="$LOCK_ROOT/operations.lock"
 ACTIVE_PREPARE_ABORT_TX=''
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C
 umask 077
@@ -92,7 +93,21 @@ validate_host() {
 }
 reject_stdin() { local byte; if [[ ! -t 0 ]] && IFS= read -r -n 1 -t 0.05 byte; then invalid; fi; return 0; }
 valid_size() { [[ "$1" =~ ^[1-9][0-9]*$ ]] && (( 10#$1 <= 10#${P[NEXTCLOUD_PI_MAX_STAGING_BYTES]} )); }
-lock() { exec 9>"$LOCK"; /usr/bin/flock -w 30 9 || die "another operation is running"; [[ "$(uid "$LOCK")" == 0 && "$(mode "$LOCK")" == 600 ]] || die "lock is unsafe"; }
+lock() {
+  if [[ -e "$LOCK_ROOT" || -L "$LOCK_ROOT" ]]; then
+    [[ -d "$LOCK_ROOT" && ! -L "$LOCK_ROOT" && "$(uid "$LOCK_ROOT")" == 0 && "$(gid "$LOCK_ROOT")" == 0 && "$(mode "$LOCK_ROOT")" == 700 ]] || die "lock root is unsafe"
+  else
+    /usr/bin/install -d -m 0700 -o root -g root "$LOCK_ROOT"
+  fi
+  if [[ -e "$LOCK" || -L "$LOCK" ]]; then
+    protected_file "$LOCK" 0600
+  else
+    /usr/bin/install -m 0600 -o root -g root /dev/null "$LOCK"
+  fi
+  exec 9>>"$LOCK"
+  /usr/bin/flock -w 30 9 || die "another operation is running"
+  protected_file "$LOCK" 0600
+}
 state_dir() { printf '%s/%s' "${P[NEXTCLOUD_PI_STATE_ROOT]}" "$1"; }
 safe_dir() { [[ -d "$1" && ! -L "$1" && "$(uid "$1")" == 0 && "$(gid "$1")" == 0 && "$(mode "$1")" == 700 ]] || die "state directory is unsafe"; }
 no_nested_mounts() { /usr/bin/findmnt -rn -o TARGET | /usr/bin/awk -v path="$1" '$0 == path || index($0, path "/") == 1 { bad = 1 } END { exit bad }'; }
@@ -119,7 +134,7 @@ active_prepare_abort() { local status="$1" tx="$ACTIVE_PREPARE_ABORT_TX"; trap -
 
 cmd_version() { [[ $# == 0 ]] || invalid; reject_stdin; out version "${P[NEXTCLOUD_PI_BUNDLE_VERSION]}"; out manifest_sha256 "$(hash "$MANIFEST")"; }
 cmd_check() { local program resolved; [[ $# == 0 ]] || invalid; reject_stdin; validate_host; for program in /bin/bash /usr/bin/awk /usr/bin/basename /usr/bin/cp /usr/bin/dd /usr/bin/df /usr/bin/dirname /usr/bin/docker /usr/bin/dockerd /usr/bin/du /usr/bin/find /usr/bin/findmnt /usr/bin/flock /usr/bin/id /usr/bin/install /usr/bin/kill /usr/bin/mktemp /usr/bin/nohup /usr/bin/python3 /usr/bin/readlink /usr/bin/rm /usr/bin/sha256sum /usr/bin/sleep /usr/bin/stat /usr/bin/systemctl /usr/bin/tail /usr/bin/tar /usr/bin/tr; do [[ -x "$program" ]] || die "required program is unavailable"; resolved="$(/usr/bin/readlink -f "$program")"; [[ -f "$resolved" && ! -L "$resolved" && "$(uid "$resolved")" == 0 && "$(gid "$resolved")" == 0 ]] || die "required program is unsafe"; done; out status ok; }
-cmd_protected_state() { [[ $# == 1 && "$1" != -* ]] || invalid; reject_stdin; local path="$(resource_path "$1")" expected="$(resource_mode "$1")"; if [[ ! -e "$path" && ! -L "$path" ]]; then out state missing; out name "$1"; return; fi; protected_file "$path" "$expected"; protected_parents "$path"; out state present; out name "$1"; out sha256 "$(hash "$path")"; out uid 0; out gid 0; out mode "$expected"; }
+cmd_protected_state() { [[ $# == 1 && "$1" != -* ]] || invalid; reject_stdin; local path expected; path="$(resource_path "$1")"; expected="$(resource_mode "$1")"; if [[ ! -e "$path" && ! -L "$path" ]]; then out state missing; out name "$1"; return; fi; protected_file "$path" "$expected"; protected_parents "$path"; out state present; out name "$1"; out sha256 "$(hash "$path")"; out uid 0; out gid 0; out mode "$expected"; }
 cmd_active_images_state() { [[ $# == 0 ]] || invalid; reject_stdin; "$VALIDATOR"; out status ok; out mode "$(/usr/bin/awk -F= '$1 == "NEXTCLOUD_ACTIVE_IMAGES_MODE" { print $2 }' "$ACTIVE_RECORD")"; out sha256 "$(hash "$ACTIVE_RECORD")"; }
 cmd_service() { [[ $# == 1 ]] || invalid; reject_stdin; lock; validate_host; case "$1" in start|restart) /usr/bin/systemctl "$1" "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "service is not active";; stop) /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "service did not stop";; *) invalid;; esac; out state "$1"; }
 cmd_active_prepare() { [[ $# == 3 ]] || invalid; local id="$1" expected="$2" size="$3" tx marker pre; valid_id "$id" && valid_hash "$expected" && valid_size "$size" || invalid; (( size <= 65536 )) || invalid; lock; validate_host; marker="$(active_marker)"; tx="$(active_tx "$id")"; [[ ! -e "$marker" && ! -L "$marker" && ! -e "$tx" && ! -L "$tx" ]] || die "active transaction is already unresolved"; ensure_parent active-record; /usr/bin/install -d -m 0700 -o root -g root "$tx"; ACTIVE_PREPARE_ABORT_TX="$tx"; trap 'active_prepare_abort "$?"' EXIT HUP INT TERM; read_exact "$tx/candidate" "$size"; [[ "$(hash "$tx/candidate")" == "$expected" ]] || die "candidate hash differs"; "$VALIDATOR" --record "$tx/candidate"; pre="$(live_hash)"; if [[ "$pre" == missing ]]; then : >"$tx/absent"; /usr/bin/chmod 0600 "$tx/absent"; else protected_file "$ACTIVE_RECORD" 0600; /usr/bin/cp -p "$ACTIVE_RECORD" "$tx/snapshot"; fi; write_active_meta "$tx/metadata.tsv" prepared "$pre" "$expected" "$size"; printf '%s\n' "$id" >"$marker"; /usr/bin/chmod 0600 "$marker"; trap - EXIT HUP INT TERM; ACTIVE_PREPARE_ABORT_TX=''; out state prepared; out id "$id"; }
@@ -133,7 +148,7 @@ recovery_state() { printf '%s/runtime-recovery/%s' "${P[NEXTCLOUD_PI_STATE_ROOT]
 available() { /usr/bin/df -B1 --output=avail "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}" | /usr/bin/tail -1 | /usr/bin/tr -d '[:space:]'; }
 safe_recovery_root() { local id="${1#"${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/${P[NEXTCLOUD_PI_RUNTIME_RECOVERY_PREFIX]}"}"; valid_id "$id" || die "recovery root is invalid"; safe_dir "$1"; }
 cmd_runtime_backup_size() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; local labels=(nextcloud caddy-data caddy-config) paths=() index bytes; mapfile -t paths < <(runtime_sources); for index in 0 1 2; do [[ -d "${paths[$index]}" && ! -L "${paths[$index]}" ]] || die "runtime source is unsafe"; bytes="$(/usr/bin/du -sb "${paths[$index]}" | /usr/bin/awk '{print $1}')"; out "${labels[$index]}_bytes" "$bytes"; done; }
-cmd_runtime_backup_stream() { [[ $# == 1 ]] || invalid; local dataset="$1" paths=() source parent name; case "$dataset" in nextcloud|caddy-data|caddy-config);; *) invalid;; esac; validate_host; mapfile -t paths < <(runtime_sources); case "$dataset" in nextcloud) source="${paths[0]}"; parent="$(/usr/bin/dirname "$source")"; name="$(/usr/bin/basename "$source")";; caddy-data) source="${paths[1]}"; parent="$source"; name=.; ;; caddy-config) source="${paths[2]}"; parent="$source"; name=.; ;; esac; [[ -d "$source" && ! -L "$source" ]] || die "runtime source is unsafe"; exec /usr/bin/tar --numeric-owner --acls --xattrs -cpf - -C "$parent" "$name"; }
+cmd_runtime_backup_stream() { [[ $# == 1 ]] || invalid; reject_stdin; local dataset="$1" paths=() source parent name; case "$dataset" in nextcloud|caddy-data|caddy-config);; *) invalid;; esac; validate_host; mapfile -t paths < <(runtime_sources); case "$dataset" in nextcloud) source="${paths[0]}"; parent="$(/usr/bin/dirname "$source")"; name="$(/usr/bin/basename "$source")";; caddy-data) source="${paths[1]}"; parent="$source"; name=.; ;; caddy-config) source="${paths[2]}"; parent="$source"; name=.; ;; esac; [[ -d "$source" && ! -L "$source" ]] || die "runtime source is unsafe"; exec /usr/bin/tar --numeric-owner --acls --xattrs -cpf - -C "$parent" "$name"; }
 cmd_recovery_check() { [[ $# == 2 ]] || invalid; reject_stdin; local id="$1" need="$2" root bytes; valid_id "$id" && valid_size "$need" || invalid; validate_host; root="$(recovery_root "$id")"; [[ ! -e "$root" && ! -L "$root" && ! -e "$(recovery_state "$id")" && ! -L "$(recovery_state "$id")" ]] || die "recovery lifecycle exists"; bytes="$(available)"; [[ "$bytes" =~ ^[0-9]+$ ]] && (( bytes > need )) || die "insufficient recovery space"; out state available; out id "$id"; out available_bytes "$bytes"; }
 cmd_recovery_prepare() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" root state; valid_id "$id" || invalid; lock; validate_host; root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; [[ ! -e "$root" && ! -L "$root" && ! -e "$state" && ! -L "$state" ]] || die "recovery lifecycle exists"; ensure_parent runtime-recovery; /usr/bin/install -d -m 0700 -o root -g root "$state" "$root" "$root/nextcloud" "$root/caddy-data" "$root/caddy-config" "$root/mariadb-data"; printf 'format\truntime-recovery-v1\nstate\tprepared\n' >"$state/metadata.tsv"; /usr/bin/chmod 0600 "$state/metadata.tsv"; out state prepared; out id "$id"; out available_bytes "$(available)"; }
 validate_archive() { /usr/bin/python3 - "$1" <<'PY'

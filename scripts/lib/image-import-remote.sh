@@ -27,14 +27,16 @@ image_import_stop_and_remove() {
 }
 
 image_import_rollback() {
+  local failed=0 tag id
   trap - EXIT HUP INT TERM
-  image_import_failure_record
-  image_import_stop_and_remove
-  while IFS=$'\t' read -r tag id; do docker tag "$id" "$tag"; done <"$IMAGE_IMPORT_STAGE/prior-tags.tsv"
+  image_import_failure_record || failed=1
+  image_import_stop_and_remove || failed=1
+  while IFS=$'\t' read -r tag id; do docker tag "$id" "$tag" || failed=1; done <"$IMAGE_IMPORT_STAGE/prior-tags.tsv"
   if (( IMAGE_IMPORT_ACTIVE_PREPARED )); then
-    sudo -n /usr/local/libexec/nextcloud-pi-ops active-record rollback "$IMAGE_IMPORT_ID" </dev/null
+    sudo -n /usr/local/libexec/nextcloud-pi-ops active-record rollback "$IMAGE_IMPORT_ID" </dev/null || failed=1
   fi
-  sudo -n /usr/local/libexec/nextcloud-pi-ops service start </dev/null
+  sudo -n /usr/local/libexec/nextcloud-pi-ops service start </dev/null || failed=1
+  (( failed == 0 ))
 }
 
 image_import_apply() {
@@ -80,6 +82,7 @@ IMAGE_IMPORT_PLATFORM="$8"
 [[ "$IMAGE_IMPORT_ID" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || exit 2
 [[ "$IMAGE_IMPORT_PLATFORM" == linux/arm64/v8 ]] || exit 2
 case "$IMAGE_IMPORT_STAGE:$IMAGE_IMPORT_PROJECT" in /*:/*) ;; *) exit 2 ;; esac
+[[ "$IMAGE_IMPORT_PROJECT" == */nextcloud-docker && "$IMAGE_IMPORT_STAGE" == "$IMAGE_IMPORT_PROJECT/.image-import-$IMAGE_IMPORT_ID" ]] || exit 2
 case "$mode" in
   apply) image_import_apply ;;
   # A health-failure rollback is invoked by the Mac-side owner in a new shell

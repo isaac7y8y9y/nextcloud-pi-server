@@ -31,6 +31,7 @@ jobs:
           bash -n scripts/*.sh scripts/lib/*.sh privileged/nextcloud-pi-ops privileged/nextcloud-pi-bundle-installer systemd/nextcloud-pi-validate-active-images
           bash scripts/test-privileged-helper.sh
           bash scripts/test-privileged-installer.sh
+          bash scripts/test-privileged-locks.sh
           bash scripts/test-privileged-sudoers.sh
           bash scripts/check-privileged-sudo-calls.sh
           bash scripts/test-deployment-config.sh
@@ -41,6 +42,7 @@ jobs:
           bash scripts/test-atomic-transaction.sh
           bash scripts/test-image-import.sh
           bash scripts/test-image-import-transaction.sh
+          bash scripts/test-image-import-interruption.sh
           bash scripts/test-image-recovery-attestation.sh
           bash scripts/test-image-readiness-lifecycle.sh
           bash scripts/test-runtime-recovery-regression.sh

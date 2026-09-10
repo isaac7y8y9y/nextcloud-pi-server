@@ -15,14 +15,14 @@ IMAGE_IMPORT_LIBRARY_ONLY=1 source "$SCRIPT_DIR/lib/image-import-remote.sh"
 source "$SCRIPT_DIR/lib/image-import-approval.sh"
 source "$SCRIPT_DIR/lib/image-import-transfer.sh"
 
-IMAGE_IMPORT_STAGE="$TEST_DIR/stage"
 IMAGE_IMPORT_PROJECT="$TEST_DIR/nextcloud-docker"
+IMAGE_IMPORT_STAGE="$IMAGE_IMPORT_PROJECT/.image-import-$IMAGE_IMPORT_ID"
 IMAGE_IMPORT_APP_TAG=nextcloud:30
 IMAGE_IMPORT_DB_TAG=mariadb:11
 IMAGE_IMPORT_CADDY_TAG=caddy:2
 NEXTCLOUD_IMAGE_PLATFORM=linux/arm64/v8
 IMAGE_IMPORT_PLATFORM="$NEXTCLOUD_IMAGE_PLATFORM"
-mkdir -p "$IMAGE_IMPORT_STAGE" "$IMAGE_IMPORT_PROJECT" "$TEST_DIR/tags"
+mkdir -p "$IMAGE_IMPORT_STAGE" "$TEST_DIR/tags"
 mkdir -p "$TEST_DIR/images"
 prior_app=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 prior_db=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb

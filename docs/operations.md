@@ -51,7 +51,10 @@ scripts/manage-pi-privileged-interface.sh --apply /absolute/private/approval.tsv
 
 The plan and its rendered policy are private. Rollback, revoke, and removal are
 separate authenticated actions; removal first requires revocation and a service
-migration that no longer references the managed launcher.
+migration that no longer references the managed launcher. Removal also refuses
+to proceed while active-record, runtime-recovery, image-readiness, isolated
+daemon/socket, or disposable deployment-drill state remains. Complete those
+lifecycles through their supported cleanup commands before retrying removal.
 
 ## Focused local validation
 

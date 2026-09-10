@@ -205,6 +205,13 @@ replayed; create a new plan after any failed attempt. The importer runs
 `scripts/health-check.sh` automatically after restart and again after rollback
 when recovery is required.
 
+Once remote apply begins, Mac-side HUP, INT, TERM, and unexpected exit handling
+remain armed until verified rollback or commit. Cleanup retries the fixed remote
+rollback, restores service, runs rollback health, commits resolved root state,
+and removes only the exact transaction stage. If any recovery step cannot be
+verified, the command preserves and prints the transaction ID and remote stage;
+inspect those exact values instead of deleting a broader project path.
+
 Applying a `--plan-rollback-test` artifact uses the same `--apply` command. Its
 successful terminal message is `Image import forced health-failure rollback
 passed with consumed approval`. Confirm source-mode image state and standalone

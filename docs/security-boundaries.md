@@ -29,6 +29,9 @@ Routine Mac-to-Pi automation has one passwordless entry point:
 `sudo -n /usr/local/libexec/nextcloud-pi-ops`. The root-owned dispatcher reads
 only `/etc/nextcloud-pi/privileged-policy.conf`, accepts fixed commands and
 logical names, and keeps lifecycle state beneath its root-owned state root.
+Dispatcher and installer mutations serialize on non-truncating lock files
+beneath root:root mode-`0700` `/run/nextcloud-pi-locks`; neither opens a lock
+from the world-writable `/run/lock` namespace.
 Routine deployment cannot replace the helper, sudoers policy, validator,
 launcher, systemd files, or root policy.
 
@@ -39,3 +42,8 @@ that residual authority is intentionally unchanged. Isolated image readiness
 uses its own dispatcher-generated socket and readiness-ID-bound containerd
 image and plugin namespaces. It never accesses the live Docker socket or the
 live daemon's default containerd namespaces.
+
+Removal is fail-closed. In addition to prior revocation and service migration,
+the installer requires every active-record, runtime-recovery, image-readiness,
+socket, storage, and deployment-drill lifecycle namespace to be absent or
+empty and refuses removal while an isolated readiness daemon is still running.
