@@ -9,21 +9,39 @@ source "$SCRIPT_DIR/lib/deployment-config.sh"
 source "$SCRIPT_DIR/lib/image-lock.sh"
 source "$SCRIPT_DIR/lib/image-import-approval.sh"
 source "$SCRIPT_DIR/lib/image-import-transfer.sh"
+source "$SCRIPT_DIR/lib/image-import-lifecycle.sh"
 load_deployment_config "$REPOSITORY_ROOT"
 image_lock_load "$REPOSITORY_ROOT"
 readonly REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
 readonly APPROVAL_ROOT="${NEXTCLOUD_IMAGE_IMPORT_APPROVAL_ROOT:-$HOME/nextcloud-pi-image-import-approvals}"
-readonly IMAGE_IMPORT_ACTIONS=stop,load,verify,retag,record-install,restart,rollback
+readonly IMAGE_IMPORT_NORMAL_ACTIONS=stop,load,verify,retag,record-install,restart,rollback
+readonly IMAGE_IMPORT_ROLLBACK_TEST_ACTIONS=stop,load,verify,retag,record-install,restart,force-health-failure,rollback
+IMAGE_IMPORT_ACTIONS=""
 MODE="${1:-}"; ARGUMENT="${2:-}"; ARCHIVE="${3:-}"
 TMP_DIR="$(mktemp -d)"; IMAGE_IMPORT_APPROVAL_LOCK=""
-cleanup() { [[ -z "$IMAGE_IMPORT_APPROVAL_LOCK" || ! -d "$IMAGE_IMPORT_APPROVAL_LOCK" ]] || rmdir "$IMAGE_IMPORT_APPROVAL_LOCK" 2>/dev/null || true; rm -rf "$TMP_DIR"; }
+IMAGE_IMPORT_REMOTE_STAGE=""; IMAGE_IMPORT_TRANSACTION_ID=""; IMAGE_IMPORT_ROLLBACK_ARMED=0
+cleanup() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  if (( IMAGE_IMPORT_ROLLBACK_ARMED )); then
+    if image_import_recover; then
+      IMAGE_IMPORT_ROLLBACK_ARMED=0
+      printf 'Failed or interrupted image import was rolled back and cleaned up: %s\n' "$IMAGE_IMPORT_TRANSACTION_ID" >&2
+    else
+      printf 'Image import cleanup is incomplete; preserve transaction ID %s and remote stage %s\n' "$IMAGE_IMPORT_TRANSACTION_ID" "$IMAGE_IMPORT_REMOTE_STAGE" >&2
+    fi
+  fi
+  [[ -z "$IMAGE_IMPORT_APPROVAL_LOCK" || ! -d "$IMAGE_IMPORT_APPROVAL_LOCK" ]] || rmdir "$IMAGE_IMPORT_APPROVAL_LOCK" 2>/dev/null || true
+  rm -rf "$TMP_DIR"
+  exit "$status"
+}
 trap cleanup EXIT
-trap 'cleanup; exit 129' HUP
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 die() { printf 'Image import failed: %s\n' "$1" >&2; exit 1; }
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
-remote() { ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" "$@"; }
+remote() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=12 "$REMOTE" "$@"; }
 clock_skew_ok() {
   local local_epoch="$1" remote_epoch="$2" delta
   [[ "$local_epoch" =~ ^[0-9]+$ && "$remote_epoch" =~ ^[0-9]+$ ]] || return 1
@@ -54,13 +72,13 @@ validate_prestate() {
 }
 capture_remote_prestate() {
   local out="$1"
-  remote "set -eu; test \"\$(hostname)\" = '$NEXTCLOUD_PI_SYSTEM_HOSTNAME'; sudo -n /usr/local/libexec/nextcloud-pi-validate-active-images; active=\$(sudo -n sha256sum /etc/nextcloud-pi/active-images.env); printf 'active_record\\t%s\\n' \"\${active%% *}\"; for tag in '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'; do printf 'tag\\t%s\\t%s\\n' \"\$tag\" \"\$(docker image inspect --format '{{.Id}}' \"\$tag\")\"; done; for name in nextcloud-docker-app-1 nextcloud-docker-db-1 nextcloud-docker-caddy-1; do container_id=\$(docker inspect \"\$name\" --format '{{.Id}}'); container_image=\$(docker inspect \"\$name\" --format '{{.Image}}'); container_running=\$(docker inspect \"\$name\" --format '{{.State.Running}}'); printf 'container\\t%s\\t%s\\t%s\\t%s\\n' \"\$name\" \"\$container_id\" \"\$container_image\" \"\$container_running\"; done" >"$out"
+  remote "set -eu; test \"\$(hostname)\" = '$NEXTCLOUD_PI_SYSTEM_HOSTNAME'; active=\$(sudo -n /usr/local/libexec/nextcloud-pi-ops active-images-state | awk -F '\\t' '\$1 == \"sha256\" { print \$2 }'); printf 'active_record\\t%s\\n' \"\$active\"; for tag in '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'; do printf 'tag\\t%s\\t%s\\n' \"\$tag\" \"\$(docker image inspect --format '{{.Id}}' \"\$tag\")\"; done; for name in nextcloud-docker-app-1 nextcloud-docker-db-1 nextcloud-docker-caddy-1; do container_id=\$(docker inspect \"\$name\" --format '{{.Id}}'); container_image=\$(docker inspect \"\$name\" --format '{{.Image}}'); container_running=\$(docker inspect \"\$name\" --format '{{.State.Running}}'); printf 'container\\t%s\\t%s\\t%s\\t%s\\n' \"\$name\" \"\$container_id\" \"\$container_image\" \"\$container_running\"; done" >"$out"
   validate_prestate "$out" || die "remote image-import pre-state is invalid"
 }
 active_record_value() { awk -F= -v key="$2" '$1 == key { count++; value=$2 } END { if (count == 1) print value; else exit 1 }' "$1"; }
 validate_approval_artifact() {
   awk -F '\t' '
-    BEGIN { split("format state fingerprint archive_sha256 attestation_sha256 recovered_record_sha256 prestate_sha256 current_active_record_sha256 current_app_tag_id current_db_tag_id current_caddy_tag_id current_app_container_id current_app_container_image current_app_container_running current_db_container_id current_db_container_image current_db_container_running current_caddy_container_id current_caddy_container_image current_caddy_container_running recovered_app_id recovered_db_id recovered_caddy_id host created remote_created expires actions", list, " "); for (i in list) expected[list[i]] = 1 }
+    BEGIN { split("format state transaction_id fingerprint archive_sha256 attestation_sha256 recovered_record_sha256 prestate_sha256 current_active_record_sha256 current_app_tag_id current_db_tag_id current_caddy_tag_id current_app_container_id current_app_container_image current_app_container_running current_db_container_id current_db_container_image current_db_container_running current_caddy_container_id current_caddy_container_image current_caddy_container_running recovered_app_id recovered_db_id recovered_caddy_id host created remote_created expires actions", list, " "); for (i in list) expected[list[i]] = 1 }
     NF != 2 || !($1 in expected) || seen[$1]++ { invalid = 1 }
     END { for (key in expected) if (seen[key] != 1) invalid = 1; exit invalid }
   ' "$ARGUMENT" || die "import approval artifact schema is invalid"
@@ -80,21 +98,21 @@ build_recovered_record() {
   chmod 600 "$out"
 }
 plan() {
-  local recovery="$ARGUMENT" now remote_now artifact recovered_hash prestate fingerprint expiry
+  local recovery="$ARGUMENT" now remote_now artifact recovered_hash prestate fingerprint expiry transaction_id
   "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery" >/dev/null
   build_recovered_record "$recovery" "$TMP_DIR/recovered.env"
   capture_remote_prestate "$TMP_DIR/prestate.tsv"
   recovered_hash="$(sha256 "$TMP_DIR/recovered.env")"; prestate="$(sha256 "$TMP_DIR/prestate.tsv")"
   now="$(date -u +%s)"; remote_now="$(remote 'date -u +%s')"; clock_skew_ok "$now" "$remote_now" || die "local and Pi clocks differ by more than 60 seconds"
-  expiry=$((now + 900))
+  expiry=$((now + 900)); transaction_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
   {
-    printf 'archive_sha256\t%s\nattestation_sha256\t%s\nrecovered_record_sha256\t%s\nprestate_sha256\t%s\nhost\t%s\ncreated\t%s\nremote_created\t%s\nexpires\t%s\nactions\t%s\n' "$(manifest_value "$recovery/manifest.tsv" archive_sha256)" "$(sha256 "$recovery/restore-attestation.tsv")" "$recovered_hash" "$prestate" "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" "$now" "$remote_now" "$expiry" "$IMAGE_IMPORT_ACTIONS"
+    printf 'transaction_id\t%s\narchive_sha256\t%s\nattestation_sha256\t%s\nrecovered_record_sha256\t%s\nprestate_sha256\t%s\nhost\t%s\ncreated\t%s\nremote_created\t%s\nexpires\t%s\nactions\t%s\n' "$transaction_id" "$(manifest_value "$recovery/manifest.tsv" archive_sha256)" "$(sha256 "$recovery/restore-attestation.tsv")" "$recovered_hash" "$prestate" "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" "$now" "$remote_now" "$expiry" "$IMAGE_IMPORT_ACTIONS"
   } >"$TMP_DIR/authority.tsv"
   fingerprint="$(sha256 "$TMP_DIR/authority.tsv")"
   mkdir -p "$APPROVAL_ROOT"; chmod 700 "$APPROVAL_ROOT"
   artifact="$APPROVAL_ROOT/import-$fingerprint-$now.tsv"
-  { printf 'format\timage-import-approval-v1\nstate\tunused\nfingerprint\t%s\narchive_sha256\t%s\nattestation_sha256\t%s\nrecovered_record_sha256\t%s\nprestate_sha256\t%s\ncurrent_active_record_sha256\t%s\ncurrent_app_tag_id\t%s\ncurrent_db_tag_id\t%s\ncurrent_caddy_tag_id\t%s\ncurrent_app_container_id\t%s\ncurrent_app_container_image\t%s\ncurrent_app_container_running\t%s\ncurrent_db_container_id\t%s\ncurrent_db_container_image\t%s\ncurrent_db_container_running\t%s\ncurrent_caddy_container_id\t%s\ncurrent_caddy_container_image\t%s\ncurrent_caddy_container_running\t%s\nrecovered_app_id\t%s\nrecovered_db_id\t%s\nrecovered_caddy_id\t%s\nhost\t%s\ncreated\t%s\nremote_created\t%s\nexpires\t%s\nactions\t%s\n' \
-    "$fingerprint" "$(manifest_value "$recovery/manifest.tsv" archive_sha256)" "$(sha256 "$recovery/restore-attestation.tsv")" "$recovered_hash" "$prestate" \
+  { printf 'format\timage-import-approval-v1\nstate\tunused\ntransaction_id\t%s\nfingerprint\t%s\narchive_sha256\t%s\nattestation_sha256\t%s\nrecovered_record_sha256\t%s\nprestate_sha256\t%s\ncurrent_active_record_sha256\t%s\ncurrent_app_tag_id\t%s\ncurrent_db_tag_id\t%s\ncurrent_caddy_tag_id\t%s\ncurrent_app_container_id\t%s\ncurrent_app_container_image\t%s\ncurrent_app_container_running\t%s\ncurrent_db_container_id\t%s\ncurrent_db_container_image\t%s\ncurrent_db_container_running\t%s\ncurrent_caddy_container_id\t%s\ncurrent_caddy_container_image\t%s\ncurrent_caddy_container_running\t%s\nrecovered_app_id\t%s\nrecovered_db_id\t%s\nrecovered_caddy_id\t%s\nhost\t%s\ncreated\t%s\nremote_created\t%s\nexpires\t%s\nactions\t%s\n' \
+    "$transaction_id" "$fingerprint" "$(manifest_value "$recovery/manifest.tsv" archive_sha256)" "$(sha256 "$recovery/restore-attestation.tsv")" "$recovered_hash" "$prestate" \
     "$(prestate_value "$TMP_DIR/prestate.tsv" active_record)" "$(prestate_value "$TMP_DIR/prestate.tsv" tag "$NEXTCLOUD_IMAGE_APP_TAG")" "$(prestate_value "$TMP_DIR/prestate.tsv" tag "$NEXTCLOUD_IMAGE_DB_TAG")" "$(prestate_value "$TMP_DIR/prestate.tsv" tag "$NEXTCLOUD_IMAGE_CADDY_TAG")" \
     "$(prestate_value "$TMP_DIR/prestate.tsv" container_id nextcloud-docker-app-1)" "$(prestate_value "$TMP_DIR/prestate.tsv" container_image nextcloud-docker-app-1)" "$(prestate_value "$TMP_DIR/prestate.tsv" container_running nextcloud-docker-app-1)" "$(prestate_value "$TMP_DIR/prestate.tsv" container_id nextcloud-docker-db-1)" "$(prestate_value "$TMP_DIR/prestate.tsv" container_image nextcloud-docker-db-1)" "$(prestate_value "$TMP_DIR/prestate.tsv" container_running nextcloud-docker-db-1)" "$(prestate_value "$TMP_DIR/prestate.tsv" container_id nextcloud-docker-caddy-1)" "$(prestate_value "$TMP_DIR/prestate.tsv" container_image nextcloud-docker-caddy-1)" "$(prestate_value "$TMP_DIR/prestate.tsv" container_running nextcloud-docker-caddy-1)" \
     "$(active_record_value "$TMP_DIR/recovered.env" NEXTCLOUD_ACTIVE_IMAGES_APP_ID)" "$(active_record_value "$TMP_DIR/recovered.env" NEXTCLOUD_ACTIVE_IMAGES_DB_ID)" "$(active_record_value "$TMP_DIR/recovered.env" NEXTCLOUD_ACTIVE_IMAGES_CADDY_ID)" "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" "$now" "$remote_now" "$expiry" "$IMAGE_IMPORT_ACTIONS"; } >"$artifact"
@@ -107,16 +125,21 @@ plan() {
   printf '  actions: %s\nImage import plan ready: %s\nFingerprint: %s\nExpires (UTC epoch): %s\n' "$IMAGE_IMPORT_ACTIONS" "$artifact" "$fingerprint" "$expiry"
 }
 apply() {
-  local recovery="$ARCHIVE" now stage transfer_status
+  local recovery="$ARCHIVE" now stage transfer_status rollback_reason=none
   [[ -f "$ARGUMENT" && ! -L "$ARGUMENT" ]] || die "import approval artifact is required"
   validate_approval_artifact
-  [[ "$(record_value format)" == image-import-approval-v1 && "$(record_value state)" == unused && "$(record_value fingerprint)" =~ ^[0-9a-f]{64}$ && "$(record_value created)" =~ ^[0-9]+$ && "$(record_value expires)" =~ ^[0-9]+$ && $(record_value expires) -eq $(($(record_value created) + 900)) && $(date -u +%s) -le $(record_value expires) && "$(record_value actions)" == "$IMAGE_IMPORT_ACTIONS" ]] || die "import approval is invalid or expired"
+  IMAGE_IMPORT_ACTIONS="$(record_value actions)"
+  case "$IMAGE_IMPORT_ACTIONS" in
+    "$IMAGE_IMPORT_NORMAL_ACTIONS"|"$IMAGE_IMPORT_ROLLBACK_TEST_ACTIONS") ;;
+    *) die "import approval actions are invalid" ;;
+  esac
+  [[ "$(record_value format)" == image-import-approval-v1 && "$(record_value state)" == unused && "$(record_value transaction_id)" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ && "$(record_value fingerprint)" =~ ^[0-9a-f]{64}$ && "$(record_value created)" =~ ^[0-9]+$ && "$(record_value expires)" =~ ^[0-9]+$ && $(record_value expires) -eq $(($(record_value created) + 900)) && $(date -u +%s) -le $(record_value expires) && "$(record_value actions)" == "$IMAGE_IMPORT_ACTIONS" ]] || die "import approval is invalid or expired"
   [[ "$(record_value host)" == "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" && "$(record_value remote_created)" =~ ^[0-9]+$ ]] && clock_skew_ok "$(record_value created)" "$(record_value remote_created)" || die "import approval target or timestamp binding differs"
   clock_skew_ok "$(date -u +%s)" "$(remote 'date -u +%s')" || die "local and Pi clocks differ by more than 60 seconds"
   "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery" >/dev/null
   build_recovered_record "$recovery" "$TMP_DIR/recovered.env"
   capture_remote_prestate "$TMP_DIR/prestate.tsv"
-  { printf 'archive_sha256\t%s\nattestation_sha256\t%s\nrecovered_record_sha256\t%s\nprestate_sha256\t%s\nhost\t%s\ncreated\t%s\nremote_created\t%s\nexpires\t%s\nactions\t%s\n' "$(manifest_value "$recovery/manifest.tsv" archive_sha256)" "$(sha256 "$recovery/restore-attestation.tsv")" "$(sha256 "$TMP_DIR/recovered.env")" "$(sha256 "$TMP_DIR/prestate.tsv")" "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" "$(record_value created)" "$(record_value remote_created)" "$(record_value expires)" "$IMAGE_IMPORT_ACTIONS"; } >"$TMP_DIR/authority.tsv"
+  { printf 'transaction_id\t%s\narchive_sha256\t%s\nattestation_sha256\t%s\nrecovered_record_sha256\t%s\nprestate_sha256\t%s\nhost\t%s\ncreated\t%s\nremote_created\t%s\nexpires\t%s\nactions\t%s\n' "$(record_value transaction_id)" "$(manifest_value "$recovery/manifest.tsv" archive_sha256)" "$(sha256 "$recovery/restore-attestation.tsv")" "$(sha256 "$TMP_DIR/recovered.env")" "$(sha256 "$TMP_DIR/prestate.tsv")" "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" "$(record_value created)" "$(record_value remote_created)" "$(record_value expires)" "$IMAGE_IMPORT_ACTIONS"; } >"$TMP_DIR/authority.tsv"
   [[ "$(record_value fingerprint)" == "$(sha256 "$TMP_DIR/authority.tsv")" ]] || die "import approval fingerprint differs"
   [[ "$(record_value archive_sha256)" == "$(manifest_value "$recovery/manifest.tsv" archive_sha256)" && "$(record_value attestation_sha256)" == "$(sha256 "$recovery/restore-attestation.tsv")" && "$(record_value recovered_record_sha256)" == "$(sha256 "$TMP_DIR/recovered.env")" && "$(record_value prestate_sha256)" == "$(sha256 "$TMP_DIR/prestate.tsv")" \
     && "$(record_value current_active_record_sha256)" == "$(prestate_value "$TMP_DIR/prestate.tsv" active_record)" \
@@ -128,7 +151,9 @@ apply() {
   if [[ "$(record_value state)" != unused ]] || ! image_import_consume_approval "$ARGUMENT"; then
     die "import approval could not be atomically consumed"
   fi
-  stage="$NEXTCLOUD_REMOTE_PROJECT_DIR/.image-import-$(sha256 "$TMP_DIR/recovered.env")"
+  IMAGE_IMPORT_TRANSACTION_ID="$(record_value transaction_id)"
+  stage="$NEXTCLOUD_REMOTE_PROJECT_DIR/.image-import-$IMAGE_IMPORT_TRANSACTION_ID"
+  IMAGE_IMPORT_REMOTE_STAGE="$stage"
   set +e
   image_import_stage_payload "$stage" "$recovery" "$TMP_DIR/recovered.env" "$SCRIPT_DIR/lib/image-import-remote.sh" "$REMOTE"
   transfer_status=$?
@@ -137,17 +162,31 @@ apply() {
     (( transfer_status == 1 )) || die "image recovery transfer cleanup failed; preserve remote stage $stage"
     die "could not stage image recovery payload; incomplete stage was removed"
   fi
-  remote "bash '$stage/image-import-remote.sh' apply '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'" || die "image import failed; rollback was attempted"
-  if ! bash "$SCRIPT_DIR/health-check.sh"; then
-    remote "bash '$stage/image-import-remote.sh' rollback '$stage' '$NEXTCLOUD_REMOTE_PROJECT_DIR' '$NEXTCLOUD_IMAGE_APP_TAG' '$NEXTCLOUD_IMAGE_DB_TAG' '$NEXTCLOUD_IMAGE_CADDY_TAG'" || die "image import health rollback failed"
-    bash "$SCRIPT_DIR/health-check.sh" || die "image import rollback health check failed"
+  IMAGE_IMPORT_ROLLBACK_ARMED=1
+  image_import_remote_action apply || die "image import failed; rollback was attempted"
+  if [[ "$IMAGE_IMPORT_ACTIONS" == "$IMAGE_IMPORT_ROLLBACK_TEST_ACTIONS" ]]; then
+    printf 'Forcing the approval-bound image-import health-failure rollback test\n'
+    rollback_reason=forced-test
+  elif ! bash "$SCRIPT_DIR/health-check.sh"; then
+    rollback_reason=health-failure
+  fi
+  if [[ "$rollback_reason" != none ]]; then
+    image_import_recover || die "image import health rollback or cleanup failed"
+    IMAGE_IMPORT_ROLLBACK_ARMED=0
+    if [[ "$rollback_reason" == forced-test ]]; then
+      printf 'Image import forced health-failure rollback passed with consumed approval: %s\n' "$ARGUMENT"
+      return
+    fi
     die "image import health check failed and was rolled back"
   fi
-  remote "rm -rf '$stage'" || die "image import succeeded but staging cleanup failed"
+  image_import_remote_action commit || die "image import helper cleanup failed"
+  IMAGE_IMPORT_ROLLBACK_ARMED=0
+  image_import_remove_remote_stage || die "image import succeeded but staging cleanup failed"
   printf 'Image import applied with consumed approval: %s\n' "$ARGUMENT"
 }
 case "$MODE" in
-  --plan) [[ $# -eq 2 ]] || die 'usage: restore-image-recovery.sh --plan <recovery-directory>'; plan ;;
+  --plan) [[ $# -eq 2 ]] || die 'usage: restore-image-recovery.sh --plan|--plan-rollback-test <recovery-directory>'; IMAGE_IMPORT_ACTIONS="$IMAGE_IMPORT_NORMAL_ACTIONS"; plan ;;
+  --plan-rollback-test) [[ $# -eq 2 ]] || die 'usage: restore-image-recovery.sh --plan|--plan-rollback-test <recovery-directory>'; IMAGE_IMPORT_ACTIONS="$IMAGE_IMPORT_ROLLBACK_TEST_ACTIONS"; plan ;;
   --apply) [[ $# -eq 3 ]] || die 'usage: restore-image-recovery.sh --apply <approval-artifact> <recovery-directory>'; apply ;;
-  *) die 'usage: restore-image-recovery.sh --plan <recovery-directory> | --apply <approval-artifact> <recovery-directory>' ;;
+  *) die 'usage: restore-image-recovery.sh --plan|--plan-rollback-test <recovery-directory> | --apply <approval-artifact> <recovery-directory>' ;;
 esac

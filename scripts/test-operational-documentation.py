@@ -115,8 +115,13 @@ def main() -> int:
     importer = read("scripts/restore-image-recovery.sh")
     require(
         importer,
-        "--plan <recovery-directory> | --apply <approval-artifact> <recovery-directory>",
+        "--plan|--plan-rollback-test <recovery-directory> | --apply <approval-artifact> <recovery-directory>",
         "image import script usage",
+    )
+    require(
+        recovery,
+        'restore-image-recovery.sh --plan-rollback-test "$IMAGE_RECOVERY"',
+        "image import rollback-test runbook",
     )
 
     for mode in ("--check", "--apply", "--cleanup"):
@@ -132,7 +137,7 @@ def main() -> int:
         "not human approval by itself",
         "single-use",
         "15 minutes",
-        "one hour old",
+        "24 hours old",
         "There is no script that restores a runtime backup into live",
         "consumed approval cannot be replayed",
     )

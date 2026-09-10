@@ -50,6 +50,10 @@ export NEXTCLOUD_RUNTIME_BACKUP_ROOT=/absolute/private/nextcloud-backups
 scripts/backup-runtime-state.sh --check
 ```
 
+The check and archive streams use the fixed `runtime-backup` helper commands.
+They select only the policy-bound data sets and do not accept an archive or
+filesystem path from the Mac.
+
 Review the reported prerequisites and aggregate sizes. This command creates no
 approval artifact. Stop here until the operator has explicitly approved the
 temporary maintenance-mode transition and private local backup creation.
@@ -71,7 +75,7 @@ scripts/verify-runtime-backup.sh "$RUNTIME_BACKUP"
 ```
 
 Continue only after `Runtime backup verified`. A deployment requires the
-runtime manifest to be no more than one hour old when its plan is created. The
+runtime manifest to be no more than 24 hours old when its plan is created. The
 timestamp is recorded when capture begins, so recreate the backup if a long
 capture has already exceeded that window.
 

@@ -5,7 +5,7 @@
 image_import_stage_payload() {
   local stage="$1" recovery="$2" recovered_record="$3" helper="$4" remote_target="$5"
   remote "umask 077; test ! -e '$stage'; mkdir -m 0700 '$stage'" || return 1
-  if scp -q "$recovery/images.tar" "$recovery/restore-attestation.tsv" "$recovered_record" "$helper" "$remote_target:$stage/"; then
+  if scp -q -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=12 "$recovery/images.tar" "$recovery/restore-attestation.tsv" "$recovered_record" "$helper" "$remote_target:$stage/"; then
     return 0
   fi
   remote "rm -rf '$stage' && test ! -e '$stage'" || return 2

@@ -92,18 +92,5 @@ cmp -s "$TEST_DIR/target" "$TEST_DIR/candidate"
 [[ "$(cat "$TEST_DIR/operations")" == $'application-install\nrestart\nhealth' ]]
 [[ "$(mode_of "$TEST_DIR/target")" == 600 ]]
 
-# A failed privileged install must remove its exact temporary path and leave
-# an existing target unchanged.
-printf 'original\n' >"$TEST_DIR/safety-target"
-sudo() {
-  [[ "$1" == -n ]] && shift
-  if [[ "$1" == mv ]]; then return 1; fi
-  "$@"
-}
-if atomic_install_root "$TEST_DIR/candidate" "$TEST_DIR/safety-target" 0600; then
-  echo 'expected atomic safety install failure' >&2
-  exit 1
-fi
-[[ "$(cat "$TEST_DIR/safety-target")" == original ]]
-[[ -z "$(find "$TEST_DIR" -maxdepth 1 -name '.nextcloud-pi-safety-target.*.new' -print -quit)" ]]
+! grep -Fq 'sudo -n' "$SCRIPT_DIR/lib/atomic-transaction.sh"
 echo 'shared atomic transaction failure tests passed'

@@ -101,7 +101,7 @@ The runbook must link to backup and recovery procedures for artifact creation
 rather than restating them. Immediately before `--plan`, it must require all
 four freshness inputs checked by the deployment script: configuration manifest,
 runtime manifest, image manifest, and image restore attestation. Each can be at
-most one hour old. The runbook must also state that the generated deployment
+most 24 hours old. The runbook must also state that the generated deployment
 approval expires after 15 minutes and is consumed even if a later staging or
 apply step fails.
 
@@ -251,7 +251,7 @@ opening a script:
 - which approvals are operator-controlled pauses and which are generated,
   expiring, single-use artifacts;
 - which artifact path from each command is passed to the next command;
-- which operations have one-hour or 15-minute freshness windows;
+- which operations have 24-hour or 15-minute freshness windows;
 - what must be reviewed before `--apply`;
 - which approval artifacts are single-use;
 - what success looks like;

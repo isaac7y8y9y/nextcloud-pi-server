@@ -15,12 +15,15 @@ IMAGE_IMPORT_LIBRARY_ONLY=1 source "$SCRIPT_DIR/lib/image-import-remote.sh"
 source "$SCRIPT_DIR/lib/image-import-approval.sh"
 source "$SCRIPT_DIR/lib/image-import-transfer.sh"
 
-IMAGE_IMPORT_STAGE="$TEST_DIR/stage"
 IMAGE_IMPORT_PROJECT="$TEST_DIR/nextcloud-docker"
+IMAGE_IMPORT_STAGE="$IMAGE_IMPORT_PROJECT/.image-import-$IMAGE_IMPORT_ID"
 IMAGE_IMPORT_APP_TAG=nextcloud:30
 IMAGE_IMPORT_DB_TAG=mariadb:11
 IMAGE_IMPORT_CADDY_TAG=caddy:2
-mkdir -p "$IMAGE_IMPORT_STAGE" "$IMAGE_IMPORT_PROJECT" "$TEST_DIR/tags"
+NEXTCLOUD_IMAGE_PLATFORM=linux/arm64/v8
+IMAGE_IMPORT_PLATFORM="$NEXTCLOUD_IMAGE_PLATFORM"
+mkdir -p "$IMAGE_IMPORT_STAGE" "$TEST_DIR/tags"
+mkdir -p "$TEST_DIR/images"
 prior_app=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 prior_db=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 prior_caddy=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -31,8 +34,25 @@ recovered_caddy=sha256:fffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 tag_file() { printf '%s/%s' "$TEST_DIR/tags" "$(printf '%s' "$1" | tr '/:' '__')"; }
 write_tag() { printf '%s\n' "$2" >"$(tag_file "$1")"; }
 read_tag() { cat "$(tag_file "$1")"; }
+image_file() { printf '%s/%s' "$TEST_DIR/images" "${1#sha256:}"; }
+make_image() { : >"$(image_file "$1")"; }
+recovered_id_for_tag() {
+  case "$1" in
+    "$IMAGE_IMPORT_APP_TAG") printf '%s\n' "$recovered_app" ;;
+    "$IMAGE_IMPORT_DB_TAG") printf '%s\n' "$recovered_db" ;;
+    "$IMAGE_IMPORT_CADDY_TAG") printf '%s\n' "$recovered_caddy" ;;
+    *) return 1 ;;
+  esac
+}
+platform_tag_id() {
+  local id
+  id="$(recovered_id_for_tag "$1")"
+  [[ -f "$(image_file "$id")" ]] && printf '%s\n' "$id"
+}
 reset_fixture() {
+  IMAGE_IMPORT_ACTIVE_PREPARED=0
   write_tag "$IMAGE_IMPORT_APP_TAG" "$prior_app"; write_tag "$IMAGE_IMPORT_DB_TAG" "$prior_db"; write_tag "$IMAGE_IMPORT_CADDY_TAG" "$prior_caddy"
+  make_image "$prior_app"; make_image "$prior_db"; make_image "$prior_caddy"
   printf 'mode=source\n' >"$TEST_DIR/active.env"; printf 'running\n' >"$TEST_DIR/containers"; : >"$TEST_DIR/systemctl.log"; printf '0\n' >"$TEST_DIR/start-count"
   : >"$IMAGE_IMPORT_STAGE/images.tar"; printf 'mode=recovered\n' >"$IMAGE_IMPORT_STAGE/recovered.env"
   printf 'image\t%s\t%s\nimage\t%s\t%s\nimage\t%s\t%s\n' "$IMAGE_IMPORT_APP_TAG" "$recovered_app" "$IMAGE_IMPORT_DB_TAG" "$recovered_db" "$IMAGE_IMPORT_CADDY_TAG" "$recovered_caddy" >"$IMAGE_IMPORT_STAGE/restore-attestation.tsv"
@@ -41,6 +61,28 @@ reset_fixture() {
 
 sudo() {
   [[ "$1" == -n ]] && shift
+  if [[ "$1" == /usr/local/libexec/nextcloud-pi-ops ]]; then
+    shift
+    case "$1:${2:-}" in
+      service:stop) printf 'stop\n' >>"$TEST_DIR/systemctl.log"; : >"$TEST_DIR/containers"; return 0 ;;
+      service:start)
+        count="$(cat "$TEST_DIR/start-count")"; count=$((count + 1)); printf '%s\n' "$count" >"$TEST_DIR/start-count"; printf 'start\n' >>"$TEST_DIR/systemctl.log"
+        [[ "$SCENARIO" == restart_failure && "$count" == 1 ]] && return 1
+        printf 'running\n' >"$TEST_DIR/containers"; return 0 ;;
+      active-record:prepare)
+        # The real validator checks the candidate's recovered IDs against the
+        # loaded tags. This makes the fixture fail if prepare moves before
+        # docker load again.
+        [[ "$(platform_tag_id "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(platform_tag_id "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(platform_tag_id "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]] || return 1
+        [[ "$SCENARIO" != prepare_failure ]] || return 1
+        cp "$TEST_DIR/active.env" "$IMAGE_IMPORT_STAGE/prior-active.env"; cat >/dev/null; return 0 ;;
+      active-record:apply)
+        [[ "$SCENARIO" == active_record_failure ]] && return 1
+        cp "$IMAGE_IMPORT_STAGE/recovered.env" "$TEST_DIR/active.env"; return 0 ;;
+      active-record:rollback) cp "$IMAGE_IMPORT_STAGE/prior-active.env" "$TEST_DIR/active.env"; return 0 ;;
+      active-record:commit) return 0 ;;
+    esac
+  fi
   if [[ "$1 $2" == 'systemctl stop' ]]; then printf 'stop\n' >>"$TEST_DIR/systemctl.log"; return 0; fi
   if [[ "$1 $2" == 'systemctl start' ]]; then
     count="$(cat "$TEST_DIR/start-count")"; count=$((count + 1)); printf '%s\n' "$count" >"$TEST_DIR/start-count"; printf 'start\n' >>"$TEST_DIR/systemctl.log"
@@ -63,16 +105,37 @@ docker() {
   fi
   if [[ "$1 $2" == 'rm -f' ]]; then : >"$TEST_DIR/containers"; return 0; fi
   if [[ "$1" == inspect ]]; then [[ -s "$TEST_DIR/containers" ]]; return $?; fi
-  if [[ "$1 $2" == 'image inspect' ]]; then read_tag "${@: -1}"; return 0; fi
+  if [[ "$1 $2" == 'image inspect' ]]; then
+    ref="${@: -1}"
+    if [[ "$ref" == sha256:* ]]; then
+      [[ -f "$(image_file "$ref")" ]] && printf '%s\n' "$ref"
+    elif [[ " $* " == *" --platform $NEXTCLOUD_IMAGE_PLATFORM "* ]]; then
+      platform_tag_id "$ref"
+    else
+      read_tag "$ref"
+    fi
+    return $?
+  fi
   if [[ "$1" == load ]]; then
-    write_tag "$IMAGE_IMPORT_APP_TAG" "$recovered_app"
+    make_image "$recovered_app"
     if [[ "$SCENARIO" == partial_load ]]; then return 1; fi
     if [[ "$SCENARIO" == interrupted ]]; then kill -TERM "$BASHPID"; return 1; fi
-    write_tag "$IMAGE_IMPORT_DB_TAG" "$recovered_db"; write_tag "$IMAGE_IMPORT_CADDY_TAG" "$recovered_caddy"
-    if [[ "$SCENARIO" == mapping_mismatch ]]; then write_tag "$IMAGE_IMPORT_CADDY_TAG" "$prior_caddy"; fi
+    make_image "$recovered_db"
+    [[ "$SCENARIO" == mapping_mismatch ]] || make_image "$recovered_caddy"
+    # Match Docker 29's containerd image-store behavior when the existing
+    # multi-platform tag is retained after a successful archive load.
+    if [[ "$SCENARIO" != load_preserves_existing_tags ]]; then
+      write_tag "$IMAGE_IMPORT_APP_TAG" "$recovered_app"; write_tag "$IMAGE_IMPORT_DB_TAG" "$recovered_db"; write_tag "$IMAGE_IMPORT_CADDY_TAG" "$recovered_caddy"
+    fi
     return 0
   fi
-  if [[ "$1" == tag ]]; then write_tag "$3" "$2"; return 0; fi
+  if [[ "$1" == tag ]]; then
+    [[ "$SCENARIO" != retag_failure || "$2" != "$recovered_caddy" ]] || return 1
+    if [[ "$SCENARIO" == load_preserves_existing_tags && ( "$2" == "$recovered_app" || "$2" == "$recovered_db" || "$2" == "$recovered_caddy" ) ]]; then
+      return 0
+    fi
+    write_tag "$3" "$2"; return 0
+  fi
   return 2
 }
 assert_prior_restored() {
@@ -87,7 +150,7 @@ assert_prior_restored() {
   grep -F $'state\tfailed' "$IMAGE_IMPORT_STAGE/failure.tsv" >/dev/null || { echo 'failure record was not preserved' >&2; return 1; }
 }
 
-for SCENARIO in partial_load interrupted mapping_mismatch active_record_failure restart_failure; do
+for SCENARIO in partial_load interrupted mapping_mismatch retag_failure prepare_failure active_record_failure restart_failure; do
   TEST_PHASE="failure-$SCENARIO"
   export SCENARIO; reset_fixture
   set +e
@@ -100,11 +163,45 @@ for SCENARIO in partial_load interrupted mapping_mismatch active_record_failure 
     exit 1
   fi
 done
+TEST_PHASE=load-preserves-existing-tags
+SCENARIO=load_preserves_existing_tags; export SCENARIO; reset_fixture; image_import_apply
+[[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$prior_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$prior_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$prior_caddy" ]]
+[[ "$(platform_tag_id "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(platform_tag_id "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(platform_tag_id "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]]
 TEST_PHASE=success
 SCENARIO=success; export SCENARIO; reset_fixture; image_import_apply
 [[ "$(read_tag "$IMAGE_IMPORT_APP_TAG")" == "$recovered_app" && "$(read_tag "$IMAGE_IMPORT_DB_TAG")" == "$recovered_db" && "$(read_tag "$IMAGE_IMPORT_CADDY_TAG")" == "$recovered_caddy" ]]
 [[ "$(cat "$TEST_DIR/active.env")" == mode=recovered && ! -e "$IMAGE_IMPORT_STAGE/failure.tsv" ]]
-image_import_rollback
+# Match restore-image-recovery.sh's health-failure path by executing the
+# remote helper's rollback dispatcher in a fresh process, with only external
+# command fakes available.
+FAKE_BIN="$TEST_DIR/fresh-process-bin"
+mkdir "$FAKE_BIN"
+cat >"$FAKE_BIN/sudo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" != -n ]] || shift
+[[ "$1" == /usr/local/libexec/nextcloud-pi-ops ]] || exit 2
+shift
+case "$1:${2:-}" in
+  service:stop) : >"$TEST_CONTAINERS" ;;
+  service:start) printf 'running\n' >"$TEST_CONTAINERS" ;;
+  active-record:rollback) cp "$TEST_STAGE/prior-active.env" "$TEST_ACTIVE" ;;
+  *) exit 2 ;;
+esac
+EOF
+cat >"$FAKE_BIN/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+tag_file() { printf '%s/%s' "$TEST_TAGS" "$(printf '%s' "$1" | tr '/:' '__')"; }
+case "${1:-}:${2:-}" in
+  compose:down|rm:-f) : >"$TEST_CONTAINERS" ;;
+  inspect:*) [[ -s "$TEST_CONTAINERS" ]] ;;
+  tag:*) printf '%s\n' "$2" >"$(tag_file "$3")" ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod 755 "$FAKE_BIN/sudo" "$FAKE_BIN/docker"
+TEST_CONTAINERS="$TEST_DIR/containers" TEST_STAGE="$IMAGE_IMPORT_STAGE" TEST_ACTIVE="$TEST_DIR/active.env" TEST_TAGS="$TEST_DIR/tags" PATH="$FAKE_BIN:$PATH" bash "$SCRIPT_DIR/lib/image-import-remote.sh" rollback 20260906T000000Z-1 "$IMAGE_IMPORT_STAGE" "$IMAGE_IMPORT_PROJECT" "$IMAGE_IMPORT_APP_TAG" "$IMAGE_IMPORT_DB_TAG" "$IMAGE_IMPORT_CADDY_TAG" "$NEXTCLOUD_IMAGE_PLATFORM"
 assert_prior_restored
 
 TEST_PHASE=rollback-down-failure

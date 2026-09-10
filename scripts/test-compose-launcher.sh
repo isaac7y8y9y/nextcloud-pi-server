@@ -24,13 +24,13 @@ mkdir -p "$TEST_DIR/nextcloud-docker" "$TEST_DIR/bin" "$TEST_DIR/libexec"
 cp "$TEST_DIR/rendered/docker-compose.yml" "$TEST_DIR/nextcloud-docker/docker-compose.yml"
 cp "$TEST_DIR/rendered/active-images/active-images.env" "$TEST_DIR/active-images.env"
 sed \
-  -e "s|readonly RECORD=/etc/nextcloud-pi/active-images.env|readonly RECORD=$TEST_DIR/active-images.env|" \
+  -e "s|RECORD=/etc/nextcloud-pi/active-images.env|RECORD=$TEST_DIR/active-images.env|" \
   -e "s|== 0|== $(id -u)|" \
   "$TEST_DIR/rendered/launcher/nextcloud-pi-validate-active-images" >"$TEST_DIR/libexec/validate"
 chmod 700 "$TEST_DIR/libexec/validate"
 
 sed \
-  -e "s|readonly RECORD=/etc/nextcloud-pi/active-images.env|readonly RECORD=$TEST_DIR/active-images.env|" \
+  -e "s|RECORD=/etc/nextcloud-pi/active-images.env|RECORD=$TEST_DIR/active-images.env|" \
   -e "s|/usr/local/libexec/nextcloud-pi-validate-active-images|$TEST_DIR/libexec/validate|" \
   -e "s|/run/nextcloud-pi-compose.XXXXXX|$TEST_DIR/snapshot.XXXXXX|" \
   "$TEST_DIR/rendered/launcher/nextcloud-pi-compose-start" >"$TEST_DIR/launcher"
@@ -40,7 +40,7 @@ cat >"$TEST_DIR/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1 $2" == 'image inspect' ]]; then
-  if [[ "${LAUNCHER_IMAGE_MODE:-source}" == recovered ]]; then
+  if [[ "${LAUNCHER_IMAGE_MODE:-source}" == recovered && " $* " == *' --platform linux/arm64/v8 '* ]]; then
     case "${@: -1}" in
       nextcloud:30) printf 'sha256:%064d\n' 4 ;;
       mariadb:11) printf 'sha256:%064d\n' 5 ;;

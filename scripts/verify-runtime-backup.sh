@@ -74,6 +74,7 @@ validate_archive_namespace() {
   command -v python3 >/dev/null 2>&1 || die "python3 is required to validate archive namespaces"
   python3 - "$archive" "$expected_prefix" <<'PY' || return 1
 import posixpath
+import stat
 import sys
 import tarfile
 
@@ -89,17 +90,50 @@ with tarfile.open(archive_path, "r:*") as archive:
         normalized = posixpath.normpath(name)
         if normalized == ".." or normalized.startswith("../"):
             raise SystemExit(1)
-        if normalized in seen:
-            raise SystemExit(1)
-        seen.add(normalized)
-
         if expected_prefix:
             if normalized != expected_prefix and not normalized.startswith(expected_prefix + "/"):
                 raise SystemExit(1)
             if normalized == expected_prefix:
                 prefix_seen = True
 
-        if member.isdev() or member.isfifo():
+        # GNU tar represents an archive made with "-C source ." using this
+        # harmless root-directory member. It is needed for the fixed Caddy
+        # volume streams; no other spelling or unsafe metadata is accepted.
+        if normalized == ".":
+            if (
+                name not in (".", "./")
+                or not member.isdir()
+                or normalized in seen
+                or member.uid < 0
+                or member.gid < 0
+                or member.mode & (stat.S_ISUID | stat.S_ISGID | stat.S_IWOTH)
+            ):
+                raise SystemExit(1)
+            seen.add(normalized)
+            continue
+
+        if normalized in seen:
+            raise SystemExit(1)
+        seen.add(normalized)
+        sticky_root_dir = (
+            member.isdir()
+            and member.uid == 0
+            and member.gid == 0
+            and member.mode & stat.S_ISVTX
+            and not member.mode & (stat.S_ISUID | stat.S_ISGID)
+        )
+        if (
+            member.isdev()
+            or member.isfifo()
+            or member.uid < 0
+            or member.gid < 0
+            or (
+                not member.issym()
+                and not member.islnk()
+                and member.mode & (stat.S_ISUID | stat.S_ISGID | stat.S_IWOTH)
+                and not sticky_root_dir
+            )
+        ):
             raise SystemExit(1)
         if member.issym() or member.islnk():
             link = member.linkname

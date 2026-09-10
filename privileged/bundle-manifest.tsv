@@ -1,0 +1,8 @@
+format	nextcloud-pi-bundle-manifest-v1
+version	1
+# file<TAB>logical-name<TAB>repository-path<TAB>installed-path<TAB>mode<TAB>sha256
+file	privileged-helper	privileged/nextcloud-pi-ops	/usr/local/libexec/nextcloud-pi-ops	0700	af037e853abb8cea88677cafcd288e836fee610001569597cf7688b76a220983
+file	active-image-validator	systemd/nextcloud-pi-validate-active-images	/usr/local/libexec/nextcloud-pi-validate-active-images	0700	9e454ad92761a94be29c8d3defa15dfbacee583474fc7240954b5ddc76a59d48
+file	compose-launcher	systemd/nextcloud-pi-compose-start	/usr/local/libexec/nextcloud-pi-compose-start	0700	89e0ecc86b6acea8de6c235a068f73492665d9d6f4b1a06b087be5f640951916
+file	nextcloud-unit	systemd/nextcloud.service	/etc/systemd/system/nextcloud.service	0644	e6a59c79dfafea05f145932a1f59a0fa626879ddf812687934d50de9e00cfcd0
+file	docker-storage-drop-in	systemd/docker.service.d/nextcloud-storage.conf	/etc/systemd/system/docker.service.d/nextcloud-storage.conf	0644	7d45966a9a27df1cbc8d57742d3598c86123bfdf53827fb19543229550e8dc73

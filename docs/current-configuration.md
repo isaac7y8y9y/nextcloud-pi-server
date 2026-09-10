@@ -19,3 +19,8 @@ without printing credential values.
 the allowed image IDs for the next image-resolving start; it is never tracked or
 edited manually. The deployment transaction installs source mode, while the
 separately approved archive-import transaction may install recovered mode.
+
+The policy at `/etc/nextcloud-pi/privileged-policy.conf` and its bundle manifest
+are also Pi-local root-owned configuration. They bind the passwordless helper
+to this deployment account, host, storage mount and UUID. Changing either is an
+interactive administrator installation or upgrade, not a routine deployment.

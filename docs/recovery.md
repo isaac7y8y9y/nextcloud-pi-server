@@ -56,6 +56,10 @@ script that restores a runtime backup into live Nextcloud, MariaDB, and Caddy
 state. A passed drill is recovery evidence, not authority or tooling for a live
 runtime restore.
 
+The helper derives every disposable recovery path from that ID beneath the
+policy-bound storage mount. It validates the mount and UUID again before each
+creation, restoration, or recursive cleanup; never substitute a path manually.
+
 ## Image recovery and restore-readiness
 
 Image recovery has four distinct stages: export, offline verification,
@@ -87,8 +91,11 @@ Continue only after `Image recovery verified`.
 
 The lifecycle helper uses a second Docker daemon on the configured Pi. It has
 separate data, execution, PID, and Unix-socket paths; disables its bridge,
-iptables management, IP forwarding, masquerading, and userland proxy; and is
-never connected to the live Docker socket.
+iptables management, IP forwarding, masquerading, and userland proxy; uses
+readiness-ID-bound containerd image and plugin namespaces; and is never
+connected to the live Docker socket. Both containerd namespaces are part of the
+recorded process identity, so status and stop reject a daemon missing either
+isolation flag.
 
 Its check mode validates the unattested archive, Pi identity, storage mount,
 `dockerd` prerequisites, disposable paths, and free space without changing the
@@ -131,7 +138,7 @@ scripts/verify-image-recovery.sh --require-attestation "$IMAGE_RECOVERY"
 ```
 
 For configuration deployment, both the image manifest and restore attestation
-must be no more than one hour old when `deploy-config.sh --plan` runs. Their
+must be no more than 24 hours old when `deploy-config.sh --plan` runs. Their
 timestamps are independent; recreate the archive and attestation if either is
 stale.
 
@@ -160,6 +167,21 @@ Review that the target, hashes, image mappings, running container pre-state, and
 actions match the intended recovery. The file is not human approval by itself.
 Stop until the operator explicitly approves this exact import and restart.
 
+For approved Pi integration evidence of the rollback path without leaving the
+deployment in recovered-image mode, create a distinct plan instead:
+
+```sh
+scripts/restore-image-recovery.sh --plan-rollback-test "$IMAGE_RECOVERY"
+```
+
+This artifact binds `force-health-failure` into its action list. Its apply loads
+and activates the recovered mappings, then deliberately takes the same branch
+as a failed health decision, restores the captured tags and active record,
+restarts the prior deployment, verifies rollback health, and removes the remote
+stage. It does not simulate an unhealthy service or weaken the health check.
+Review and explicitly approve this rollback-test artifact independently; a
+normal import approval cannot enable the forced branch.
+
 ### 4. Apply the approved image import
 
 Within the 15-minute approval window, use the unchanged approval and recovery
@@ -172,12 +194,28 @@ scripts/restore-image-recovery.sh --apply \
 ```
 
 Apply recaptures the live pre-state before atomically consuming the single-use
-approval. If transfer, loading, mapping, activation, restart, interruption, or
-health checks fail, the transaction attempts to restore the prior tags,
-containers, and active-image record. A consumed approval cannot be replayed;
-create a new plan after any failed attempt. The importer runs
+approval. After loading, it proves each attested platform manifest exists and
+explicitly retags it. Docker may retain a multi-platform index as the tag's
+default identity, so recovered-record validation resolves the record's bound
+platform rather than comparing that index with the attested platform manifest.
+If transfer, loading, mapping, activation, restart,
+interruption, or health checks fail, the transaction attempts to restore the
+prior tags, containers, and active-image record. A consumed approval cannot be
+replayed; create a new plan after any failed attempt. The importer runs
 `scripts/health-check.sh` automatically after restart and again after rollback
 when recovery is required.
+
+Once remote apply begins, Mac-side HUP, INT, TERM, and unexpected exit handling
+remain armed until verified rollback or commit. Cleanup retries the fixed remote
+rollback, restores service, runs rollback health, commits resolved root state,
+and removes only the exact transaction stage. If any recovery step cannot be
+verified, the command preserves and prints the transaction ID and remote stage;
+inspect those exact values instead of deleting a broader project path.
+
+Applying a `--plan-rollback-test` artifact uses the same `--apply` command. Its
+successful terminal message is `Image import forced health-failure rollback
+passed with consumed approval`. Confirm source-mode image state and standalone
+health afterward.
 
 Normal shutdown is different from import: systemd uses `docker compose stop`
 so existing container objects retain their image identities. Approved import

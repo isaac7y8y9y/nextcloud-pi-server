@@ -37,6 +37,25 @@ scripts/health-check.sh
 All three commands are Pi-read-only. They do not create an approval artifact
 and do not authorize deployment, restart, backup mutation, or recovery.
 
+## Privileged-interface administration
+
+Routine operations use the exact passwordless command
+`sudo -n /usr/local/libexec/nextcloud-pi-ops`; no general-purpose sudo command
+is supported. Before a first install or reviewed bundle upgrade, create and
+review a private plan, then use an administrator-authenticated terminal:
+
+```sh
+scripts/manage-pi-privileged-interface.sh --plan
+scripts/manage-pi-privileged-interface.sh --apply /absolute/private/approval.tsv
+```
+
+The plan and its rendered policy are private. Rollback, revoke, and removal are
+separate authenticated actions; removal first requires revocation and a service
+migration that no longer references the managed launcher. Removal also refuses
+to proceed while active-record, runtime-recovery, image-readiness, isolated
+daemon/socket, or disposable deployment-drill state remains. Complete those
+lifecycles through their supported cleanup commands before retrying removal.
+
 ## Focused local validation
 
 Validate Bash syntax and the documentation tooling without contacting the Pi:
