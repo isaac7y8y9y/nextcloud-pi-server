@@ -20,45 +20,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install repository test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes ripgrep
+
+      - name: Run pull-request repository tests
+        run: bash scripts/run-tests.sh pr
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: stable
           cache: false
-
-      - name: Run repository and publication-safety tests
-        run: |
-          bash -n scripts/*.sh scripts/lib/*.sh privileged/nextcloud-pi-ops privileged/nextcloud-pi-bundle-installer systemd/nextcloud-pi-validate-active-images
-          bash scripts/test-privileged-helper.sh
-          bash scripts/test-privileged-installer.sh
-          bash scripts/test-privileged-locks.sh
-          bash scripts/test-privileged-sudoers.sh
-          bash scripts/check-privileged-sudo-calls.sh
-          bash scripts/test-deployment-config.sh
-          bash scripts/test-compose-env-references.sh
-          bash scripts/test-image-lock.sh
-          bash scripts/test-active-images.sh
-          bash scripts/test-compose-launcher.sh
-          bash scripts/test-atomic-transaction.sh
-          bash scripts/test-image-import.sh
-          bash scripts/test-image-import-transaction.sh
-          bash scripts/test-image-import-interruption.sh
-          bash scripts/test-image-recovery-attestation.sh
-          bash scripts/test-image-readiness-lifecycle.sh
-          bash scripts/test-runtime-recovery-regression.sh
-          bash scripts/test-ssh-keepalive.sh
-          bash scripts/test-deploy-config.sh
-          bash scripts/test-health-check.sh
-          bash scripts/test-preflight.sh
-          python3 scripts/test-documentation-links.py
-          python3 scripts/check-documentation-links.py
-          python3 scripts/test-operational-documentation.py
-          python3 scripts/test-public-safety.py
-          python3 scripts/check-public-safety.py
-          python3 scripts/check-public-safety.py --history
-
-      - name: Validate rendered Compose and Caddy configuration
-        run: bash scripts/test-public-config.sh
 
       - name: Install pinned Gitleaks
         run: go install github.com/zricethezav/gitleaks/v8@v8.30.1

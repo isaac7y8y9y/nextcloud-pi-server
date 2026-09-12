@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Portable installer regression test with a guarded GitHub-Actions-only root
+# installation fixture.
 set -euo pipefail
 readonly ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALLER="$ROOT/privileged/nextcloud-pi-bundle-installer"; MANAGER="$ROOT/scripts/manage-pi-privileged-interface.sh"

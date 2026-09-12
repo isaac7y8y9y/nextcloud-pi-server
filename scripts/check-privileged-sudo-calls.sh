@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
+# Static policy guard: production shell code may use passwordless sudo only
+# through the least-privilege dispatcher.
 set -euo pipefail
 
 readonly ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+command -v rg >/dev/null 2>&1 || {
+  printf 'ripgrep is required to scan production sudo calls\n' >&2
+  exit 1
+}
 bad=0
 while IFS= read -r line; do
   text="${line#*:}:"

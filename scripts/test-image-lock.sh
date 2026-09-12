@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Portable parser test for the public image-lock contract.
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

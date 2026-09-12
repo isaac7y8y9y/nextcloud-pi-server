@@ -79,6 +79,7 @@ approval boundaries live in the [deployment guide](docs/deployment.md).
 - [Architecture](docs/architecture.md) and
   [configuration model](docs/current-configuration.md)
 - [Deployment](docs/deployment.md) and [operations](docs/operations.md)
+- [Testing](docs/testing.md)
 - [Backup and rollback](docs/backup-and-rollback.md) and
   [recovery](docs/recovery.md)
 - [Security boundaries](docs/security-boundaries.md) and

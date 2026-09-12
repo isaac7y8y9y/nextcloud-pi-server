@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Portable renderer regression test using only disposable generated fixtures.
 set -euo pipefail
 
 # TEST_DIR contains only generated fixtures and is removed even when a check fails.

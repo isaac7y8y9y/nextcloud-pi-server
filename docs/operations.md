@@ -58,41 +58,41 @@ lifecycles through their supported cleanup commands before retrying removal.
 
 ## Focused local validation
 
-Validate Bash syntax and the documentation tooling without contacting the Pi:
+Run the complete pull-request-safe repository test tier without contacting the
+Pi or using private deployment material:
 
 ```sh
-bash -n scripts/*.sh scripts/lib/*.sh
-python3 scripts/test-documentation-links.py
-python3 scripts/check-documentation-links.py
-python3 scripts/test-operational-documentation.py
-python3 scripts/test-public-safety.py
-python3 scripts/check-public-safety.py
+scripts/run-tests.sh pr
 ```
 
-When Docker is available, validate the sanitized rendered Compose and Caddy
-configuration:
+It requires Bash, Python 3, Git, ripgrep, Docker, and Docker Compose. Inspect
+the fixed command order without running it:
 
 ```sh
-bash scripts/test-public-config.sh
+scripts/run-tests.sh --list pr
 ```
 
-Before publication, also scan every reachable Git revision:
+See the [testing guide](testing.md) for the full inventory, environment-specific
+Linux/root behavior, Docker validation, failure interpretation, and the three
+individual operator-only procedures. The runner includes the current-tree and
+full-history publication-safety scans; Gitleaks remains a separate workflow
+security gate.
+
+## Full regression validation
+
+The public-safety workflow invokes `scripts/run-tests.sh pr` as its one
+repository-test step. It then installs and runs Gitleaks against complete
+reachable history. A documentation-link, public-safety, or Gitleaks finding is
+a publication blocker; fix the source rather than weakening a rule.
+
+The three Pi/operator drills are intentionally absent from the runner. Use their
+individual, approval-gated procedures in the deployment and recovery guides.
+
+## Publication history scan
+
+The runner's history scan is read-only but may take longer. It emits only
+redacted finding references and fingerprints:
 
 ```sh
 python3 scripts/check-public-safety.py --history
 ```
-
-The history scan is read-only but may take longer. It emits only redacted
-finding references and fingerprints.
-
-## Full regression validation
-
-The canonical full test sequence is the `Run repository and publication-safety
-tests` step in [the public-safety workflow](../.github/workflows/public-safety.yml).
-Run that explicit sequence locally when its Bash, Python, and Docker
-prerequisites are available, then confirm the GitHub workflow passes for the
-published branch.
-
-The workflow also runs Gitleaks against complete reachable history. A
-documentation-link, public-safety, or Gitleaks finding is a publication blocker;
-fix the source rather than weakening a rule.

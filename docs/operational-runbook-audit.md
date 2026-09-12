@@ -172,12 +172,11 @@ must not imply that a tested live runtime restore command exists.
 | Documentation link validation | `scripts/test-documentation-links.py`, then `scripts/check-documentation-links.py` |
 | Publication-safety validation | `scripts/test-public-safety.py`, `scripts/check-public-safety.py`, and the separately identified `--history` check |
 | Sanitized configuration validation | `scripts/test-public-config.sh`, with its Docker prerequisite stated |
-| Full regression validation | The repository test sequence currently encoded in `.github/workflows/public-safety.yml` |
+| Full regression validation | `scripts/run-tests.sh pr`, with the full inventory in `docs/testing.md` |
 
-The full regression list should have one canonical owner. Copying the workflow's
-individual commands into multiple documents will drift. Until an aggregate
-test runner exists, operations may show the sequence once or link directly to
-the workflow and explain how to reproduce it locally.
+The full regression list has one canonical owner: `scripts/run-tests.sh pr`.
+`docs/testing.md` owns the current inventory and execution tiers. Copying the
+runner's individual commands into operational documents would drift.
 
 ### Scripts that do not need individual operator runbooks
 

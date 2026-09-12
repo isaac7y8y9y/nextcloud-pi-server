@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Static regression guard for deployment approval and rollback boundaries.
 set -euo pipefail
 readonly DEPLOYER="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/deploy-config.sh"
 bash -n "$DEPLOYER"
@@ -17,4 +18,4 @@ grep -Fq 'Deployment interruption cleanup is incomplete' "$DEPLOYER"
 grep -Fq 'deployment_application_restore || rollback_failed=1' "$DEPLOYER"
 grep -Fq 'deployment_active_rollback || rollback_failed=1' "$DEPLOYER"
 grep -Fq 'deployment_rollback_health || rollback_failed=1' "$DEPLOYER"
-printf 'configuration deployment boundary tests passed\n'
+printf 'configuration deployment static contract tests passed\n'

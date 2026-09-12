@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Portable fixture test for the active-image record validation contract.
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
