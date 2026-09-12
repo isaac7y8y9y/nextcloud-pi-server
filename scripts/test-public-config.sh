@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Docker-dependent validation of synthetic rendered Compose and Caddy config.
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,14 +1,50 @@
 #!/usr/bin/env python3
-"""Keep operator runbooks aligned with human-facing script contracts."""
+"""Keep testing inventory, runner, workflow, and operator runbooks aligned."""
 
 from __future__ import annotations
 
 import re
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+INVENTORY_START = "<!-- test-inventory:start -->"
+INVENTORY_END = "<!-- test-inventory:end -->"
+TIERS = {"PR-direct", "PR-transitive", "Operator-only"}
+EXPECTED_PR_COMMANDS = (
+    "bash -n scripts/*.sh scripts/lib/*.sh privileged/nextcloud-pi-ops privileged/nextcloud-pi-bundle-installer systemd/nextcloud-pi-validate-active-images",
+    "bash scripts/test-privileged-helper.sh",
+    "bash scripts/test-privileged-installer.sh",
+    "bash scripts/test-privileged-locks.sh",
+    "bash scripts/test-privileged-sudoers.sh",
+    "bash scripts/check-privileged-sudo-calls.sh",
+    "bash scripts/test-deployment-config.sh",
+    "bash scripts/test-compose-env-references.sh",
+    "bash scripts/test-image-lock.sh",
+    "bash scripts/test-active-images.sh",
+    "bash scripts/test-compose-launcher.sh",
+    "bash scripts/test-atomic-transaction.sh",
+    "bash scripts/test-image-import.sh",
+    "bash scripts/test-image-import-transaction.sh",
+    "bash scripts/test-image-import-interruption.sh",
+    "bash scripts/test-image-recovery-attestation.sh",
+    "bash scripts/test-image-readiness-lifecycle.sh",
+    "bash scripts/test-runtime-recovery-regression.sh",
+    "bash scripts/test-ssh-keepalive.sh",
+    "bash scripts/test-deploy-config.sh",
+    "bash scripts/test-health-check.sh",
+    "bash scripts/test-preflight.sh",
+    "python3 scripts/test-documentation-links.py",
+    "python3 scripts/check-documentation-links.py",
+    "python3 scripts/test-operational-documentation.py",
+    "python3 scripts/test-public-safety.py",
+    "python3 scripts/check-public-safety.py",
+    "python3 scripts/check-public-safety.py --history",
+    "bash scripts/test-public-config.sh",
+)
 
 
 def read(relative_path: str) -> str:
@@ -29,11 +65,119 @@ def require_order(text: str, values: tuple[str, ...], context: str) -> None:
         position = next_position
 
 
+def tracked_test_scripts() -> set[str]:
+    result = subprocess.run(
+        ["git", "ls-files", "scripts/test-*", "scripts/check-*"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return {line for line in result.stdout.splitlines() if line}
+
+
+def inventory_rows(testing: str) -> dict[str, str]:
+    match = re.search(
+        rf"{re.escape(INVENTORY_START)}\n(?P<table>.*?){re.escape(INVENTORY_END)}",
+        testing,
+        flags=re.DOTALL,
+    )
+    if not match:
+        raise AssertionError("testing guide has no delimited inventory")
+
+    rows: dict[str, str] = {}
+    for line in match.group("table").splitlines():
+        if not line.startswith("|") or "Script" in line or "---" in line:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 6:
+            raise AssertionError(f"inventory row has {len(cells)} cells: {line}")
+        script = cells[0].strip("`")
+        if not re.fullmatch(r"scripts/(?:test|check)-[A-Za-z0-9_.-]+\.(?:sh|py)", script):
+            raise AssertionError(f"inventory path is not normalized: {script!r}")
+        if script in rows:
+            raise AssertionError(f"inventory has duplicate row: {script}")
+        if cells[-1] not in TIERS:
+            raise AssertionError(f"inventory has invalid tier for {script}: {cells[-1]!r}")
+        rows[script] = cells[-1]
+    return rows
+
+
+def runner_commands() -> tuple[str, ...]:
+    result = subprocess.run(
+        [str(ROOT / "scripts/run-tests.sh"), "--list", "pr"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return tuple(line for line in result.stdout.splitlines() if line)
+
+
+def runner_script_counts(commands: tuple[str, ...]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for command in commands:
+        for token in shlex.split(command):
+            if re.fullmatch(r"scripts/(?:test|check)-[A-Za-z0-9_.-]+\.(?:sh|py)", token):
+                counts[token] = counts.get(token, 0) + 1
+    return counts
+
+
+def verify_testing_governance() -> None:
+    testing = read("docs/testing.md")
+    rows = inventory_rows(testing)
+    tracked = tracked_test_scripts()
+    if set(rows) != tracked:
+        missing = sorted(tracked - set(rows))
+        stale = sorted(set(rows) - tracked)
+        raise AssertionError(f"inventory differs from tracked tests: missing={missing}, stale={stale}")
+
+    commands = runner_commands()
+    if commands != EXPECTED_PR_COMMANDS:
+        raise AssertionError("pull-request runner command order differs from the documented contract")
+
+    counts = runner_script_counts(commands)
+    direct = {script for script, tier in rows.items() if tier == "PR-direct"}
+    transitive = {script for script, tier in rows.items() if tier == "PR-transitive"}
+    operator_only = {script for script, tier in rows.items() if tier == "Operator-only"}
+    if set(counts) != direct:
+        raise AssertionError(
+            f"runner direct scripts differ from inventory: missing={sorted(direct - set(counts))}, "
+            f"unexpected={sorted(set(counts) - direct)}"
+        )
+    for script, count in counts.items():
+        expected = 2 if script == "scripts/check-public-safety.py" else 1
+        if count != expected:
+            raise AssertionError(f"runner invokes {script} {count} times; expected {expected}")
+    if transitive & set(counts):
+        raise AssertionError(f"runner exposes PR-transitive scripts: {sorted(transitive & set(counts))}")
+    if operator_only & set(counts):
+        raise AssertionError(f"runner exposes operator-only scripts: {sorted(operator_only & set(counts))}")
+    if len(direct) != 27 or len(transitive) != 1 or len(operator_only) != 3:
+        raise AssertionError("inventory tier counts differ from the approved 27/1/3 split")
+
+    for value in (
+        "scripts/run-tests.sh pr",
+        "scripts/run-tests.sh --list pr",
+        "No aggregate operator tier exists",
+        "#31: Restore hermetic end-to-end image restore-readiness coverage",
+    ):
+        require(testing, value, "testing guide")
+
+
+def verify_workflow_delegation() -> None:
+    workflow = read(".github/workflows/public-safety.yml")
+    require(workflow, "run: bash scripts/run-tests.sh pr", "public-safety workflow")
+    if re.search(r"(?m)^\s*(?:bash|python3)\s+scripts/(?:test|check)-", workflow):
+        raise AssertionError("public-safety workflow owns an individual repository test command")
+
+
 def main() -> int:
     deployment = read("docs/deployment.md")
     backup = read("docs/backup-and-rollback.md")
     recovery = read("docs/recovery.md")
     operations = read("docs/operations.md")
+    testing = read("docs/testing.md")
     agents = read("AGENTS.md")
 
     canonical_coverage = {
@@ -60,19 +204,20 @@ def main() -> int:
             "restore-image-recovery.sh",
             "health-check.sh",
         ),
-        operations: (
-            "check-documentation-links.py",
-            "test-documentation-links.py",
-            "test-operational-documentation.py",
-            "check-public-safety.py",
-            "test-public-safety.py",
-            "test-public-config.sh",
+        operations: ("scripts/run-tests.sh", "testing.md"),
+        testing: (
+            "scripts/test-deploy-transaction.sh --check",
+            "scripts/run-image-restore-readiness.sh --check",
+            "scripts/test-runtime-recovery.sh --check",
         ),
         agents: ("worktree-create.sh", "worktree-cleanup.sh"),
     }
     for document, scripts in canonical_coverage.items():
         for script in scripts:
             require(document, script, "canonical operator documentation")
+
+    verify_testing_governance()
+    verify_workflow_delegation()
 
     require_order(
         deployment,
@@ -170,6 +315,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except AssertionError as error:
+    except (AssertionError, subprocess.CalledProcessError) as error:
         print(f"operational documentation contract failed: {error}", file=sys.stderr)
         sys.exit(1)

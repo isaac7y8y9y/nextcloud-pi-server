@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Portable helper regression test with a guarded GitHub-Actions-only privileged
+# fixture branch.
 set -euo pipefail
 readonly HELPER="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/privileged/nextcloud-pi-ops"
 bash -n "$HELPER"

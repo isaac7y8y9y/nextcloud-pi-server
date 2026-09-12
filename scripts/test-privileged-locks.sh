@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Guarded GitHub-Actions-only test for root lock-file ownership and symlink
+# protections; portable environments skip the privileged fixture.
 set -euo pipefail
 
 readonly ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"

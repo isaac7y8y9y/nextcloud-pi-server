@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Portable fault-injection test for local image-import interruption cleanup.
 set -euo pipefail
 
 readonly SCRIPT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
