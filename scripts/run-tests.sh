@@ -26,6 +26,7 @@ readonly -a PR_COMMANDS=(
   'bash scripts/test-image-import-interruption.sh'
   'bash scripts/test-image-recovery-attestation.sh'
   'bash scripts/test-image-readiness-lifecycle.sh'
+  'bash scripts/test-image-readiness-e2e.sh'
   'bash scripts/test-runtime-recovery-regression.sh'
   'bash scripts/test-ssh-keepalive.sh'
   'bash scripts/test-deploy-config.sh'

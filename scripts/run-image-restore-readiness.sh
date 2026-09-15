@@ -52,6 +52,6 @@ apply() {
 case "$MODE" in
   --check) [[ $# == 2 ]] || { usage; exit 2; }; check "$ARGUMENT";;
   --apply) [[ $# == 2 ]] || { usage; exit 2; }; apply "$ARGUMENT";;
-  --cleanup) [[ $# == 2 ]] || { usage; exit 2; }; set_id "$ARGUMENT"; remote "sudo -n /usr/local/libexec/nextcloud-pi-ops image-readiness stop '$ID'" >/dev/null || true; remote "sudo -n /usr/local/libexec/nextcloud-pi-ops image-readiness cleanup '$ID'" >/dev/null;;
+  --cleanup) [[ $# == 2 ]] || { usage; exit 2; }; set_id "$ARGUMENT"; remote "sudo -n /usr/local/libexec/nextcloud-pi-ops image-readiness stop '$ID'" >/dev/null || true; remote "sudo -n /usr/local/libexec/nextcloud-pi-ops image-readiness cleanup '$ID'" >/dev/null; printf 'Image restore-readiness cleanup removed isolated state\n';;
   *) usage; exit 2;;
 esac

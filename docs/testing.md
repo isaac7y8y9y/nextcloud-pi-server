@@ -52,6 +52,7 @@ must be resolved before trusting a Linux integration result.
 | `scripts/test-image-import.sh` | Static import/attestation/approval contract guard plus clock-skew behavior | Read-only plus disposable extracted function | `0.06s` | Direct | PR-direct |
 | `scripts/test-image-lock.sh` | Exercises locked tag/ID parsing and lookup | Read-only | `<0.01s` | Direct | PR-direct |
 | `scripts/test-image-readiness-lifecycle.sh` | Static contract guard that the Mac lifecycle wrapper uses the privileged dispatcher, isolated namespaces, and no live Docker socket | Read-only; does not execute lifecycle modes | `0.02s` | Direct | PR-direct |
+| `scripts/test-image-readiness-e2e.sh` | On Linux Actions, executes the wrapper's check/apply/cleanup modes through a root-owned dispatcher fixture, controlled SSH forwarding, fake isolated-daemon protocol, and synthetic recovery archive | Root-owned fixture plus temporary archive, sockets, and logs removed by traps; does not use a real Docker daemon or SSH server | To be measured in CI | Direct | PR-direct |
 | `scripts/test-image-recovery-attestation.sh` | Exercises archive/attestation binding, hashes, platforms, tags, malformed data, and modes | Protected disposable archive fixture removed by trap | `0.52s` | Direct | PR-direct |
 | `scripts/test-image-restore-readiness.sh` | Loads a verified private archive into an explicitly isolated Docker daemon and publishes attestation | Mutates isolated daemon and recovery directory; parent lifecycle owns daemon cleanup | Several minutes, archive-size dependent | Syntax plus static assertions in related tests | Operator-only |
 | `scripts/test-operational-documentation.py` | Enforces operator command/runbook contracts and executable promises | Read-only | `0.01s` | Direct | PR-direct |
@@ -77,8 +78,10 @@ must be resolved before trusting a Linux integration result.
 
 Static checks are not behavioral lifecycle execution. In particular,
 `test-image-readiness-lifecycle.sh` checks wrapper and dispatcher contracts but
-does not run image-readiness check/apply/failure/cleanup. Linux-only branches
-of guarded tests are likewise different from their portable macOS subsets.
+does not run image-readiness check/apply/failure/cleanup; that coverage belongs
+to the Linux Actions branch of `test-image-readiness-e2e.sh`. Linux-only
+branches of guarded tests are likewise different from their portable macOS
+subsets.
 
 ## Operator-only procedures
 
@@ -98,6 +101,3 @@ approval and cleanup boundaries.
 There are no path-filtered or scheduled test tiers. Both unfiltered `push` and
 `pull_request` events run because the all-push publication-safety signal is
 worth the small duplicate-run cost for internal branches.
-
-The remaining automated coverage gap is tracked by
-[#31: Restore hermetic end-to-end image restore-readiness coverage](https://github.com/isaac7y8y9y/nextcloud-pi-server/issues/31).
