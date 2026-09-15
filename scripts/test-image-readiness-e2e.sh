@@ -91,7 +91,10 @@ int main(int argc, char **argv) {
   unlink(path);
   if (bind(descriptor, (struct sockaddr *)&address, offsetof(struct sockaddr_un, sun_path) + strlen(path) + 1) != 0 || listen(descriptor, 1) != 0) return 4;
   signal(SIGHUP, stop); signal(SIGINT, stop); signal(SIGTERM, stop);
-  while (running) pause(); close(descriptor); unlink(path); return 0;
+  while (running) pause();
+  close(descriptor);
+  unlink(path);
+  return 0;
 }
 EOF
 cc -Wall -Wextra -Werror "$TEST_BIN/socket-listener.c" -o "$TEST_BIN/socket-listener"
