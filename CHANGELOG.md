@@ -2,6 +2,15 @@
 
 This changelog records major engineering phases rather than individual commits.
 
+## 1.1.0 — 2026-09-16
+
+- Added operational deployment and recovery runbooks with expanded regression
+  coverage for image and runtime recovery paths.
+- Introduced a least-privilege Raspberry Pi operations interface and associated
+  installation, policy, and verification controls.
+- Added the canonical pull-request test runner and hermetic restore-readiness
+  end-to-end coverage.
+
 ## 1.0.0 — 2026-08-27
 
 - Reframed the repository as a sanitized engineering case study.
