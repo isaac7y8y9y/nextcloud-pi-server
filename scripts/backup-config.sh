@@ -206,6 +206,15 @@ copy_remote_file "$NEXTCLOUD_REMOTE_PROJECT_DIR/docker-compose.yml" "compose/doc
 copy_optional_remote_file "$NEXTCLOUD_REMOTE_PROJECT_DIR/.env" "compose/.env"
 copy_remote_file "$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile" "caddy/Caddyfile"
 copy_remote_file "$NEXTCLOUD_SYSTEMD_UNIT" "systemd/nextcloud.service"
+copy_optional_remote_file "/etc/systemd/system/nextcloud-background-jobs.service" "systemd/nextcloud-background-jobs.service"
+copy_optional_remote_file "/etc/systemd/system/nextcloud-background-jobs.timer" "systemd/nextcloud-background-jobs.timer"
+background_jobs_service_present=0
+background_jobs_timer_present=0
+[[ -e "$STAGING_DIR/systemd/nextcloud-background-jobs.service" ]] && background_jobs_service_present=1
+[[ -e "$STAGING_DIR/systemd/nextcloud-background-jobs.timer" ]] && background_jobs_timer_present=1
+if [[ "$background_jobs_service_present" != "$background_jobs_timer_present" ]]; then
+  die "background-job systemd units must be both present or both absent"
+fi
 capture_remote_command "storage/fstab-entry.txt" "awk -v mount='$NEXTCLOUD_STORAGE_MOUNT' '\$2 == mount { print }' /etc/fstab"
 
 # Collect only the operational fields needed to identify and validate this

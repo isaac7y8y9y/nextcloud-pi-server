@@ -21,7 +21,7 @@ readonly REQUIRED_FILES=(
   metadata/nextcloud-data-directory.txt
   metadata/nextcloud-trusted-domains.txt
 )
-readonly OPTIONAL_FILES=(compose/.env)
+readonly OPTIONAL_FILES=(compose/.env systemd/nextcloud-background-jobs.service systemd/nextcloud-background-jobs.timer)
 readonly REQUIRED_PAYLOAD_FILES=(
   compose/docker-compose.yml
   caddy/Caddyfile
@@ -34,7 +34,7 @@ readonly REQUIRED_PAYLOAD_FILES=(
   metadata/nextcloud-data-directory.txt
   metadata/nextcloud-trusted-domains.txt
 )
-readonly OPTIONAL_PAYLOAD_FILES=(compose/.env)
+readonly OPTIONAL_PAYLOAD_FILES=(compose/.env systemd/nextcloud-background-jobs.service systemd/nextcloud-background-jobs.timer)
 readonly EXPECTED_CONTAINERS=(nextcloud-docker-app-1 nextcloud-docker-db-1 nextcloud-docker-caddy-1)
 
 usage() {
@@ -115,6 +115,14 @@ for relative_file in "${OPTIONAL_FILES[@]}"; do
   [[ -f "$path" && ! -L "$path" ]] || die "optional file is not regular: $relative_file"
   [[ "$(mode_of "$path")" == "600" ]] || die "file permissions must be 0600: $relative_file"
 done
+
+background_jobs_service_present=0
+background_jobs_timer_present=0
+[[ -e "$backup_dir/systemd/nextcloud-background-jobs.service" ]] && background_jobs_service_present=1
+[[ -e "$backup_dir/systemd/nextcloud-background-jobs.timer" ]] && background_jobs_timer_present=1
+if [[ "$background_jobs_service_present" != "$background_jobs_timer_present" ]]; then
+  die "background-job systemd units must be both present or both absent"
+fi
 
 # Reject additions and symbolic links so an otherwise valid manifest cannot
 # hide or redirect unverified material.

@@ -95,7 +95,7 @@ drift() {
 
 readiness_transition() {
   case "$1" in
-    "Caddyfile active configuration differs from live configuration"|"Root-only startup launcher differs from live configuration"|"Root-only active-image validator differs from live configuration"|"systemd service active configuration differs from live configuration"|"Docker storage mount drop-in differs from live configuration"|"App published port differs from the reviewed readiness baseline"|"App still exposes a host port") return 0 ;;
+    "Caddyfile active configuration differs from live configuration"|"Root-only startup launcher differs from live configuration"|"Root-only active-image validator differs from live configuration"|"Root-only background-job runner differs from live configuration"|"systemd service active configuration differs from live configuration"|"background-job service differs from live configuration"|"background-job timer differs from live configuration"|"background-job timer is not enabled and active"|"Docker storage mount drop-in differs from live configuration"|"App published port differs from the reviewed readiness baseline"|"App still exposes a host port") return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -214,6 +214,8 @@ require_local_file "compose/docker-compose.yml"
 require_local_file "compose/.env.example"
 require_local_file "caddy/Caddyfile"
 require_local_file "systemd/nextcloud.service"
+require_local_file "systemd/nextcloud-background-jobs.service"
+require_local_file "systemd/nextcloud-background-jobs.timer"
 require_local_file "systemd/docker.service.d/nextcloud-storage.conf"
 require_local_file "storage/fstab.nextcloud"
 
@@ -450,7 +452,7 @@ fi
 section "Safe configuration comparison"
 
 compare_normalized_file_to_remote_command "Caddyfile" "$RENDERED_CONFIG_DIR/caddy/Caddyfile" "cat '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile'" "$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile"
-for protected in compose-launcher active-image-validator; do
+for protected in compose-launcher active-image-validator background-jobs-runner; do
   if remote "sudo -n /usr/local/libexec/nextcloud-pi-ops protected-state '$protected'" >/dev/null 2>&1; then
     record PASS "Root-only protected resource is present: $protected"
   else
@@ -458,6 +460,13 @@ for protected in compose-launcher active-image-validator; do
   fi
 done
 compare_normalized_file_to_remote_command "systemd service" "$RENDERED_CONFIG_DIR/systemd/nextcloud.service" "cat /etc/systemd/system/nextcloud.service" "/etc/systemd/system/nextcloud.service"
+compare_file_to_remote_command "background-job service" "$RENDERED_CONFIG_DIR/systemd/nextcloud-background-jobs.service" "cat /etc/systemd/system/nextcloud-background-jobs.service" "/etc/systemd/system/nextcloud-background-jobs.service"
+compare_file_to_remote_command "background-job timer" "$RENDERED_CONFIG_DIR/systemd/nextcloud-background-jobs.timer" "cat /etc/systemd/system/nextcloud-background-jobs.timer" "/etc/systemd/system/nextcloud-background-jobs.timer"
+if remote "systemctl is-enabled --quiet nextcloud-background-jobs.timer && systemctl is-active --quiet nextcloud-background-jobs.timer" >/dev/null 2>&1; then
+  record PASS "background-job timer is enabled and active"
+else
+  drift "background-job timer is not enabled and active"
+fi
 compare_file_to_remote_command "Docker storage mount drop-in" "$RENDERED_CONFIG_DIR/systemd/docker.service.d/nextcloud-storage.conf" "cat /etc/systemd/system/docker.service.d/nextcloud-storage.conf" "/etc/systemd/system/docker.service.d/nextcloud-storage.conf"
 
 local_fstab_entry="$TMP_DIR/fstab.local"

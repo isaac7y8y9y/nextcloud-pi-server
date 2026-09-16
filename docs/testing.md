@@ -40,6 +40,7 @@ must be resolved before trusting a Linux integration result.
 | `scripts/check-public-safety.py` | Detects forbidden files, deployment identity, and secret-like material in the tree or reachable history; Python and Git | Read-only; output is redacted | `0.10s` tree; `4.23s` history locally | Direct in both modes | PR-direct |
 | `scripts/test-active-images.sh` | Exercises active-image record schema, modes, binding, ownership contract, and symlink rejection | Disposable local fixture removed by trap | `0.03s` | Direct | PR-direct |
 | `scripts/test-atomic-transaction.sh` | Fault-injects the shared deployment transaction and verifies rollback ordering/state | Disposable local fixture and fake sudo; trap cleanup | `0.23s` | Direct | PR-direct |
+| `scripts/test-background-jobs.sh` | Verifies the local timer cadence, passive stopped-stack behavior, dispatcher quiescence, and runtime-backup coordination contracts | Read-only | `<0.1s` | Direct | PR-direct |
 | `scripts/test-compose-env-references.sh` | Exercises the Compose checker against valid and invalid synthetic templates | Disposable Compose fixture removed by trap | `0.02s` | Direct | PR-direct |
 | `scripts/test-compose-launcher.sh` | Exercises rendered launcher image/service validation with fake Docker | Disposable rendered tree and fake commands; trap cleanup | `1.31s` | Direct | PR-direct |
 | `scripts/test-deploy-config.sh` | Static guard for deployment approval, freshness, atomic apply, and rollback contracts | Read-only | `0.02s` | Direct | PR-direct |
