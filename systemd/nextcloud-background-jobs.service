@@ -1,0 +1,11 @@
+[Unit]
+Description=Nextcloud background jobs
+After=nextcloud.service
+RequiresMountsFor=@NEXTCLOUD_STORAGE_MOUNT@
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/nextcloud-pi-background-jobs
+# Keep the docker-exec client attached until cron.php exits. A finite timeout
+# could hide a still-running in-container PHP job from backup quiescence.
+TimeoutStartSec=infinity

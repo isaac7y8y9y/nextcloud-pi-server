@@ -88,6 +88,15 @@ a publication blocker; fix the source rather than weakening a rule.
 The three Pi/operator drills are intentionally absent from the runner. Use their
 individual, approval-gated procedures in the deployment and recovery guides.
 
+## Background-job scheduler
+
+The local background-job timer is installed only through the privileged-interface
+administrator workflow. It is intended for normal daytime uptime; no external
+WebCron service or overnight operation is required. After installation, confirm
+the timer is enabled and active, then observe aggregate queue progress without
+printing or manually bulk-executing job arguments. A queue that does not make
+progress is an operational diagnosis, not authorization to continue an upgrade.
+
 ## Publication history scan
 
 The runner's history scan is read-only but may take longer. It emits only

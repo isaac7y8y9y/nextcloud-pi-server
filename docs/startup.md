@@ -17,6 +17,18 @@ pull; it remains protected by the Docker mount gate. The systemd stop action
 uses `docker compose stop`, not `down`, so shutdown retains the container
 objects and their image identities for that automatic restart path.
 
+## Background jobs
+
+`nextcloud-background-jobs.timer` runs a root-owned oneshot every five minutes
+while the Pi is on. It waits ten minutes after boot, requires the storage
+mount, and runs `cron.php` inside the existing app container as `www-data`.
+It never starts a deliberately stopped Nextcloud stack, pulls an image, or
+creates a container. A normal nightly shutdown simply pauses the monotonic
+timer; processing resumes after the next boot.
+
+Runtime backups pause future ticks and wait for any in-flight job to finish
+before entering maintenance mode, then restore the timer's prior active state.
+
 ## Privileged startup boundary
 
 Systemd invokes the root-owned launcher and active-image validator directly.

@@ -65,7 +65,9 @@ scripts/backup-runtime-state.sh --apply
 ```
 
 `--apply` enables Nextcloud maintenance mode only while capturing consistent
-state, disables it before publishing the artifact, verifies the completed
+state. When the local background-job timer is installed and active, it first
+pauses future ticks and waits for an active job to finish, then restores the
+prior timer state during cleanup. It disables maintenance before publishing the artifact, verifies the completed
 backup offline, and prints a protected `runtime-backup-<UTC timestamp>` path.
 Set and reverify that exact path:
 

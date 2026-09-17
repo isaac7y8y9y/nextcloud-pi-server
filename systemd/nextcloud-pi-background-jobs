@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly LOCK_ROOT=/run/nextcloud-pi-locks
+readonly LOCK="$LOCK_ROOT/background-jobs.lock"
+readonly NEXTCLOUD_SERVICE=nextcloud.service
+readonly APP_CONTAINER=nextcloud-docker-app-1
+
+if [[ ! -e "$LOCK_ROOT" && ! -L "$LOCK_ROOT" ]]; then
+  install -d -m 0700 -o root -g root "$LOCK_ROOT"
+fi
+[[ -d "$LOCK_ROOT" && ! -L "$LOCK_ROOT" && "$(stat -c '%u:%g:%a' "$LOCK_ROOT")" == 0:0:700 ]] || exit 1
+if [[ ! -e "$LOCK" ]]; then
+  install -m 0600 -o root -g root /dev/null "$LOCK"
+fi
+[[ -f "$LOCK" && ! -L "$LOCK" && "$(stat -c '%u:%g:%a' "$LOCK")" == 0:0:600 ]] || exit 1
+
+exec 9>>"$LOCK"
+flock -n 9 || exit 0
+
+# A timer tick must never revive a deliberately stopped application stack.
+systemctl is-active --quiet "$NEXTCLOUD_SERVICE" || exit 0
+[[ "$(docker inspect --format '{{.State.Running}}' "$APP_CONTAINER" 2>/dev/null || true)" == true ]] || exit 0
+
+# Backup orchestration pauses future ticks before enabling maintenance mode;
+# this check also makes an independently entered maintenance window passive.
+docker exec --user www-data "$APP_CONTAINER" php /var/www/html/occ status 2>/dev/null |
+  grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*(false|no)$' || exit 0
+
+exec docker exec --user www-data "$APP_CONTAINER" php -f /var/www/html/cron.php

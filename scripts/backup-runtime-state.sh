@@ -32,6 +32,7 @@ MAINTENANCE_ENABLED=0
 REMOTE_LOCK_ARMED=0
 REMOTE_LOCK_TOKEN=""
 LOCAL_LOCK_DIR=""
+BACKGROUND_JOBS_RESUME=0
 
 readonly REMOTE_LOCK_DIR="/tmp/nextcloud-runtime-backup.lock"
 
@@ -257,6 +258,62 @@ release_local_lock() {
   return 1
 }
 
+background_jobs_scheduler_state() {
+  local state
+
+  state="$(remote "
+    if test ! -e /usr/local/libexec/nextcloud-pi-background-jobs && test ! -L /usr/local/libexec/nextcloud-pi-background-jobs && \\
+       test ! -e /etc/systemd/system/nextcloud-background-jobs.service && test ! -L /etc/systemd/system/nextcloud-background-jobs.service && \\
+       test ! -e /etc/systemd/system/nextcloud-background-jobs.timer && test ! -L /etc/systemd/system/nextcloud-background-jobs.timer; then
+      printf absent
+    elif test -f /usr/local/libexec/nextcloud-pi-background-jobs && test ! -L /usr/local/libexec/nextcloud-pi-background-jobs && \\
+         test -f /etc/systemd/system/nextcloud-background-jobs.service && test ! -L /etc/systemd/system/nextcloud-background-jobs.service && \\
+         test -f /etc/systemd/system/nextcloud-background-jobs.timer && test ! -L /etc/systemd/system/nextcloud-background-jobs.timer; then
+      printf present
+    else
+      printf partial
+    fi
+  ")" || return 1
+  case "$state" in absent|present|partial) printf '%s\n' "$state" ;; *) return 1 ;; esac
+}
+
+pause_background_jobs() {
+  local scheduler_state state
+
+  scheduler_state="$(background_jobs_scheduler_state)" ||
+    die "could not determine the background-job scheduler installation state"
+  case "$scheduler_state" in
+    absent) return 0 ;;
+    present) ;;
+    partial) die "background-job scheduler installation is partial or unsafe" ;;
+    *) die "invalid background-job scheduler installation state" ;;
+  esac
+
+  state="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops background-jobs state")" ||
+    die "could not determine the background-job timer state"
+  if [[ "$(awk -F $'\t' '$1 == "timer_active" { print $2 }' <<<"$state")" == yes ]]; then
+    # Arm cleanup before a remote stop: an interrupted or timed-out pause may
+    # already have stopped the timer even when the caller receives an error.
+    BACKGROUND_JOBS_RESUME=1
+  fi
+  remote "sudo -n /usr/local/libexec/nextcloud-pi-ops background-jobs pause" >/dev/null ||
+    die "could not pause and quiesce background jobs before backup"
+}
+
+resume_background_jobs() {
+  if (( BACKGROUND_JOBS_RESUME == 0 )); then
+    return 0
+  fi
+
+  if remote "sudo -n /usr/local/libexec/nextcloud-pi-ops background-jobs resume" >/dev/null; then
+    BACKGROUND_JOBS_RESUME=0
+    return 0
+  fi
+
+  warn "could not resume the background-job timer"
+  return 1
+}
+
 cleanup() {
   local status=$?
   local cleanup_failed=0
@@ -265,6 +322,7 @@ cleanup() {
   # partial payloads. Any service/lock cleanup failure changes success to error.
   trap - EXIT
   disable_maintenance || cleanup_failed=1
+  resume_background_jobs || cleanup_failed=1
   release_remote_lock || cleanup_failed=1
   release_local_lock || cleanup_failed=1
   if [[ -n "$STAGING_DIR" && -d "$STAGING_DIR" ]]; then
@@ -359,6 +417,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 acquire_locks
 maintenance_is_off || die "Nextcloud entered maintenance mode before this backup acquired its lock"
+pause_background_jobs
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 final_dir="$NEXTCLOUD_RUNTIME_BACKUP_ROOT/runtime-backup-$timestamp"
@@ -404,6 +463,7 @@ chmod 600 "$STAGING_DIR/caddy/data.tar" "$STAGING_DIR/caddy/config.tar"
 
 disable_maintenance
 maintenance_is_off || die "Nextcloud did not leave maintenance mode"
+resume_background_jobs || die "runtime backup completed but the background-job timer could not be resumed"
 
 manifest="$STAGING_DIR/manifest.tsv"
 : >"$manifest"

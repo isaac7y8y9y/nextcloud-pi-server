@@ -21,6 +21,7 @@ readonly -a PR_COMMANDS=(
   'bash scripts/test-active-images.sh'
   'bash scripts/test-compose-launcher.sh'
   'bash scripts/test-atomic-transaction.sh'
+  'bash scripts/test-background-jobs.sh'
   'bash scripts/test-image-import.sh'
   'bash scripts/test-image-import-transaction.sh'
   'bash scripts/test-image-import-interruption.sh'

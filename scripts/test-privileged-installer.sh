@@ -28,9 +28,12 @@ if [[ "${GITHUB_ACTIONS:-}" == true && "$(uname -s)" == Linux ]]; then
   LIVE_HELPER="$TEST_LIVE/libexec/nextcloud-pi-ops"
   LIVE_VALIDATOR="$TEST_LIVE/libexec/nextcloud-pi-validate-active-images"
   LIVE_LAUNCHER="$TEST_LIVE/libexec/nextcloud-pi-compose-start"
+  LIVE_BACKGROUND_RUNNER="$TEST_LIVE/libexec/nextcloud-pi-background-jobs"
   LIVE_POLICY="$TEST_LIVE/etc/nextcloud-pi/privileged-policy.conf"
   LIVE_MANIFEST="$TEST_LIVE/etc/nextcloud-pi/bundle-manifest.tsv"
   LIVE_UNIT="$TEST_LIVE/systemd/nextcloud.service"
+  LIVE_BACKGROUND_UNIT="$TEST_LIVE/systemd/nextcloud-background-jobs.service"
+  LIVE_BACKGROUND_TIMER="$TEST_LIVE/systemd/nextcloud-background-jobs.timer"
   LIVE_DROPIN="$TEST_LIVE/systemd/docker.service.d/nextcloud-storage.conf"
   LIVE_SUDOERS="$TEST_LIVE/sudoers/nextcloud-pi-automation"
   mkdir -p "$TEST_BIN" "$TEST_MOUNT" "$TEST_PROJECT"
@@ -43,10 +46,13 @@ if [[ "${GITHUB_ACTIONS:-}" == true && "$(uname -s)" == Linux ]]; then
     -e "s|/usr/local/libexec/nextcloud-pi-ops|$LIVE_HELPER|g" \
     -e "s|/usr/local/libexec/nextcloud-pi-validate-active-images|$LIVE_VALIDATOR|g" \
     -e "s|/usr/local/libexec/nextcloud-pi-compose-start|$LIVE_LAUNCHER|g" \
+    -e "s|/usr/local/libexec/nextcloud-pi-background-jobs|$LIVE_BACKGROUND_RUNNER|g" \
     -e "s|/etc/nextcloud-pi/privileged-policy.conf|$LIVE_POLICY|g" \
     -e "s|/etc/nextcloud-pi/bundle-manifest.tsv|$LIVE_MANIFEST|g" \
     -e "s|/etc/systemd/system/docker.service.d/nextcloud-storage.conf|$LIVE_DROPIN|g" \
     -e "s|/etc/systemd/system/nextcloud.service|$LIVE_UNIT|g" \
+    -e "s|/etc/systemd/system/nextcloud-background-jobs.service|$LIVE_BACKGROUND_UNIT|g" \
+    -e "s|/etc/systemd/system/nextcloud-background-jobs.timer|$LIVE_BACKGROUND_TIMER|g" \
     -e "s|/etc/systemd/system|$TEST_LIVE/systemd|g" \
     -e "s|/etc/sudoers.d/nextcloud-pi-automation|$LIVE_SUDOERS|g" \
     "$INSTALLER" >"$TEST_DIR/installer"
@@ -111,10 +117,13 @@ exit $helper_result
 EOF
     printf '#!/bin/bash\nexit 0\n' >"$directory/files/active-image-validator"
     printf '#!/bin/bash\nexit 0\n' >"$directory/files/compose-launcher"
+    printf '#!/bin/bash\nexit 0\n' >"$directory/files/background-jobs-runner"
     printf '[Unit]\n[Service]\nType=oneshot\nExecStart=%s\n' "$LIVE_LAUNCHER" >"$directory/files/nextcloud-unit"
+    printf '[Unit]\n[Service]\nType=oneshot\nExecStart=%s\n' "$LIVE_BACKGROUND_RUNNER" >"$directory/files/background-jobs-unit"
+    printf '[Timer]\nOnUnitActiveSec=5min\n' >"$directory/files/background-jobs-timer"
     printf '[Service]\nRequiresMountsFor=%s\n' "$TEST_MOUNT" >"$directory/files/docker-storage-drop-in"
-    chmod 0700 "$directory/files/privileged-helper" "$directory/files/active-image-validator" "$directory/files/compose-launcher"
-    chmod 0644 "$directory/files/nextcloud-unit" "$directory/files/docker-storage-drop-in"
+    chmod 0700 "$directory/files/privileged-helper" "$directory/files/active-image-validator" "$directory/files/compose-launcher" "$directory/files/background-jobs-runner"
+    chmod 0644 "$directory/files/nextcloud-unit" "$directory/files/background-jobs-unit" "$directory/files/background-jobs-timer" "$directory/files/docker-storage-drop-in"
     cat >"$directory/privileged-policy.conf" <<EOF
 NEXTCLOUD_PI_POLICY_FORMAT=nextcloud-pi-privileged-policy-v1
 NEXTCLOUD_PI_BUNDLE_VERSION=1
@@ -141,12 +150,15 @@ EOF
     cp "$TEST_DIR/installer" "$directory/nextcloud-pi-bundle-installer"
     {
       printf 'format\tnextcloud-pi-bundle-manifest-v1\nversion\t%s\n' "$version"
-      for logical in privileged-helper active-image-validator compose-launcher nextcloud-unit docker-storage-drop-in; do
+      for logical in privileged-helper active-image-validator compose-launcher background-jobs-runner nextcloud-unit background-jobs-unit background-jobs-timer docker-storage-drop-in; do
         case "$logical" in
           privileged-helper) installed="$LIVE_HELPER"; mode=0700 ;;
           active-image-validator) installed="$LIVE_VALIDATOR"; mode=0700 ;;
           compose-launcher) installed="$LIVE_LAUNCHER"; mode=0700 ;;
+          background-jobs-runner) installed="$LIVE_BACKGROUND_RUNNER"; mode=0700 ;;
           nextcloud-unit) installed="$LIVE_UNIT"; mode=0644 ;;
+          background-jobs-unit) installed="$LIVE_BACKGROUND_UNIT"; mode=0644 ;;
+          background-jobs-timer) installed="$LIVE_BACKGROUND_TIMER"; mode=0644 ;;
           docker-storage-drop-in) installed="$LIVE_DROPIN"; mode=0644 ;;
         esac
         printf 'file\t%s\ttest\t%s\t%s\t%s\n' "$logical" "$installed" "$mode" "$(sha256sum "$directory/files/$logical" | awk '{print $1}')"

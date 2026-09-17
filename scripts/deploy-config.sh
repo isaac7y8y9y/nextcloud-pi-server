@@ -101,7 +101,7 @@ bundle_manifest() {
   printf 'format\tnextcloud-pi-bundle-manifest-v1\nversion\t1\n' >"$out"
   while IFS=$'\t' read -r kind logical source installed mode digest; do
     [[ "$kind" == file ]] || continue
-    case "$logical" in privileged-helper) file="$ROOT/privileged/nextcloud-pi-ops";; active-image-validator) file="$TMP_DIR/rendered/launcher/nextcloud-pi-validate-active-images";; compose-launcher) file="$TMP_DIR/rendered/launcher/nextcloud-pi-compose-start";; nextcloud-unit) file="$TMP_DIR/rendered/systemd/nextcloud.service";; docker-storage-drop-in) file="$TMP_DIR/rendered/systemd/docker.service.d/nextcloud-storage.conf";; *) die "unknown bundle entry";; esac
+    case "$logical" in privileged-helper) file="$ROOT/privileged/nextcloud-pi-ops";; active-image-validator) file="$TMP_DIR/rendered/launcher/nextcloud-pi-validate-active-images";; compose-launcher) file="$TMP_DIR/rendered/launcher/nextcloud-pi-compose-start";; background-jobs-runner) file="$TMP_DIR/rendered/launcher/nextcloud-pi-background-jobs";; nextcloud-unit) file="$TMP_DIR/rendered/systemd/nextcloud.service";; background-jobs-unit) file="$TMP_DIR/rendered/systemd/nextcloud-background-jobs.service";; background-jobs-timer) file="$TMP_DIR/rendered/systemd/nextcloud-background-jobs.timer";; docker-storage-drop-in) file="$TMP_DIR/rendered/systemd/docker.service.d/nextcloud-storage.conf";; *) die "unknown bundle entry";; esac
     printf 'file\t%s\t%s\t%s\t%s\t%s\n' "$logical" "$source" "$installed" "$mode" "$(sha256 "$file")" >>"$out"
   done <"$ROOT/privileged/bundle-manifest.tsv"
   printf '%s' "$out"

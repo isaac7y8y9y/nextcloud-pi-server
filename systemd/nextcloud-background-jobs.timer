@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Nextcloud background jobs while the Pi is on
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Unit=nextcloud-background-jobs.service
+
+[Install]
+WantedBy=timers.target
