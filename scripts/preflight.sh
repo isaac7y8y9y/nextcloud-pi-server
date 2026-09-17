@@ -84,6 +84,25 @@ remote_sh() {
   ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" "sh -s" "$@"
 }
 
+background_jobs_scheduler_state() {
+  local state
+
+  state="$(remote "
+    if test ! -e /usr/local/libexec/nextcloud-pi-background-jobs && test ! -L /usr/local/libexec/nextcloud-pi-background-jobs && \\
+       test ! -e /etc/systemd/system/nextcloud-background-jobs.service && test ! -L /etc/systemd/system/nextcloud-background-jobs.service && \\
+       test ! -e /etc/systemd/system/nextcloud-background-jobs.timer && test ! -L /etc/systemd/system/nextcloud-background-jobs.timer; then
+      printf absent
+    elif test -f /usr/local/libexec/nextcloud-pi-background-jobs && test ! -L /usr/local/libexec/nextcloud-pi-background-jobs && \\
+         test -f /etc/systemd/system/nextcloud-background-jobs.service && test ! -L /etc/systemd/system/nextcloud-background-jobs.service && \\
+         test -f /etc/systemd/system/nextcloud-background-jobs.timer && test ! -L /etc/systemd/system/nextcloud-background-jobs.timer; then
+      printf present
+    else
+      printf partial
+    fi
+  ")" || return 1
+  case "$state" in absent|present|partial) printf '%s\n' "$state" ;; *) return 1 ;; esac
+}
+
 drift() {
   DRIFT_COUNT=$((DRIFT_COUNT + 1))
   if [[ "$PREFLIGHT_MODE" == "--readiness" ]] && readiness_transition "$1"; then
@@ -452,7 +471,7 @@ fi
 section "Safe configuration comparison"
 
 compare_normalized_file_to_remote_command "Caddyfile" "$RENDERED_CONFIG_DIR/caddy/Caddyfile" "cat '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile'" "$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile"
-for protected in compose-launcher active-image-validator background-jobs-runner; do
+for protected in compose-launcher active-image-validator; do
   if remote "sudo -n /usr/local/libexec/nextcloud-pi-ops protected-state '$protected'" >/dev/null 2>&1; then
     record PASS "Root-only protected resource is present: $protected"
   else
@@ -460,13 +479,32 @@ for protected in compose-launcher active-image-validator background-jobs-runner;
   fi
 done
 compare_normalized_file_to_remote_command "systemd service" "$RENDERED_CONFIG_DIR/systemd/nextcloud.service" "cat /etc/systemd/system/nextcloud.service" "/etc/systemd/system/nextcloud.service"
-compare_file_to_remote_command "background-job service" "$RENDERED_CONFIG_DIR/systemd/nextcloud-background-jobs.service" "cat /etc/systemd/system/nextcloud-background-jobs.service" "/etc/systemd/system/nextcloud-background-jobs.service"
-compare_file_to_remote_command "background-job timer" "$RENDERED_CONFIG_DIR/systemd/nextcloud-background-jobs.timer" "cat /etc/systemd/system/nextcloud-background-jobs.timer" "/etc/systemd/system/nextcloud-background-jobs.timer"
-if remote "systemctl is-enabled --quiet nextcloud-background-jobs.timer && systemctl is-active --quiet nextcloud-background-jobs.timer" >/dev/null 2>&1; then
-  record PASS "background-job timer is enabled and active"
-else
-  drift "background-job timer is not enabled and active"
-fi
+background_jobs_state="$(background_jobs_scheduler_state || true)"
+case "$background_jobs_state" in
+  absent)
+    if [[ "$PREFLIGHT_MODE" == "--readiness" ]]; then
+      record WARNING "Approved readiness transition: background-job scheduler is absent before initial installation"
+    else
+      record FAIL "Background-job scheduler is absent"
+    fi
+    ;;
+  present)
+    if remote "sudo -n /usr/local/libexec/nextcloud-pi-ops protected-state background-jobs-runner" >/dev/null 2>&1; then
+      record PASS "Root-only protected resource is present: background-jobs-runner"
+    else
+      record FAIL "Root-only protected resource is missing or unsafe: background-jobs-runner"
+    fi
+    compare_file_to_remote_command "background-job service" "$RENDERED_CONFIG_DIR/systemd/nextcloud-background-jobs.service" "cat /etc/systemd/system/nextcloud-background-jobs.service" "/etc/systemd/system/nextcloud-background-jobs.service"
+    compare_file_to_remote_command "background-job timer" "$RENDERED_CONFIG_DIR/systemd/nextcloud-background-jobs.timer" "cat /etc/systemd/system/nextcloud-background-jobs.timer" "/etc/systemd/system/nextcloud-background-jobs.timer"
+    if remote "systemctl is-enabled --quiet nextcloud-background-jobs.timer && systemctl is-active --quiet nextcloud-background-jobs.timer" >/dev/null 2>&1; then
+      record PASS "background-job timer is enabled and active"
+    else
+      drift "background-job timer is not enabled and active"
+    fi
+    ;;
+  partial) record FAIL "Background-job scheduler installation is partial or unsafe" ;;
+  *) record FAIL "Unable to determine background-job scheduler installation state" ;;
+esac
 compare_file_to_remote_command "Docker storage mount drop-in" "$RENDERED_CONFIG_DIR/systemd/docker.service.d/nextcloud-storage.conf" "cat /etc/systemd/system/docker.service.d/nextcloud-storage.conf" "/etc/systemd/system/docker.service.d/nextcloud-storage.conf"
 
 local_fstab_entry="$TMP_DIR/fstab.local"

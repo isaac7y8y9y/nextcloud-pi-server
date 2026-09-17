@@ -258,8 +258,36 @@ release_local_lock() {
   return 1
 }
 
-pause_background_jobs() {
+background_jobs_scheduler_state() {
   local state
+
+  state="$(remote "
+    if test ! -e /usr/local/libexec/nextcloud-pi-background-jobs && test ! -L /usr/local/libexec/nextcloud-pi-background-jobs && \\
+       test ! -e /etc/systemd/system/nextcloud-background-jobs.service && test ! -L /etc/systemd/system/nextcloud-background-jobs.service && \\
+       test ! -e /etc/systemd/system/nextcloud-background-jobs.timer && test ! -L /etc/systemd/system/nextcloud-background-jobs.timer; then
+      printf absent
+    elif test -f /usr/local/libexec/nextcloud-pi-background-jobs && test ! -L /usr/local/libexec/nextcloud-pi-background-jobs && \\
+         test -f /etc/systemd/system/nextcloud-background-jobs.service && test ! -L /etc/systemd/system/nextcloud-background-jobs.service && \\
+         test -f /etc/systemd/system/nextcloud-background-jobs.timer && test ! -L /etc/systemd/system/nextcloud-background-jobs.timer; then
+      printf present
+    else
+      printf partial
+    fi
+  ")" || return 1
+  case "$state" in absent|present|partial) printf '%s\n' "$state" ;; *) return 1 ;; esac
+}
+
+pause_background_jobs() {
+  local scheduler_state state
+
+  scheduler_state="$(background_jobs_scheduler_state)" ||
+    die "could not determine the background-job scheduler installation state"
+  case "$scheduler_state" in
+    absent) return 0 ;;
+    present) ;;
+    partial) die "background-job scheduler installation is partial or unsafe" ;;
+    *) die "invalid background-job scheduler installation state" ;;
+  esac
 
   state="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops background-jobs state")" ||
     die "could not determine the background-job timer state"

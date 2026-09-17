@@ -30,12 +30,23 @@ grep -Fq 'quiesce_background_jobs' "$ROOT/privileged/nextcloud-pi-bundle-install
 # cleanup must therefore know to resume it before the pause command returns.
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEST_DIR"' EXIT
+awk '/^background_jobs_scheduler_state\(\)/,/^pause_background_jobs\(\)/ { if (!/^pause_background_jobs\(\)/) print }' "$BACKUP" >"$TEST_DIR/scheduler-state.sh"
 awk '/^pause_background_jobs\(\)/,/^resume_background_jobs\(\)/ { if (!/^resume_background_jobs\(\)/) print }' "$BACKUP" >"$TEST_DIR/pause.sh"
+source "$TEST_DIR/scheduler-state.sh"
 source "$TEST_DIR/pause.sh"
+printf '%s\n' present >"$TEST_DIR/scheduler-state"
+printf '%s\n' 0 >"$TEST_DIR/scheduler-actions"
 remote() {
   case "$1" in
-    *'background-jobs state') printf 'timer_active\tyes\n' ;;
-    *'background-jobs pause') return 1 ;;
+    *'/usr/local/libexec/nextcloud-pi-background-jobs'*) cat "$TEST_DIR/scheduler-state" ;;
+    *'background-jobs state'|*'background-jobs pause')
+      actions="$(<"$TEST_DIR/scheduler-actions")"
+      printf '%s\n' "$((actions + 1))" >"$TEST_DIR/scheduler-actions"
+      case "$1" in
+        *'background-jobs state') printf 'timer_active\tyes\n' ;;
+        *) return 1 ;;
+      esac
+      ;;
     *) return 1 ;;
   esac
 }
@@ -46,6 +57,16 @@ if pause_background_jobs; then
   exit 1
 fi
 [[ "$BACKGROUND_JOBS_RESUME" == 1 ]]
+
+# A Pi that has not received this bundle yet has no scheduler artifacts. The
+# pre-install runtime recovery backup must remain usable and must not invoke
+# an unsupported helper action.
+printf '%s\n' absent >"$TEST_DIR/scheduler-state"
+printf '%s\n' 0 >"$TEST_DIR/scheduler-actions"
+BACKGROUND_JOBS_RESUME=0
+pause_background_jobs
+[[ "$BACKGROUND_JOBS_RESUME" == 0 ]]
+[[ "$(<"$TEST_DIR/scheduler-actions")" == 0 ]]
 
 # Installer quiescence stops future ticks and waits for the current oneshot;
 # it does not terminate the supervising service while Docker may retain PHP.
