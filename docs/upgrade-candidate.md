@@ -30,3 +30,26 @@ pre-state and fresh recovery point, verify the loaded ID after the approved
 pull, and prove the ingress freeze and full-runtime recovery gates. Until that
 transaction is implemented and reviewed, these candidate files are for
 offline preparation and tests only.
+
+## In-progress protected backup boundary
+
+The root-owned dispatcher has a transaction-ID-bound `upgrade-freeze`
+check/status/activate/release lifecycle. Its nftables `inet` prerouting rule
+is intended to block host-directed Caddy traffic before Docker destination
+NAT while retaining loopback checks. Activation pauses the background-job
+timer and enables maintenance mode; interruption leaves that state for an
+operator to resolve. Release requires maintenance mode to be off and restores
+the timer's prior active state. The dispatcher fixture tests its basic state
+transitions and replay denial, but a separate LAN-client test on the deployed
+network backend is still required to prove both IPv4/IPv6 and old/new-flow
+denial. No live Pi firewall change has been made for this implementation.
+
+`backup-runtime-state.sh --check-held <id>` and `--apply-held <id>` require
+that protected freeze. The apply mode writes a `runtime-backup-v2` manifest
+bound to the freeze ID and firewall hash, and it deliberately leaves the
+freeze, maintenance mode, and timer unchanged even when capture fails. The
+existing ordinary backup remains `runtime-backup-v1` and still reopens service
+after its capture. The held mode is not yet a complete approved upgrade
+transaction: in-flight-write drain, external denial proof, stage approval,
+image activation, and full-runtime restore remain hard gates. Do not use it
+as a live upgrade procedure until those gates are implemented and reviewed.

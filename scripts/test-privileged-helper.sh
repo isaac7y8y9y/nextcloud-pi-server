@@ -12,6 +12,9 @@ grep -Fq 'ACTIVE_PREPARE_ABORT_TX="$tx"' "$HELPER"
 grep -Fq 'trap '\''active_prepare_abort "$?"'\'' EXIT HUP INT TERM' "$HELPER"
 grep -Fq 'else protected_file "$ACTIVE_RECORD" 0600; /usr/bin/cp -p "$ACTIVE_RECORD" "$tx/snapshot"; fi' "$HELPER"
 grep -Fq 'readonly LOCK_ROOT=/run/nextcloud-pi-locks' "$HELPER"
+grep -Fq 'fib daddr type local tcp dport { 80, 443 } drop' "$HELPER"
+grep -Fq 'cmd_upgrade_freeze_activate()' "$HELPER"
+grep -Fq 'cmd_upgrade_freeze_release()' "$HELPER"
 grep -Fq 'exec 9>>"$LOCK"' "$HELPER"
 grep -Fq 'local path expected; path="$(resource_path "$1")"; expected="$(resource_mode "$1")"' "$HELPER"
 grep -Fq 'cmd_runtime_backup_stream() { [[ $# == 1 ]] || invalid; reject_stdin;' "$HELPER"
@@ -142,7 +145,7 @@ if [[ "${GITHUB_ACTIONS:-}" == true && "$(uname -s)" == Linux ]]; then
   SOURCE_DIR="$(mktemp -d)"
   cleanup_fixture() { local status=$?; trap - EXIT HUP INT TERM; sudo rm -rf -- "$FIXTURE"; rm -rf -- "$SOURCE_DIR"; exit "$status"; }
   trap cleanup_fixture EXIT HUP INT TERM
-  sed -e "s|/etc/nextcloud-pi/privileged-policy.conf|$FIXTURE/policy|g" -e "s|/etc/nextcloud-pi/bundle-manifest.tsv|$FIXTURE/manifest|g" -e "s|/usr/local/libexec/nextcloud-pi-ops|$FIXTURE/ops|g" -e "s|/usr/local/libexec/nextcloud-pi-validate-active-images|$FIXTURE/validator|g" -e "s|/etc/nextcloud-pi/active-images.env|$FIXTURE/active-images.env|g" -e "s|/etc/nextcloud-pi/.active-images|$FIXTURE/.active-images|g" -e "s|/run/nextcloud-pi-locks|$FIXTURE/lock-root|g" -e "s|/var/lib/nextcloud-pi-ops|$FIXTURE/state|g" -e "s|/run/nextcloud-pi-ops|$FIXTURE/socket|g" -e "s|/etc/systemd/system|$FIXTURE/systemd|g" -e "s|/usr/bin/hostname|$FIXTURE/bin/hostname|g" -e "s|/usr/bin/findmnt|$FIXTURE/bin/findmnt|g" -e "s|/usr/bin/dockerd|$FIXTURE/bin/dockerd|g" -e "s|/usr/bin/docker|$FIXTURE/bin/docker|g" -e "s|/usr/bin/systemctl|$FIXTURE/bin/systemctl|g" -e "s|/usr/bin/df|$FIXTURE/bin/df|g" "$HELPER" >"$SOURCE_DIR/ops"
+  sed -e "s|/etc/nextcloud-pi/privileged-policy.conf|$FIXTURE/policy|g" -e "s|/etc/nextcloud-pi/bundle-manifest.tsv|$FIXTURE/manifest|g" -e "s|/usr/local/libexec/nextcloud-pi-ops|$FIXTURE/ops|g" -e "s|/usr/local/libexec/nextcloud-pi-validate-active-images|$FIXTURE/validator|g" -e "s|/etc/nextcloud-pi/active-images.env|$FIXTURE/active-images.env|g" -e "s|/etc/nextcloud-pi/.active-images|$FIXTURE/.active-images|g" -e "s|/run/nextcloud-pi-locks|$FIXTURE/lock-root|g" -e "s|/var/lib/nextcloud-pi-ops|$FIXTURE/state|g" -e "s|/run/nextcloud-pi-ops|$FIXTURE/socket|g" -e "s|/etc/systemd/system|$FIXTURE/systemd|g" -e "s|/usr/bin/hostname|$FIXTURE/bin/hostname|g" -e "s|/usr/bin/findmnt|$FIXTURE/bin/findmnt|g" -e "s|/usr/bin/dockerd|$FIXTURE/bin/dockerd|g" -e "s|/usr/bin/docker|$FIXTURE/bin/docker|g" -e "s|/usr/bin/systemctl|$FIXTURE/bin/systemctl|g" -e "s|/usr/sbin/nft|$FIXTURE/bin/nft|g" -e "s|/usr/bin/df|$FIXTURE/bin/df|g" "$HELPER" >"$SOURCE_DIR/ops"
   cat >"$SOURCE_DIR/validator" <<EOF
 #!/bin/sh
 test ! -e '$FIXTURE/validator-fail'
@@ -176,6 +179,15 @@ elif [[ "\${1:-}" == --host && "\${3:-}" == info ]]; then
   exit 0
 elif [[ "\${1:-}" == --host && "\${3:-}:\${4:-}" == ps:-aq ]]; then
   exit 0
+elif [[ "\${1:-}:\${2:-}" == port:nextcloud-docker-caddy-1 ]]; then
+  printf 'published:%s\n' "\${3%/tcp}"
+elif [[ "\${1:-}:\${2:-}" == exec:--user ]]; then
+  case "\${*: -1}" in
+    --on) printf 'true\n' >'$FIXTURE/maintenance-state' ;;
+    --off) printf 'false\n' >'$FIXTURE/maintenance-state' ;;
+    status) printf '  - maintenance: %s\n' "\$(cat '$FIXTURE/maintenance-state')" ;;
+    *) exit 2 ;;
+  esac
 else
   exit 2
 fi
@@ -188,16 +200,36 @@ case "\${1:-}" in
   start|restart)
     [[ "\${2:-}" != nextcloud-pi-drill-* ]] || exit 1
     [[ ! -e '$FIXTURE/systemctl-fail' ]] || exit 1
-    printf 'active\n' >"\$state"
+    if [[ "\${2:-}" == nextcloud-background-jobs.timer ]]; then printf 'active\n' >'$FIXTURE/timer-state'; else printf 'active\n' >"\$state"; fi
     ;;
-  stop) printf 'inactive\n' >"\$state" ;;
+  stop) if [[ "\${2:-}" == nextcloud-background-jobs.timer ]]; then printf 'inactive\n' >'$FIXTURE/timer-state'; else printf 'inactive\n' >"\$state"; fi ;;
   is-active)
     quiet=0
     [[ "\${2:-}" != --quiet ]] || quiet=1
-    current="\$(cat "\$state")"
+    target="\${@: -1}"
+    case "\$target" in
+      nextcloud-background-jobs.timer) current="\$(cat '$FIXTURE/timer-state')" ;;
+      nextcloud-background-jobs.service) current=inactive ;;
+      *) current="\$(cat "\$state")" ;;
+    esac
     (( quiet )) || printf '%s\n' "\$current"
     [[ "\$current" == active ]]
     ;;
+  *) exit 2 ;;
+esac
+EOF
+  cat >"$SOURCE_DIR/nft" <<EOF
+#!/bin/bash
+state='$FIXTURE/nft-table'
+case "\${1:-}:\${2:-}" in
+  -f:-)
+    cat >/dev/null
+    [[ ! -e "\$state" ]] || exit 1
+    printf '{"table":"nextcloud_pi_upgrade"}\n' >"\$state"
+    ;;
+  -j:list) [[ -f "\$state" ]] || exit 1; cat "\$state" ;;
+  list:table) [[ -f "\$state" ]] || exit 1 ;;
+  delete:table) [[ -f "\$state" ]] || exit 1; rm "\$state" ;;
   *) exit 2 ;;
 esac
 EOF
@@ -246,10 +278,12 @@ EOF
   sudo install -m 0700 -o root -g root "$SOURCE_DIR/ops" "$FIXTURE/ops"
   sudo install -m 0700 -o root -g root "$SOURCE_DIR/validator" "$FIXTURE/validator"
   sudo install -m 0700 -o root -g root "$SOURCE_DIR/launcher" "$FIXTURE/launcher"
-  for fake in hostname findmnt docker systemctl df dockerd; do sudo install -m 0700 -o root -g root "$SOURCE_DIR/$fake" "$FIXTURE/bin/$fake"; done
+  for fake in hostname findmnt docker systemctl nft df dockerd; do sudo install -m 0700 -o root -g root "$SOURCE_DIR/$fake" "$FIXTURE/bin/$fake"; done
   sudo install -m 0644 -o root -g root "$SOURCE_DIR/unit" "$FIXTURE/unit"
   sudo install -m 0644 -o root -g root "$SOURCE_DIR/dropin" "$FIXTURE/dropin"
   printf 'active\n' | sudo tee "$FIXTURE/service-state" >/dev/null
+  printf 'active\n' | sudo tee "$FIXTURE/timer-state" >/dev/null
+  printf 'false\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   printf 'nextcloud-data\n' | sudo tee "$FIXTURE/mount/nextcloud/data.txt" >/dev/null
   printf 'caddy-data\n' | sudo tee "$FIXTURE/volumes/caddy-data/data.txt" >/dev/null
   printf 'caddy-config\n' | sudo tee "$FIXTURE/volumes/caddy-config/config.txt" >/dev/null
@@ -291,6 +325,22 @@ EOF
   sudo "$FIXTURE/ops" active-images-state | grep -Fx $'mode\tsource' >/dev/null
 
   sudo "$FIXTURE/ops" check | grep -Fx $'status\tok' >/dev/null
+  freeze_id=20260910T000000Z-109
+  sudo "$FIXTURE/ops" upgrade-freeze check "$freeze_id" | grep -Fx $'state\tavailable' >/dev/null
+  sudo "$FIXTURE/ops" upgrade-freeze activate "$freeze_id" | grep -Fx $'state\tactive' >/dev/null
+  sudo "$FIXTURE/ops" upgrade-freeze status | grep -Fx $'state\tactive' >/dev/null
+  [[ "$(sudo cat "$FIXTURE/timer-state")" == inactive && "$(sudo cat "$FIXTURE/maintenance-state")" == true ]]
+  if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
+    printf 'upgrade freeze released while maintenance mode was active\n' >&2
+    exit 1
+  fi
+  printf 'false\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
+  sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" | grep -Fx $'state\treleased' >/dev/null
+  [[ "$(sudo cat "$FIXTURE/timer-state")" == active && ! -e "$FIXTURE/nft-table" ]]
+  if sudo "$FIXTURE/ops" upgrade-freeze activate "$freeze_id" >/dev/null 2>&1; then
+    printf 'upgrade freeze reused a released ID\n' >&2
+    exit 1
+  fi
   for action in stop start restart; do
     sudo "$FIXTURE/ops" service "$action" | grep -Fx "$(printf 'state\t%s' "$action")" >/dev/null
   done
@@ -403,6 +453,8 @@ EOF
   denied_dispatch image-readiness start --bad
   denied_dispatch image-readiness cleanup /absolute/path
   denied_dispatch deployment-drill apply ../../escape
+  denied_dispatch upgrade-freeze activate ../../escape
+  denied_dispatch upgrade-freeze release ../../escape
   if sudo "$FIXTURE/ops" version extra >/dev/null 2>&1 || printf x | sudo "$FIXTURE/ops" version >/dev/null 2>&1 || sudo /usr/bin/env SUDO_USER=wrong "$FIXTURE/ops" version >/dev/null 2>&1; then
     printf 'dispatcher accepted invalid caller input\n' >&2
     exit 1

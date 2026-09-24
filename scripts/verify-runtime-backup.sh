@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Verify the closed runtime-backup-v1 schema, permissions, archive readability,
+# Verify the closed runtime-backup-v1/v2 schemas, permissions, archive readability,
 # and payload integrity entirely offline without listing private archive paths.
 
 readonly EXPECTED_DIRECTORIES=(nextcloud database caddy)
@@ -200,7 +200,20 @@ for field in format state timestamp remote_host remote_user source_nextcloud app
   [[ "$(awk -F $'\t' -v key="$field" '$1 == key { count++ } END { print count + 0 }' "$manifest")" == 1 ]] ||
     die "manifest must contain exactly one $field field"
 done
-grep -Fx $'format\truntime-backup-v1' "$manifest" >/dev/null || die "unsupported manifest format"
+manifest_format="$(awk -F $'\t' '$1 == "format" {print $2}' "$manifest")"
+case "$manifest_format" in
+  runtime-backup-v1)
+    [[ "$(awk -F $'\t' '$1 == "freeze_id" || $1 == "freeze_table_sha256" {n++} END {print n+0}' "$manifest")" == 0 ]] || die "ordinary backup includes a freeze binding"
+    ;;
+  runtime-backup-v2)
+    for field in freeze_id freeze_table_sha256; do
+      [[ "$(awk -F $'\t' -v key="$field" '$1 == key {n++} END {print n+0}' "$manifest")" == 1 ]] || die "held backup has an incomplete freeze binding"
+    done
+    grep -Eq '^freeze_id[[:space:]][0-9]{8}T[0-9]{6}Z-[0-9]+$' "$manifest" || die "held backup freeze ID is invalid"
+    grep -Eq '^freeze_table_sha256[[:space:]][0-9a-f]{64}$' "$manifest" || die "held backup firewall identity is invalid"
+    ;;
+  *) die "unsupported manifest format" ;;
+esac
 grep -Fx $'state\tcomplete' "$manifest" >/dev/null || die "backup is incomplete"
 
 manifest_timestamp="$(awk -F $'\t' '$1 == "timestamp" { print $2 }' "$manifest")"
@@ -216,7 +229,7 @@ nextcloud_archive_prefix="$(basename -- "$manifest_source_nextcloud")"
 seen_payloads=""
 while IFS=$'\t' read -r record first second third extra; do
   case "$record" in
-    format|state|timestamp|remote_host|remote_user|source_nextcloud|app_container|database_container|database_image|caddy_data_volume|caddy_config_volume|backup_path)
+    format|state|timestamp|remote_host|remote_user|source_nextcloud|app_container|database_container|database_image|caddy_data_volume|caddy_config_volume|backup_path|freeze_id|freeze_table_sha256)
       [[ -n "$first" && -z "$second" && -z "$third" && -z "$extra" ]] || die "invalid $record entry"
       ;;
     payload)

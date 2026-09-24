@@ -142,6 +142,121 @@ background_jobs_service=nextcloud-background-jobs.service
 cmd_background_jobs_state() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; if /usr/bin/systemctl is-enabled --quiet "$background_jobs_timer"; then out timer_enabled yes; else out timer_enabled no; fi; if /usr/bin/systemctl is-active --quiet "$background_jobs_timer"; then out timer_active yes; else out timer_active no; fi; }
 cmd_background_jobs_pause() { [[ $# == 0 ]] || invalid; reject_stdin; local state attempt; lock; validate_host; /usr/bin/systemctl stop "$background_jobs_timer"; for attempt in {1..300}; do state="$(/usr/bin/systemctl is-active "$background_jobs_service" 2>/dev/null || true)"; case "$state" in inactive|failed|unknown|'') out state paused; return;; active|activating|deactivating) /usr/bin/sleep 1;; *) die "background job service has an unexpected state";; esac; done; die "background job service did not finish before the five-minute backup wait"; }
 cmd_background_jobs_resume() { [[ $# == 0 ]] || invalid; reject_stdin; lock; validate_host; /usr/bin/systemctl start "$background_jobs_timer"; /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background job timer did not start"; out state resumed; }
+
+# A dedicated inet/prerouting rule blocks host-directed Caddy traffic before
+# Docker's destination NAT. It applies to both IP families and established
+# flows; loopback traffic does not enter this non-loopback rule. An interrupted
+# activation intentionally leaves maintenance and the timer paused.
+freeze_table=nextcloud_pi_upgrade
+freeze_root() { state_dir upgrade-freeze; }
+freeze_current() { printf '%s/current.tsv' "$(freeze_root)"; }
+freeze_used() { printf '%s/used-%s' "$(freeze_root)" "$1"; }
+freeze_field() { metadata "$(freeze_current)" "$1"; }
+freeze_write() {
+  local file="$(freeze_current)" temporary
+  temporary="$file.new"
+  printf 'format\tupgrade-freeze-v1\nid\t%s\nphase\t%s\ntimer_active\t%s\ntable_sha256\t%s\n' "$1" "$2" "$3" "$4" >"$temporary"
+  /usr/bin/chmod 0600 "$temporary"
+  /usr/bin/mv -f -- "$temporary" "$file"
+}
+freeze_table_hash() { /usr/sbin/nft -j list table inet "$freeze_table" | /usr/bin/sha256sum | /usr/bin/awk '{print $1}'; }
+freeze_require_current() {
+  local file="$(freeze_current)" id="$1" phase timer table
+  valid_id "$id" || invalid
+  safe_dir "$(freeze_root)"; protected_file "$file" 0600
+  [[ "$(freeze_field format)" == upgrade-freeze-v1 && "$(freeze_field id)" == "$id" ]] || die "freeze transaction differs"
+  phase="$(freeze_field phase)"; timer="$(freeze_field timer_active)"; table="$(freeze_field table_sha256)"
+  [[ "$phase" == preparing || "$phase" == active || "$phase" == releasing ]] || die "freeze phase is invalid"
+  [[ "$timer" == yes || "$timer" == no ]] || die "freeze timer state is invalid"
+  [[ "$table" == pending || "$table" =~ ^[0-9a-f]{64}$ ]] || die "freeze table identity is invalid"
+}
+cmd_upgrade_freeze_check() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid; validate_host
+  [[ -x /usr/sbin/nft && ! -L /usr/sbin/nft ]] || die "nftables is unavailable"
+  local root="$(freeze_root)" current="$(freeze_current)"
+  if [[ -e "$root" || -L "$root" ]]; then
+    safe_dir "$root"
+    [[ ! -e "$current" && ! -L "$current" && ! -e "$(freeze_used "$1")" && ! -L "$(freeze_used "$1")" ]] || die "freeze lifecycle already exists"
+  fi
+  ! /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1 || die "upgrade firewall table already exists"
+  /usr/bin/docker port "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}" 80/tcp >/dev/null || die "Caddy HTTP is not published"
+  /usr/bin/docker port "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}" 443/tcp >/dev/null || die "Caddy HTTPS is not published"
+  [[ ! -e "$(active_marker)" && ! -L "$(active_marker)" ]] || die "an active-image transaction is unresolved"
+  out state available; out id "$1"
+}
+cmd_upgrade_freeze_status() {
+  [[ $# == 0 ]] || invalid; reject_stdin; validate_host
+  local root="$(freeze_root)" current="$(freeze_current)" phase table
+  if [[ ! -e "$root" && ! -L "$root" ]]; then
+    ! /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1 || die "orphaned upgrade firewall table"
+    out state absent; return
+  fi
+  safe_dir "$root"
+  if [[ ! -e "$current" && ! -L "$current" ]]; then
+    ! /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1 || die "orphaned upgrade firewall table"
+    out state absent; return
+  fi
+  protected_file "$current" 0600
+  freeze_require_current "$(freeze_field id)"
+  phase="$(freeze_field phase)"; table="$(freeze_field table_sha256)"
+  if [[ "$phase" == active ]]; then
+    [[ "$(freeze_table_hash)" == "$table" ]] || die "upgrade firewall differs from its protected state"
+  fi
+  out state "$phase"; out id "$(freeze_field id)"; out table_sha256 "$table"
+}
+cmd_upgrade_freeze_activate() {
+  [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" timer=no service_state attempt table
+  valid_id "$id" || invalid; lock; cmd_upgrade_freeze_check "$id"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is already on"
+  ensure_parent upgrade-freeze
+  /usr/bin/systemctl is-active --quiet "$background_jobs_timer" && timer=yes
+  freeze_write "$id" preparing "$timer" pending
+  /usr/bin/systemctl stop "$background_jobs_timer" || die "could not pause background-job timer"
+  for attempt in {1..300}; do
+    service_state="$(/usr/bin/systemctl is-active "$background_jobs_service" 2>/dev/null || true)"
+    case "$service_state" in inactive|failed|unknown|'') break;; active|activating|deactivating) /usr/bin/sleep 1;; *) die "background-job service state is unexpected";; esac
+  done
+  [[ "$service_state" =~ ^(inactive|failed|unknown|)$ ]] || die "background-job service did not quiesce"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ maintenance:mode --on >/dev/null || die "could not enable maintenance mode"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*true$' || die "maintenance mode was not confirmed"
+  /usr/sbin/nft -f - <<'NFT' || die "upgrade ingress rule did not install; maintenance remains on"
+add table inet nextcloud_pi_upgrade
+add chain inet nextcloud_pi_upgrade ingress { type filter hook prerouting priority -300; policy accept; }
+add rule inet nextcloud_pi_upgrade ingress iifname != "lo" fib daddr type local tcp dport { 80, 443 } drop
+NFT
+  table="$(freeze_table_hash)"; [[ "$table" =~ ^[0-9a-f]{64}$ ]] || die "upgrade ingress rule could not be identified"
+  freeze_write "$id" active "$timer" "$table"
+  out state active; out id "$id"; out table_sha256 "$table"
+}
+cmd_upgrade_freeze_release() {
+  [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" phase timer table current used
+  valid_id "$id" || invalid; lock; validate_host; freeze_require_current "$id"
+  phase="$(freeze_field phase)"; timer="$(freeze_field timer_active)"; table="$(freeze_field table_sha256)"
+  [[ "$phase" == active || "$phase" == releasing ]] || die "freeze activation is unresolved; manual recovery is required"
+  if [[ "$phase" == active ]]; then
+    [[ "$(freeze_table_hash)" == "$table" ]] || die "upgrade firewall differs from its protected state"
+    /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is still on"
+    freeze_write "$id" releasing "$timer" "$table"
+    /usr/sbin/nft delete table inet "$freeze_table" || die "could not release upgrade firewall"
+  else
+    ! /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1 || die "upgrade firewall still exists during release"
+  fi
+  if [[ "$timer" == yes ]]; then
+    /usr/bin/systemctl start "$background_jobs_timer" || die "could not restore background-job timer"
+    /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer is not active"
+  else
+    /usr/bin/systemctl stop "$background_jobs_timer" || die "could not preserve paused background-job timer"
+    ! /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer is unexpectedly active"
+  fi
+  current="$(freeze_current)"; used="$(freeze_used "$id")"
+  if [[ -e "$used" || -L "$used" ]]; then
+    protected_file "$used" 0600
+  else
+    /usr/bin/install -m 0600 -o root -g root /dev/null "$used"
+  fi
+  /usr/bin/rm -f -- "$current"
+  out state released; out id "$id"
+}
 cmd_active_prepare() { [[ $# == 3 ]] || invalid; local id="$1" expected="$2" size="$3" tx marker pre; valid_id "$id" && valid_hash "$expected" && valid_size "$size" || invalid; (( size <= 65536 )) || invalid; lock; validate_host; marker="$(active_marker)"; tx="$(active_tx "$id")"; [[ ! -e "$marker" && ! -L "$marker" && ! -e "$tx" && ! -L "$tx" ]] || die "active transaction is already unresolved"; ensure_parent active-record; /usr/bin/install -d -m 0700 -o root -g root "$tx"; ACTIVE_PREPARE_ABORT_TX="$tx"; trap 'active_prepare_abort "$?"' EXIT HUP INT TERM; read_exact "$tx/candidate" "$size"; [[ "$(hash "$tx/candidate")" == "$expected" ]] || die "candidate hash differs"; "$VALIDATOR" --record "$tx/candidate"; pre="$(live_hash)"; if [[ "$pre" == missing ]]; then : >"$tx/absent"; /usr/bin/chmod 0600 "$tx/absent"; else protected_file "$ACTIVE_RECORD" 0600; /usr/bin/cp -p "$ACTIVE_RECORD" "$tx/snapshot"; fi; write_active_meta "$tx/metadata.tsv" prepared "$pre" "$expected" "$size"; printf '%s\n' "$id" >"$marker"; /usr/bin/chmod 0600 "$marker"; trap - EXIT HUP INT TERM; ACTIVE_PREPARE_ABORT_TX=''; out state prepared; out id "$id"; }
 cmd_active_apply() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx meta pre candidate size live; lock; require_active_tx "$id"; tx="$(active_tx "$id")"; meta="$tx/metadata.tsv"; pre="$(metadata "$meta" pre_sha256)"; candidate="$(metadata "$meta" candidate_sha256)"; size="$(metadata "$meta" size)"; [[ "$(metadata "$meta" state)" == prepared && "$(hash "$tx/candidate")" == "$candidate" ]] || die "active transaction is not prepared"; live="$(live_hash)"; if [[ "$live" == "$candidate" ]]; then "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; return; fi; [[ "$live" == "$pre" ]] || die "active record pre-state changed"; "$VALIDATOR" --record "$tx/candidate"; install_record "$tx/candidate"; "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; }
 cmd_active_rollback() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx meta pre candidate size live state; lock; require_active_tx "$id"; tx="$(active_tx "$id")"; meta="$tx/metadata.tsv"; pre="$(metadata "$meta" pre_sha256)"; candidate="$(metadata "$meta" candidate_sha256)"; size="$(metadata "$meta" size)"; state="$(metadata "$meta" state)"; live="$(live_hash)"; [[ "$state" == prepared || "$state" == applied || "$state" == rolledback ]] || die "active transaction state is invalid"; if [[ "$live" == "$candidate" ]]; then if [[ "$pre" == missing ]]; then /usr/bin/rm -f -- "$ACTIVE_RECORD"; else install_record "$tx/snapshot"; "$VALIDATOR"; fi; elif [[ "$live" != "$pre" ]]; then die "active record changed outside transaction"; fi; [[ "$(live_hash)" == "$pre" ]] || die "rollback verification failed"; write_active_meta "$meta" rolledback "$pre" "$candidate" "$size"; out state rolledback; out id "$id"; }
@@ -205,6 +320,7 @@ command="${1:-}"; [[ -n "$command" && "$command" != -* ]] || invalid; shift || t
 case "$command" in
   version) cmd_version "$@";; check) cmd_check "$@";; protected-state) cmd_protected_state "$@";; active-images-state) cmd_active_images_state "$@";; service) cmd_service "$@";;
   background-jobs) sub="${1:-}"; shift || true; case "$sub" in state) cmd_background_jobs_state "$@";; pause) cmd_background_jobs_pause "$@";; resume) cmd_background_jobs_resume "$@";; *) invalid;; esac;;
+  upgrade-freeze) sub="${1:-}"; shift || true; case "$sub" in check) cmd_upgrade_freeze_check "$@";; status) cmd_upgrade_freeze_status "$@";; activate) cmd_upgrade_freeze_activate "$@";; release) cmd_upgrade_freeze_release "$@";; *) invalid;; esac;;
   active-record) sub="${1:-}"; shift || true; case "$sub" in prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
   runtime-backup) sub="${1:-}"; shift || true; case "$sub" in size) cmd_runtime_backup_size "$@";; stream) cmd_runtime_backup_stream "$@";; *) invalid;; esac;;
   runtime-recovery) sub="${1:-}"; shift || true; case "$sub" in check) cmd_recovery_check "$@";; prepare) cmd_recovery_prepare "$@";; restore) cmd_recovery_restore "$@";; cleanup) cmd_recovery_cleanup "$@";; *) invalid;; esac;;
