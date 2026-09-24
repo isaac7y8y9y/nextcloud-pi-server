@@ -126,6 +126,21 @@ class CandidateTests(unittest.TestCase):
             self.assertIn(b"image: nextcloud:31.0.14-apache", (output / "docker-compose.yml").read_bytes())
             self.assertEqual(len((output / "candidate-manifest.tsv").read_text().splitlines()), 5)
             self.assertEqual(verify_module.verify(output)["config_digest"], self.new)
+            self.assertEqual(
+                verify_module.verify(output, root / "image-lock.env", rendered)["config_digest"],
+                self.new,
+            )
+            with self.assertRaisesRegex(verify_module.candidate.CandidateError, "together"):
+                verify_module.verify(output, root / "image-lock.env")
+            (rendered / "docker-compose.yml").write_bytes(self.compose.replace(b"nextcloud:30", b"nextcloud:29"))
+            with self.assertRaisesRegex(verify_module.candidate.CandidateError, "Compose image"):
+                verify_module.verify(output, root / "image-lock.env", rendered)
+            (rendered / "docker-compose.yml").write_bytes(self.compose)
+            (output / "Caddyfile").write_bytes(b"changed caddy\n")
+            manifest = output / "candidate-manifest.tsv"
+            manifest.write_bytes(manifest.read_bytes().replace(checksum(b"caddy\n").encode(), checksum(b"changed caddy\n").encode()))
+            with self.assertRaisesRegex(verify_module.candidate.CandidateError, "one-image source transition"):
+                verify_module.verify(output, root / "image-lock.env", rendered)
             (output / "docker-compose.yml").write_bytes(b"changed\n")
             with self.assertRaisesRegex(verify_module.candidate.CandidateError, "digest differs"):
                 verify_module.verify(output)

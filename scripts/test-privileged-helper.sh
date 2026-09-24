@@ -15,6 +15,8 @@ grep -Fq 'readonly LOCK_ROOT=/run/nextcloud-pi-locks' "$HELPER"
 grep -Fq 'fib daddr type local tcp dport { 80, 443 } drop' "$HELPER"
 grep -Fq 'cmd_upgrade_freeze_activate()' "$HELPER"
 grep -Fq 'cmd_upgrade_freeze_release()' "$HELPER"
+grep -Fq 'cmd_upgrade_fetch_consume()' "$HELPER"
+grep -Fq 'cmd_upgrade_fetch_complete()' "$HELPER"
 grep -Fq 'exec 9>>"$LOCK"' "$HELPER"
 grep -Fq 'local path expected; path="$(resource_path "$1")"; expected="$(resource_mode "$1")"' "$HELPER"
 grep -Fq 'cmd_runtime_backup_stream() { [[ $# == 1 ]] || invalid; reject_stdin;' "$HELPER"
@@ -181,6 +183,8 @@ elif [[ "\${1:-}" == --host && "\${3:-}:\${4:-}" == ps:-aq ]]; then
   exit 0
 elif [[ "\${1:-}:\${2:-}" == port:nextcloud-docker-caddy-1 ]]; then
   printf 'published:%s\n' "\${3%/tcp}"
+elif [[ "\${1:-}:\${2:-}" == image:inspect ]]; then
+  printf 'sha256:%064d\n' 2
 elif [[ "\${1:-}:\${2:-}" == exec:--user ]]; then
   case "\${*: -1}" in
     --on) printf 'true\n' >'$FIXTURE/maintenance-state' ;;
@@ -330,6 +334,24 @@ EOF
   sudo "$FIXTURE/ops" upgrade-freeze activate "$freeze_id" | grep -Fx $'state\tactive' >/dev/null
   sudo "$FIXTURE/ops" upgrade-freeze status | grep -Fx $'state\tactive' >/dev/null
   [[ "$(sudo cat "$FIXTURE/timer-state")" == inactive && "$(sudo cat "$FIXTURE/maintenance-state")" == true ]]
+  fetch_id=20260910T000000Z-110
+  fetch_fingerprint="$(printf '%064d' 1)"
+  fetch_table="$(sudo "$FIXTURE/ops" upgrade-freeze status | awk -F '\t' '$1 == "table_sha256" {print $2}')"
+  fetch_ref="nextcloud@sha256:$(printf '%064d' 3)"
+  fetch_expected="sha256:$(printf '%064d' 2)"
+  fetch_expires="$(( $(date -u +%s) + 900 ))"
+  sudo "$FIXTURE/ops" upgrade-fetch consume "$fetch_id" "$fetch_fingerprint" "$freeze_id" "$fetch_table" "$fetch_ref" "$fetch_expected" "$fetch_expires" fetch-only | grep -Fx $'state\tpending' >/dev/null
+  if sudo "$FIXTURE/ops" upgrade-fetch consume "$fetch_id" "$fetch_fingerprint" "$freeze_id" "$fetch_table" "$fetch_ref" "$fetch_expected" "$fetch_expires" fetch-only >/dev/null 2>&1; then
+    printf 'root-owned image-fetch approval was replayed\n' >&2
+    exit 1
+  fi
+  printf 'false\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
+  if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
+    printf 'upgrade freeze released with pending image fetch\n' >&2
+    exit 1
+  fi
+  printf 'true\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
+  sudo "$FIXTURE/ops" upgrade-fetch complete "$fetch_id" "$fetch_fingerprint" | grep -Fx $'state\tcomplete' >/dev/null
   if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
     printf 'upgrade freeze released while maintenance mode was active\n' >&2
     exit 1

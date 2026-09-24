@@ -235,6 +235,7 @@ cmd_upgrade_freeze_release() {
   [[ "$phase" == active || "$phase" == releasing ]] || die "freeze activation is unresolved; manual recovery is required"
   if [[ "$phase" == active ]]; then
     [[ "$(freeze_table_hash)" == "$table" ]] || die "upgrade firewall differs from its protected state"
+    upgrade_fetch_release_allowed
     /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is still on"
     freeze_write "$id" releasing "$timer" "$table"
     /usr/sbin/nft delete table inet "$freeze_table" || die "could not release upgrade firewall"
@@ -256,6 +257,51 @@ cmd_upgrade_freeze_release() {
   fi
   /usr/bin/rm -f -- "$current"
   out state released; out id "$id"
+}
+upgrade_fetch_root() { state_dir upgrade-fetch; }
+upgrade_fetch_file() { printf '%s/%s.tsv' "$(upgrade_fetch_root)" "$1"; }
+upgrade_fetch_write() {
+  local target="$(upgrade_fetch_file "$1")" temporary
+  temporary="$target.new"
+  printf 'format\tupgrade-fetch-v1\nstate\t%s\nid\t%s\nfingerprint\t%s\nfreeze_id\t%s\nfreeze_table_sha256\t%s\nref\t%s\nexpected_id\t%s\nexpires\t%s\n' "$2" "$1" "$3" "$4" "$5" "$6" "$7" "$8" >"$temporary"
+  /usr/bin/chmod 0600 "$temporary"; /usr/bin/mv -f -- "$temporary" "$target"
+}
+upgrade_fetch_release_allowed() {
+  local root="$(upgrade_fetch_root)" file
+  [[ ! -e "$root" && ! -L "$root" ]] && return
+  safe_dir "$root"
+  for file in "$root"/*.tsv; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    protected_file "$file" 0600
+    [[ "$(metadata "$file" format)" == upgrade-fetch-v1 && "$(metadata "$file" state)" == complete ]] || die "an image fetch is unresolved; retain the ingress freeze"
+  done
+}
+cmd_upgrade_fetch_consume() {
+  [[ $# == 8 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" freeze_id="$3" table="$4" ref="$5" expected="$6" expires="$7" reserved="$8" file
+  valid_id "$id" && valid_hash "$fingerprint" && valid_id "$freeze_id" && valid_hash "$table" && valid_hash "${expected#sha256:}" || invalid
+  [[ "$expected" =~ ^sha256:[0-9a-f]{64}$ && "$ref" =~ ^(nextcloud|mariadb|caddy)@sha256:[0-9a-f]{64}$ && "$expires" =~ ^[0-9]{10}$ && "$reserved" == fetch-only ]] || invalid
+  lock; validate_host; freeze_require_current "$freeze_id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$table" && "$(freeze_field table_sha256)" == "$table" ]] || die "upgrade freeze changed"
+  (( $(/usr/bin/date -u +%s) <= 10#$expires )) || die "image-fetch approval expired"
+  ensure_parent upgrade-fetch; file="$(upgrade_fetch_file "$id")"
+  [[ ! -e "$file" && ! -L "$file" && ! -e "$file.new" && ! -L "$file.new" ]] || die "image-fetch approval was already consumed or interrupted"
+  upgrade_fetch_write "$id" pending "$fingerprint" "$freeze_id" "$table" "$ref" "$expected" "$expires"
+  out state pending; out id "$id"
+}
+cmd_upgrade_fetch_complete() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" file freeze_id table ref expected actual
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; safe_dir "$(upgrade_fetch_root)"; file="$(upgrade_fetch_file "$id")"; protected_file "$file" 0600
+  [[ "$(metadata "$file" format)" == upgrade-fetch-v1 && "$(metadata "$file" state)" == pending && "$(metadata "$file" id)" == "$id" && "$(metadata "$file" fingerprint)" == "$fingerprint" ]] || die "image-fetch transaction differs"
+  freeze_id="$(metadata "$file" freeze_id)"; table="$(metadata "$file" freeze_table_sha256)"; ref="$(metadata "$file" ref)"; expected="$(metadata "$file" expected_id)"
+  freeze_require_current "$freeze_id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$table" && "$(freeze_field table_sha256)" == "$table" ]] || die "upgrade freeze changed"
+  actual="$(/usr/bin/docker image inspect --format '{{.Id}}' "$ref")" || die "fetched image is unavailable"
+  [[ "$actual" == "$expected" ]] || die "fetched image ID differs"
+  upgrade_fetch_write "$id" complete "$fingerprint" "$freeze_id" "$table" "$ref" "$expected" "$(metadata "$file" expires)"
+  out state complete; out id "$id"
 }
 cmd_active_prepare() { [[ $# == 3 ]] || invalid; local id="$1" expected="$2" size="$3" tx marker pre; valid_id "$id" && valid_hash "$expected" && valid_size "$size" || invalid; (( size <= 65536 )) || invalid; lock; validate_host; marker="$(active_marker)"; tx="$(active_tx "$id")"; [[ ! -e "$marker" && ! -L "$marker" && ! -e "$tx" && ! -L "$tx" ]] || die "active transaction is already unresolved"; ensure_parent active-record; /usr/bin/install -d -m 0700 -o root -g root "$tx"; ACTIVE_PREPARE_ABORT_TX="$tx"; trap 'active_prepare_abort "$?"' EXIT HUP INT TERM; read_exact "$tx/candidate" "$size"; [[ "$(hash "$tx/candidate")" == "$expected" ]] || die "candidate hash differs"; "$VALIDATOR" --record "$tx/candidate"; pre="$(live_hash)"; if [[ "$pre" == missing ]]; then : >"$tx/absent"; /usr/bin/chmod 0600 "$tx/absent"; else protected_file "$ACTIVE_RECORD" 0600; /usr/bin/cp -p "$ACTIVE_RECORD" "$tx/snapshot"; fi; write_active_meta "$tx/metadata.tsv" prepared "$pre" "$expected" "$size"; printf '%s\n' "$id" >"$marker"; /usr/bin/chmod 0600 "$marker"; trap - EXIT HUP INT TERM; ACTIVE_PREPARE_ABORT_TX=''; out state prepared; out id "$id"; }
 cmd_active_apply() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx meta pre candidate size live; lock; require_active_tx "$id"; tx="$(active_tx "$id")"; meta="$tx/metadata.tsv"; pre="$(metadata "$meta" pre_sha256)"; candidate="$(metadata "$meta" candidate_sha256)"; size="$(metadata "$meta" size)"; [[ "$(metadata "$meta" state)" == prepared && "$(hash "$tx/candidate")" == "$candidate" ]] || die "active transaction is not prepared"; live="$(live_hash)"; if [[ "$live" == "$candidate" ]]; then "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; return; fi; [[ "$live" == "$pre" ]] || die "active record pre-state changed"; "$VALIDATOR" --record "$tx/candidate"; install_record "$tx/candidate"; "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; }
@@ -321,6 +367,7 @@ case "$command" in
   version) cmd_version "$@";; check) cmd_check "$@";; protected-state) cmd_protected_state "$@";; active-images-state) cmd_active_images_state "$@";; service) cmd_service "$@";;
   background-jobs) sub="${1:-}"; shift || true; case "$sub" in state) cmd_background_jobs_state "$@";; pause) cmd_background_jobs_pause "$@";; resume) cmd_background_jobs_resume "$@";; *) invalid;; esac;;
   upgrade-freeze) sub="${1:-}"; shift || true; case "$sub" in check) cmd_upgrade_freeze_check "$@";; status) cmd_upgrade_freeze_status "$@";; activate) cmd_upgrade_freeze_activate "$@";; release) cmd_upgrade_freeze_release "$@";; *) invalid;; esac;;
+  upgrade-fetch) sub="${1:-}"; shift || true; case "$sub" in consume) cmd_upgrade_fetch_consume "$@";; complete) cmd_upgrade_fetch_complete "$@";; *) invalid;; esac;;
   active-record) sub="${1:-}"; shift || true; case "$sub" in prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
   runtime-backup) sub="${1:-}"; shift || true; case "$sub" in size) cmd_runtime_backup_size "$@";; stream) cmd_runtime_backup_stream "$@";; *) invalid;; esac;;
   runtime-recovery) sub="${1:-}"; shift || true; case "$sub" in check) cmd_recovery_check "$@";; prepare) cmd_recovery_prepare "$@";; restore) cmd_recovery_restore "$@";; cleanup) cmd_recovery_cleanup "$@";; *) invalid;; esac;;

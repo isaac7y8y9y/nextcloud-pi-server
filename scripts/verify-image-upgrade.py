@@ -23,7 +23,8 @@ EXPECTED = {
 }
 
 
-def verify(directory: Path) -> dict[str, str]:
+def verify(directory: Path, source_lock: Path | None = None,
+           source_rendered: Path | None = None) -> dict[str, str]:
     if not directory.is_dir() or directory.is_symlink() or stat.S_IMODE(directory.stat().st_mode) != 0o700:
         raise candidate.CandidateError("candidate directory is unsafe")
     if {entry.name for entry in directory.iterdir()} != EXPECTED:
@@ -79,15 +80,33 @@ def verify(directory: Path) -> dict[str, str]:
     candidate.validate_exact_tag(metadata["image"], metadata["tag"])
     if lock[f"NEXTCLOUD_IMAGE_{target}_TAG"] != metadata["tag"] or lock[f"NEXTCLOUD_IMAGE_{target}_ID"] != metadata["config_digest"]:
         raise candidate.CandidateError("candidate registry identity differs from its lock")
+    if (source_lock is None) != (source_rendered is None):
+        raise candidate.CandidateError("source lock and rendered baseline must be supplied together")
+    if source_lock is not None and source_rendered is not None:
+        if not source_rendered.is_dir() or source_rendered.is_symlink():
+            raise candidate.CandidateError("rendered baseline directory is unsafe")
+        expected = candidate.prepare(
+            target,
+            contents["registry-metadata.tsv"],
+            candidate.regular_bytes(source_lock),
+            candidate.regular_bytes(source_rendered / "docker-compose.yml"),
+            candidate.regular_bytes(source_rendered / "active-images" / "active-images.env"),
+            candidate.regular_bytes(source_rendered / "caddy" / "Caddyfile"),
+        )
+        for name, expected_data in expected.items():
+            if contents[name] != expected_data:
+                raise candidate.CandidateError("candidate differs from the one-image source transition")
     return metadata
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--source-lock", type=Path)
+    parser.add_argument("--source-rendered", type=Path)
     args = parser.parse_args()
     try:
-        metadata = verify(args.directory)
+        metadata = verify(args.directory, args.source_lock, args.source_rendered)
     except (candidate.CandidateError, OSError) as exc:
         print(f"Image candidate rejected: {exc}", file=sys.stderr)
         return 1

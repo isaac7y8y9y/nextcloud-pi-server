@@ -21,8 +21,12 @@ never modifies the tracked baseline or the Pi.
 
 `scripts/verify-image-upgrade.py` checks the closed candidate directory,
 private permissions, all payload hashes, source-lock/active-record agreement,
-Compose mappings, and exact patch-tag grammar. It does not re-query the
-registry or assert that a running Pi uses the candidate.
+Compose mappings, and exact patch-tag grammar. Pass both `--source-lock` and
+`--source-rendered` to prove that every candidate byte is exactly the
+one-image transition from the supplied source baseline. Without those two
+options, verification is self-consistency only and is insufficient for an
+upgrade approval. This check does not re-query the registry or assert that a
+running Pi uses the candidate.
 
 The metadata record is not an approval artifact. Before a live image update, a
 separate transaction must bind a refreshed registry identity to the actual Pi
@@ -30,6 +34,23 @@ pre-state and fresh recovery point, verify the loaded ID after the approved
 pull, and prove the ingress freeze and full-runtime recovery gates. Until that
 transaction is implemented and reviewed, these candidate files are for
 offline preparation and tests only.
+
+`scripts/fetch-image-upgrade.sh` is an in-progress, narrower transaction for
+retrieving **one** image without activating it. Its `--plan` validates the
+source-bound candidate, refreshes registry metadata, checks a fresh config
+backup, a held runtime backup, attested prior-image recovery, the Pi's active
+freeze, source images, running containers, Compose, Caddyfile, and clock. It
+creates a private, 15-minute, single-use approval artifact. Its `--apply`
+rechecks those bindings, consumes the artifact before any pull, pulls only the
+approved index digest for ARM64, and proves the loaded image ID. The
+root-owned dispatcher also records the fetch ID once, so a copied local
+approval cannot be replayed; a pending or failed fetch prevents freeze release
+until recovery is resolved. It does not
+retag an image, replace Compose, start a target container, change the protected
+record, or release the freeze. A failed pull retains the freeze and fetched
+image for diagnosis. This is **not** an operational upgrade procedure until
+activation, phase-aware full-runtime recovery, ingress/drain proof, isolated
+database rehearsal, and integration tests are completed and reviewed.
 
 ## In-progress protected backup boundary
 
