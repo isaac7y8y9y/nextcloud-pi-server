@@ -39,9 +39,10 @@ field() { awk -F $'\t' -v key="$2" '$1 == key && NF == 2 { n++; v=$2 } END { if 
 remote() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=12 "$REMOTE" "$*"; }
 clock_ok() { local delta=$(( $1 - $2 )); (( delta < 0 )) && delta=$((-delta)); (( delta <= 60 )); }
 fresh() {
-  local stamp epoch now
+  local stamp epoch now iso
   stamp="$(field "$1" timestamp)"; [[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "recovery timestamp is invalid"
-  epoch="$(date -u -j -f '%Y%m%dT%H%M%SZ' "$stamp" +%s 2>/dev/null || date -u -d "$stamp" +%s 2>/dev/null)" || die "recovery timestamp is invalid"
+  iso="${stamp:0:4}-${stamp:4:2}-${stamp:6:2}T${stamp:9:2}:${stamp:11:2}:${stamp:13:2}Z"
+  epoch="$(date -u -j -f '%Y%m%dT%H%M%SZ' "$stamp" +%s 2>/dev/null || date -u -d "$iso" +%s 2>/dev/null)" || die "recovery timestamp is invalid"
   now="$(date -u +%s)"; (( epoch <= now && now - epoch <= 86400 )) || die "recovery artifact is older than 24 hours"
 }
 private_outside_git() {
