@@ -18,6 +18,8 @@ readonly -a PR_COMMANDS=(
   'bash scripts/test-deployment-config.sh'
   'bash scripts/test-compose-env-references.sh'
   'bash scripts/test-image-lock.sh'
+  'python3 scripts/test-resolve-image-upgrade.py'
+  'python3 scripts/test-prepare-image-upgrade.py'
   'bash scripts/test-active-images.sh'
   'bash scripts/test-compose-launcher.sh'
   'bash scripts/test-atomic-transaction.sh'
