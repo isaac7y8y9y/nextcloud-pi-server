@@ -189,7 +189,11 @@ elif [[ "\${1:-}:\${2:-}" == port:nextcloud-docker-caddy-1 ]]; then
 elif [[ "\${1:-}:\${2:-}" == image:inspect ]]; then
   printf 'sha256:%064d\n' 2
 elif [[ "\${1:-}" == inspect ]]; then
-  printf 'sha256:%064d true\n' 2
+  if [[ "\${*: -1}" == '{{.State.Running}}' ]]; then
+    [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf 'true\n' || printf 'false\n'
+  else
+    printf 'sha256:%064d %s\n' 2 "\$( [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf true || printf false )"
+  fi
 elif [[ "\${1:-}:\${2:-}" == exec:--user ]]; then
   case "\${*: -1}" in
     --on) printf 'true\n' >'$FIXTURE/maintenance-state' ;;
@@ -283,7 +287,7 @@ int main(int argc, char **argv) {
 }
 EOF
   cc -Wall -Wextra -Werror "$SOURCE_DIR/dockerd.c" -o "$SOURCE_DIR/dockerd"
-  sudo install -d -m 0700 -o root -g root "$FIXTURE/state" "$FIXTURE/mount/nextcloud-docker" "$FIXTURE/mount/nextcloud" "$FIXTURE/volumes/caddy-data" "$FIXTURE/volumes/caddy-config" "$FIXTURE/bin" "$FIXTURE/systemd"
+  sudo install -d -m 0700 -o root -g root "$FIXTURE/state" "$FIXTURE/mount/nextcloud-docker" "$FIXTURE/mount/nextcloud" "$FIXTURE/mount/nextcloud_db" "$FIXTURE/volumes/caddy-data" "$FIXTURE/volumes/caddy-config" "$FIXTURE/bin" "$FIXTURE/systemd"
   sudo install -m 0700 -o root -g root "$SOURCE_DIR/ops" "$FIXTURE/ops"
   sudo install -m 0700 -o root -g root "$SOURCE_DIR/validator" "$FIXTURE/validator"
   sudo install -m 0700 -o root -g root "$SOURCE_DIR/launcher" "$FIXTURE/launcher"
@@ -294,6 +298,7 @@ EOF
   printf 'active\n' | sudo tee "$FIXTURE/timer-state" >/dev/null
   printf 'false\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   printf 'nextcloud-data\n' | sudo tee "$FIXTURE/mount/nextcloud/data.txt" >/dev/null
+  printf 'database-data\n' | sudo tee "$FIXTURE/mount/nextcloud_db/data.txt" >/dev/null
   printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null
   printf 'caddy-data\n' | sudo tee "$FIXTURE/volumes/caddy-data/data.txt" >/dev/null
   printf 'caddy-config\n' | sudo tee "$FIXTURE/volumes/caddy-config/config.txt" >/dev/null
@@ -392,6 +397,57 @@ EOF
     printf 'upgrade freeze released after runtime boundary without acceptance\n' >&2
     exit 1
   fi
+  sudo "$FIXTURE/ops" runtime-recovery prepare "$stage_id" | grep -Fx $'state\tprepared' >/dev/null
+  if sudo "$FIXTURE/ops" runtime-recovery promote "$stage_id" "$stage_fingerprint" >/dev/null 2>&1; then
+    printf 'runtime recovery promoted without restored datasets\n' >&2
+    exit 1
+  fi
+  recovery_root="$FIXTURE/mount/.recovery-$stage_id"
+  recovery_state="$FIXTURE/state/runtime-recovery/$stage_id"
+  mkdir -p "$SOURCE_DIR/restore-nextcloud/nextcloud" "$SOURCE_DIR/restore-caddy-data" "$SOURCE_DIR/restore-caddy-config"
+  printf 'restored-nextcloud\n' >"$SOURCE_DIR/restore-nextcloud/nextcloud/data.txt"
+  printf 'restored-caddy-data\n' >"$SOURCE_DIR/restore-caddy-data/data.txt"
+  printf 'restored-caddy-config\n' >"$SOURCE_DIR/restore-caddy-config/config.txt"
+  tar -C "$SOURCE_DIR/restore-nextcloud" -cf "$SOURCE_DIR/restore-nextcloud.tar" nextcloud
+  tar -C "$SOURCE_DIR/restore-caddy-data" -cf "$SOURCE_DIR/restore-caddy-data.tar" .
+  tar -C "$SOURCE_DIR/restore-caddy-config" -cf "$SOURCE_DIR/restore-caddy-config.tar" .
+  for dataset in nextcloud caddy-data caddy-config; do
+    archive="$SOURCE_DIR/restore-$dataset.tar"
+    cat "$archive" | sudo "$FIXTURE/ops" runtime-recovery restore "$stage_id" "$dataset" "$(sha256sum "$archive" | awk '{print $1}')" "$(wc -c <"$archive" | tr -d '[:space:]')" | grep -Fx $'state\trestored' >/dev/null
+  done
+  printf 'restored-database\n' | sudo tee "$recovery_root/mariadb-data/data.txt" >/dev/null
+  sudo "$FIXTURE/ops" runtime-recovery attest-database "$stage_id" "$(printf '%064d' 5)" 169 | grep -Fx $'state\tattested' >/dev/null
+  if sudo "$FIXTURE/ops" runtime-recovery attest-database "$stage_id" "$(printf '%064d' 5)" 169 >/dev/null 2>&1; then
+    printf 'database attestation replayed\n' >&2
+    exit 1
+  fi
+  if sudo "$FIXTURE/ops" runtime-recovery promote "$stage_id" "$stage_fingerprint" >/dev/null 2>&1; then
+    printf 'runtime recovery promoted while service was running\n' >&2
+    exit 1
+  fi
+  sudo "$FIXTURE/ops" service stop >/dev/null
+  if sudo "$FIXTURE/ops" runtime-recovery promote "$stage_id" "$(printf '%064d' 6)" >/dev/null 2>&1; then
+    printf 'runtime recovery accepted wrong stage fingerprint\n' >&2
+    exit 1
+  fi
+  sudo "$FIXTURE/ops" runtime-recovery promote "$stage_id" "$stage_fingerprint" | grep -Fx $'state\tpromoted' >/dev/null
+  sudo grep -Fxq restored-nextcloud "$FIXTURE/mount/nextcloud/data.txt"
+  sudo grep -Fxq restored-database "$FIXTURE/mount/nextcloud_db/data.txt"
+  sudo grep -Fxq restored-caddy-data "$FIXTURE/volumes/caddy-data/data.txt"
+  sudo grep -Fxq restored-caddy-config "$FIXTURE/volumes/caddy-config/config.txt"
+  sudo grep -Fxq nextcloud-data "$FIXTURE/mount/.nextcloud-failed-$stage_id/data.txt"
+  sudo grep -Fxq database-data "$FIXTURE/mount/.nextcloud-db-failed-$stage_id/data.txt"
+  sudo grep -Fxq caddy-data "$FIXTURE/volumes/caddy-data.failed-$stage_id/data.txt"
+  sudo grep -Fxq caddy-config "$FIXTURE/volumes/caddy-config.failed-$stage_id/config.txt"
+  sudo install -m 0600 -o root -g root "$SOURCE_DIR/active-images.env" "$FIXTURE/active-images.env"
+  printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null
+  sudo "$FIXTURE/ops" service start >/dev/null
+  sudo "$FIXTURE/ops" upgrade-stage recovered "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\trecovered' >/dev/null
+  stage_id=20260910T000000Z-113
+  sudo "$FIXTURE/ops" upgrade-stage consume "$stage_id" "${stage_args[@]}" | grep -Fx $'phase\tprepared' >/dev/null
+  sudo install -m 0600 -o root -g root "$SOURCE_DIR/candidate-active.env" "$FIXTURE/active-images.env"
+  sudo install -m 0644 "$SOURCE_DIR/candidate-compose.yml" "$FIXTURE/mount/nextcloud-docker/docker-compose.yml"
+  sudo "$FIXTURE/ops" upgrade-stage boundary "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\truntime-may-have-changed' >/dev/null
   sudo "$FIXTURE/ops" upgrade-stage accept "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\taccepted' >/dev/null
   printf 'true\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
@@ -443,7 +499,7 @@ EOF
   fi
   sudo rm "$FIXTURE/validator-fail"
 
-  sudo "$FIXTURE/ops" runtime-backup size | grep -Fx $'nextcloud_bytes\t15' >/dev/null
+  sudo "$FIXTURE/ops" runtime-backup size | grep -Fx $'nextcloud_bytes\t19' >/dev/null
   for dataset in nextcloud caddy-data caddy-config; do
     sudo "$FIXTURE/ops" runtime-backup stream "$dataset" >"$SOURCE_DIR/$dataset.tar"
     tar -tf "$SOURCE_DIR/$dataset.tar" >/dev/null
