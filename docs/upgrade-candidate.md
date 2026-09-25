@@ -8,7 +8,11 @@ Pi change. The active production Compose and image lock remain unchanged.
 tag using `docker buildx imagetools inspect --raw`. It selects exactly one
 `linux/arm64/v8` manifest, checks the manifest's bytes against the index, and
 reports the index, platform-manifest, and image-config digests. The image-config
-digest is the expected loaded Docker image ID; the index digest is not. Pass
+digest is the expected loaded Docker image ID on the Pi's classic Docker image
+store; the index digest is not. Docker Desktop's containerd image store can
+report the platform-manifest digest as `.Id`, so the isolated rehearsal binds
+both reviewed identities plus the exact pulled repo digest and ARM64 platform.
+Do not substitute that local behavior for a live Pi image-ID check. Pass
 `--expected-index` when a previously reviewed index digest must be enforced.
 The command reads metadata only; it does not pull the image.
 
