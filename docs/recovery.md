@@ -51,10 +51,14 @@ scripts/test-runtime-recovery.sh --cleanup "$RECOVERY_TEST_ID"
 Success prints that the disposable recovery-test targets are absent. Never
 construct a different path or remove recovery targets manually.
 
-This drill is the repository's only runtime restore automation. There is no
-script that restores a runtime backup into live Nextcloud, MariaDB, and Caddy
-state. A passed drill is recovery evidence, not authority or tooling for a live
-runtime restore.
+This drill is the repository's only usable runtime restore automation. The
+privileged dispatcher has staging, dataset verification, database-attestation,
+and stopped-service promotion primitives for a future live restore. They are
+not an operator procedure: no approved workflow yet binds a specific held
+backup to a staged MariaDB import, restores the prior configuration and images,
+or proves health before reopening ingress. Do not call those primitives on the
+production Pi. A passed drill is recovery evidence, not authority or tooling
+for a live runtime restore.
 
 The helper derives every disposable recovery path from that ID beneath the
 policy-bound storage mount. It validates the mount and UUID again before each
