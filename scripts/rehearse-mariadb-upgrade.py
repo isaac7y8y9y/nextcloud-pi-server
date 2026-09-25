@@ -72,6 +72,7 @@ def manifest_value(raw: bytes, key: str) -> str:
 
 
 def verify_metadata(path: Path, tag: str) -> tuple[dict[str, str], str]:
+    image_name = resolver.validate_tag(tag)
     raw = private_file(path)
     fields = {}
     for line in raw.decode("utf-8", "strict").splitlines():
@@ -81,7 +82,7 @@ def verify_metadata(path: Path, tag: str) -> tuple[dict[str, str], str]:
         fields[key] = value
     expected = {"format", "image", "tag", "platform", "index_digest", "manifest_digest", "config_digest"}
     if (set(fields) != expected or fields["format"] != "nextcloud-upgrade-image-v1"
-            or fields["image"] != "mariadb" or fields["tag"] != tag
+            or fields["image"] != image_name or fields["tag"] != tag
             or fields["platform"] != "linux/arm64/v8"
             or not all(DIGEST.fullmatch(fields[name]) for name in expected if name.endswith("digest"))):
         raise RehearsalError("image metadata is not the selected ARM64 release")
@@ -89,7 +90,7 @@ def verify_metadata(path: Path, tag: str) -> tuple[dict[str, str], str]:
     if resolver.digest(index) != fields["index_digest"]:
         raise RehearsalError("registry index changed")
     manifest_id = resolver.select_arm64(index)
-    manifest = resolver.registry_raw(f"mariadb@{manifest_id}")
+    manifest = resolver.registry_raw(f"{image_name}@{manifest_id}")
     if manifest_id != fields["manifest_digest"] or resolver.image_config(manifest, manifest_id) != fields["config_digest"]:
         raise RehearsalError("registry ARM64 image identity changed")
     return fields, hashlib.sha256(raw).hexdigest()

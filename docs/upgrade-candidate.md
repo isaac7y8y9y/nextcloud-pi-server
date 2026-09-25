@@ -96,8 +96,29 @@ the named containers and retain private state for diagnosis. A failed approval
 cannot be replayed; generate a fresh plan after fixing the cause. The helper
 never connects to the Pi or opens a host port.
 
-This proves only the database import and forward-file-format path for the
-backup used. It does **not** prove `occ status`, Nextcloud 30→31, file
-operations, a fresh final snapshot, or live cutover and restoration. A
-September backup cannot substitute for a new quiesced item-5 recovery point.
-Those are still hard rollout gates.
+The database helper proves only the import and forward-file-format path for
+the backup used. Application behavior is tested separately below. A September
+backup cannot substitute for a new quiesced item-5 recovery point; live
+cutover and restoration remain hard gates.
+
+`scripts/rehearse-nextcloud-upgrade.py` adds a separate, single-use approved
+application rehearsal. Its plan verifies the private backup and exact ARM64
+metadata for MariaDB 11.4.13 and Nextcloud 30.0.17/31.0.14. Apply pulls
+those exact digests into the **local** Docker daemon, extracts the backed-up
+Nextcloud tree into a new Docker volume, imports SQL into a clean 11.4 bind
+directory, and runs the applications on an internal-only Docker network with
+no published ports. It rewrites only the disposable `config.php` to use the
+isolated database and loopback HTTP. It checks `occ status`, creates a
+synthetic user, and uploads/downloads synthetic files through local WebDAV
+before and after the official-image 30→31 startup migration. The six known
+enabled custom apps are disabled before the core hop, matching the reviewed
+plan. A successful run removes its containers, network, volume, and private
+database directory; failure stops named containers and retains private state
+for diagnosis. Private user data and credentials never enter Git or command
+output.
+
+The September 25 rehearsal passed against the September 17 backup. It is
+evidence for that backup and those three image digests, **not** a substitute
+for a fresh item-5 quiesced recovery point, live mount and ingress proof,
+approved activation, or live full-runtime restore. It does not test the later
+31→34 hops or custom-app re-enablement.
