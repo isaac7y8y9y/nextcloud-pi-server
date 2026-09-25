@@ -290,7 +290,7 @@ def main() -> int:
         "single-use",
         "15 minutes",
         "24 hours old",
-        "There is no script that restores a runtime backup into live",
+        "not an operator procedure",
         "consumed approval cannot be replayed",
     )
     combined_runbooks = " ".join("\n".join((deployment, backup, recovery)).split())
