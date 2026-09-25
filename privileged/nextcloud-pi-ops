@@ -312,7 +312,8 @@ upgrade_stage_compose_hash() {
   hash "$file"
 }
 upgrade_stage_write() {
-  local file="$(upgrade_stage_file "$1")" temporary="$file.new"
+  local file temporary
+  file="$(upgrade_stage_file "$1")"; temporary="$file.new"
   printf 'format\tupgrade-stage-v1\nphase\t%s\nid\t%s\nfingerprint\t%s\nfreeze_id\t%s\nfreeze_table_sha256\t%s\nfetch_id\t%s\ntarget\t%s\ntag\t%s\nexpected_id\t%s\npre_record_sha256\t%s\npre_compose_sha256\t%s\ncandidate_record_sha256\t%s\ncandidate_compose_sha256\t%s\nexpires\t%s\n' \
     "$2" "$1" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" >"$temporary"
   /usr/bin/chmod 0600 "$temporary"; /usr/bin/mv -f -- "$temporary" "$file"
