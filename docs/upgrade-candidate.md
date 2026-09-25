@@ -74,3 +74,26 @@ after its capture. The held mode is not yet a complete approved upgrade
 transaction: in-flight-write drain, external denial proof, stage approval,
 image activation, and full-runtime restore remain hard gates. Do not use it
 as a live upgrade procedure until those gates are implemented and reviewed.
+
+## Isolated MariaDB rehearsal
+
+`scripts/rehearse-mariadb-upgrade.py` is a **local, database-only** rehearsal.
+Its `--plan` verifies an existing private runtime backup, checks current
+registry metadata for exact `mariadb:11.4.13` and `mariadb:11.8.9` ARM64
+images, and writes a private, 15-minute approval record outside Git. Its
+`--apply` consumes that record once, pulls only the bound digest references
+into the local ARM64 Docker daemon, and uses a new bind directory and
+unpublished containers with `--network none`. It imports the backup's SQL
+into clean 11.4 system tables, checks application table/column/collation and
+file-cache counts plus `mariadb-check`, then starts 11.8 against **that
+disposable 11.4 directory**, runs `mariadb-upgrade`, and repeats the checks.
+Successful runs remove their exact containers and private data. Failures stop
+the named containers and retain private state for diagnosis. A failed approval
+cannot be replayed; generate a fresh plan after fixing the cause. The helper
+never connects to the Pi or opens a host port.
+
+This proves only the database import and forward-file-format path for the
+backup used. It does **not** prove `occ status`, Nextcloud 30→31, file
+operations, a fresh final snapshot, or live cutover and restoration. A
+September backup cannot substitute for a new quiesced item-5 recovery point.
+Those are still hard rollout gates.

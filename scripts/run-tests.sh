@@ -20,6 +20,7 @@ readonly -a PR_COMMANDS=(
   'bash scripts/test-image-lock.sh'
   'python3 scripts/test-resolve-image-upgrade.py'
   'python3 scripts/test-prepare-image-upgrade.py'
+  'python3 scripts/test-rehearse-mariadb-upgrade.py'
   'bash scripts/test-fetch-image-upgrade.sh'
   'bash scripts/test-active-images.sh'
   'bash scripts/test-compose-launcher.sh'
