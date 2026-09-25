@@ -393,6 +393,7 @@ EOF
     exit 1
   fi
   sudo "$FIXTURE/ops" upgrade-stage accept "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\taccepted' >/dev/null
+  printf 'true\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
     printf 'upgrade freeze released while maintenance mode was active\n' >&2
     exit 1
