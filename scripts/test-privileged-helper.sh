@@ -17,6 +17,9 @@ grep -Fq 'cmd_upgrade_freeze_activate()' "$HELPER"
 grep -Fq 'cmd_upgrade_freeze_release()' "$HELPER"
 grep -Fq 'cmd_upgrade_fetch_consume()' "$HELPER"
 grep -Fq 'cmd_upgrade_fetch_complete()' "$HELPER"
+grep -Fq 'cmd_upgrade_stage_boundary()' "$HELPER"
+grep -Fq 'cmd_upgrade_stage_accept()' "$HELPER"
+grep -Fq 'upgrade_stage_release_allowed' "$HELPER"
 grep -Fq 'exec 9>>"$LOCK"' "$HELPER"
 grep -Fq 'local path expected; path="$(resource_path "$1")"; expected="$(resource_mode "$1")"' "$HELPER"
 grep -Fq 'cmd_runtime_backup_stream() { [[ $# == 1 ]] || invalid; reject_stdin;' "$HELPER"
@@ -185,6 +188,8 @@ elif [[ "\${1:-}:\${2:-}" == port:nextcloud-docker-caddy-1 ]]; then
   printf 'published:%s\n' "\${3%/tcp}"
 elif [[ "\${1:-}:\${2:-}" == image:inspect ]]; then
   printf 'sha256:%064d\n' 2
+elif [[ "\${1:-}" == inspect ]]; then
+  printf 'sha256:%064d true\n' 2
 elif [[ "\${1:-}:\${2:-}" == exec:--user ]]; then
   case "\${*: -1}" in
     --on) printf 'true\n' >'$FIXTURE/maintenance-state' ;;
@@ -289,6 +294,7 @@ EOF
   printf 'active\n' | sudo tee "$FIXTURE/timer-state" >/dev/null
   printf 'false\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   printf 'nextcloud-data\n' | sudo tee "$FIXTURE/mount/nextcloud/data.txt" >/dev/null
+  printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null
   printf 'caddy-data\n' | sudo tee "$FIXTURE/volumes/caddy-data/data.txt" >/dev/null
   printf 'caddy-config\n' | sudo tee "$FIXTURE/volumes/caddy-config/config.txt" >/dev/null
   cat >"$SOURCE_DIR/policy" <<EOF
@@ -324,7 +330,7 @@ EOF
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/manifest" "$FIXTURE/manifest"
   sudo "$FIXTURE/ops" version | grep -Fx $'version\t1' >/dev/null
   sudo "$FIXTURE/ops" protected-state privileged-helper | grep -Fx $'state\tpresent' >/dev/null
-  printf 'NEXTCLOUD_ACTIVE_IMAGES_MODE=source\n' >"$SOURCE_DIR/active-images.env"
+  printf 'NEXTCLOUD_ACTIVE_IMAGES_MODE=source\nNEXTCLOUD_ACTIVE_IMAGES_APP_TAG=nextcloud:30\nNEXTCLOUD_ACTIVE_IMAGES_APP_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_DB_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_CADDY_ID=sha256:%064d\n' 2 2 2 >"$SOURCE_DIR/active-images.env"
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/active-images.env" "$FIXTURE/active-images.env"
   sudo "$FIXTURE/ops" active-images-state | grep -Fx $'mode\tsource' >/dev/null
 
@@ -352,12 +358,49 @@ EOF
   fi
   printf 'true\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   sudo "$FIXTURE/ops" upgrade-fetch complete "$fetch_id" "$fetch_fingerprint" | grep -Fx $'state\tcomplete' >/dev/null
+  pre_record="$(sudo sha256sum "$FIXTURE/active-images.env" | awk '{print $1}')"
+  pre_compose="$(sudo sha256sum "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" | awk '{print $1}')"
+  printf 'NEXTCLOUD_ACTIVE_IMAGES_MODE=source\nNEXTCLOUD_ACTIVE_IMAGES_APP_TAG=nextcloud:31.0.14-apache\nNEXTCLOUD_ACTIVE_IMAGES_APP_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_DB_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_CADDY_ID=sha256:%064d\n' 2 2 2 >"$SOURCE_DIR/candidate-active.env"
+  printf 'candidate compose\n' >"$SOURCE_DIR/candidate-compose.yml"
+  candidate_record="$(sha256sum "$SOURCE_DIR/candidate-active.env" | awk '{print $1}')"
+  candidate_compose="$(sha256sum "$SOURCE_DIR/candidate-compose.yml" | awk '{print $1}')"
+  stage_fingerprint="$(printf '%064d' 4)"
+  stage_tag=nextcloud:31.0.14-apache
+  stage_id=20260910T000000Z-111
+  stage_args=("$stage_fingerprint" "$freeze_id" "$fetch_table" "$fetch_id" "$fetch_fingerprint" app "$stage_tag" "$pre_record" "$pre_compose" "$candidate_record" "$candidate_compose" "$fetch_expires")
+  sudo "$FIXTURE/ops" upgrade-stage consume "$stage_id" "${stage_args[@]}" | grep -Fx $'phase\tprepared' >/dev/null
+  if sudo "$FIXTURE/ops" upgrade-stage consume "$stage_id" "${stage_args[@]}" >/dev/null 2>&1; then
+    printf 'root-owned upgrade-stage approval was replayed\n' >&2
+    exit 1
+  fi
+  printf 'false\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
+  if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
+    printf 'upgrade freeze released with a prepared stage\n' >&2
+    exit 1
+  fi
+  sudo "$FIXTURE/ops" upgrade-stage abort "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\taborted' >/dev/null
+  stage_id=20260910T000000Z-112
+  sudo "$FIXTURE/ops" upgrade-stage consume "$stage_id" "${stage_args[@]}" | grep -Fx $'phase\tprepared' >/dev/null
+  sudo install -m 0600 -o root -g root "$SOURCE_DIR/candidate-active.env" "$FIXTURE/active-images.env"
+  sudo install -m 0644 "$SOURCE_DIR/candidate-compose.yml" "$FIXTURE/mount/nextcloud-docker/docker-compose.yml"
+  sudo "$FIXTURE/ops" upgrade-stage boundary "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\truntime-may-have-changed' >/dev/null
+  if sudo "$FIXTURE/ops" upgrade-stage abort "$stage_id" "$stage_fingerprint" >/dev/null 2>&1; then
+    printf 'upgrade stage rolled back after runtime boundary\n' >&2
+    exit 1
+  fi
+  if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
+    printf 'upgrade freeze released after runtime boundary without acceptance\n' >&2
+    exit 1
+  fi
+  sudo "$FIXTURE/ops" upgrade-stage accept "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\taccepted' >/dev/null
   if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
     printf 'upgrade freeze released while maintenance mode was active\n' >&2
     exit 1
   fi
   printf 'false\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" | grep -Fx $'state\treleased' >/dev/null
+  sudo install -m 0600 -o root -g root "$SOURCE_DIR/active-images.env" "$FIXTURE/active-images.env"
+  printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null
   [[ "$(sudo cat "$FIXTURE/timer-state")" == active && ! -e "$FIXTURE/nft-table" ]]
   if sudo "$FIXTURE/ops" upgrade-freeze activate "$freeze_id" >/dev/null 2>&1; then
     printf 'upgrade freeze reused a released ID\n' >&2

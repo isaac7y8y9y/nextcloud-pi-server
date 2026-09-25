@@ -236,6 +236,7 @@ cmd_upgrade_freeze_release() {
   if [[ "$phase" == active ]]; then
     [[ "$(freeze_table_hash)" == "$table" ]] || die "upgrade firewall differs from its protected state"
     upgrade_fetch_release_allowed
+    upgrade_stage_release_allowed
     /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is still on"
     freeze_write "$id" releasing "$timer" "$table"
     /usr/sbin/nft delete table inet "$freeze_table" || die "could not release upgrade firewall"
@@ -303,6 +304,122 @@ cmd_upgrade_fetch_complete() {
   upgrade_fetch_write "$id" complete "$fingerprint" "$freeze_id" "$table" "$ref" "$expected" "$(metadata "$file" expires)"
   out state complete; out id "$id"
 }
+upgrade_stage_root() { state_dir upgrade-stage; }
+upgrade_stage_file() { printf '%s/%s.tsv' "$(upgrade_stage_root)" "$1"; }
+upgrade_stage_compose_hash() {
+  local file="${P[NEXTCLOUD_PI_PROJECT_DIR]}/docker-compose.yml"
+  [[ -f "$file" && ! -L "$file" ]] || die "live Compose file is unsafe"
+  hash "$file"
+}
+upgrade_stage_write() {
+  local file="$(upgrade_stage_file "$1")" temporary="$file.new"
+  printf 'format\tupgrade-stage-v1\nphase\t%s\nid\t%s\nfingerprint\t%s\nfreeze_id\t%s\nfreeze_table_sha256\t%s\nfetch_id\t%s\ntarget\t%s\ntag\t%s\nexpected_id\t%s\npre_record_sha256\t%s\npre_compose_sha256\t%s\ncandidate_record_sha256\t%s\ncandidate_compose_sha256\t%s\nexpires\t%s\n' \
+    "$2" "$1" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" >"$temporary"
+  /usr/bin/chmod 0600 "$temporary"; /usr/bin/mv -f -- "$temporary" "$file"
+}
+upgrade_stage_field() { metadata "$(upgrade_stage_file "$1")" "$2"; }
+upgrade_stage_require() {
+  local id="$1" file="$(upgrade_stage_file "$1")" freeze_id table
+  valid_id "$id" || invalid
+  safe_dir "$(upgrade_stage_root)"; protected_file "$file" 0600
+  [[ "$(upgrade_stage_field "$id" format)" == upgrade-stage-v1 && "$(upgrade_stage_field "$id" id)" == "$id" ]] || die "upgrade stage differs"
+  freeze_id="$(upgrade_stage_field "$id" freeze_id)"; table="$(upgrade_stage_field "$id" freeze_table_sha256)"
+  freeze_require_current "$freeze_id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$table" && "$(freeze_field table_sha256)" == "$table" ]] || die "upgrade freeze differs"
+}
+upgrade_stage_rewrite() {
+  local id="$1" phase="$2"
+  upgrade_stage_write "$id" "$phase" "$(upgrade_stage_field "$id" fingerprint)" \
+    "$(upgrade_stage_field "$id" freeze_id)" "$(upgrade_stage_field "$id" freeze_table_sha256)" \
+    "$(upgrade_stage_field "$id" fetch_id)" "$(upgrade_stage_field "$id" target)" \
+    "$(upgrade_stage_field "$id" tag)" "$(upgrade_stage_field "$id" expected_id)" \
+    "$(upgrade_stage_field "$id" pre_record_sha256)" "$(upgrade_stage_field "$id" pre_compose_sha256)" \
+    "$(upgrade_stage_field "$id" candidate_record_sha256)" "$(upgrade_stage_field "$id" candidate_compose_sha256)" \
+    "$(upgrade_stage_field "$id" expires)"
+}
+upgrade_stage_release_allowed() {
+  local root="$(upgrade_stage_root)" file phase
+  [[ ! -e "$root" && ! -L "$root" ]] && return
+  safe_dir "$root"
+  for file in "$root"/*.tsv; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    protected_file "$file" 0600
+    phase="$(metadata "$file" phase)"
+    [[ "$(metadata "$file" format)" == upgrade-stage-v1 && ( "$phase" == accepted || "$phase" == aborted || "$phase" == recovered ) ]] || die "an upgrade stage is unresolved; retain the ingress freeze"
+  done
+}
+cmd_upgrade_stage_consume() {
+  [[ $# == 13 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" freeze_id="$3" table="$4" fetch_id="$5" fetch_fingerprint="$6" target="$7" tag="$8" pre_record="$9" pre_compose="${10}" candidate_record="${11}" candidate_compose="${12}" expires="${13}" file fetch expected image
+  valid_id "$id" && valid_hash "$fingerprint" && valid_id "$freeze_id" && valid_hash "$table" && valid_id "$fetch_id" && valid_hash "$fetch_fingerprint" || invalid
+  valid_hash "$pre_record" && valid_hash "$pre_compose" && valid_hash "$candidate_record" && valid_hash "$candidate_compose" || invalid
+  [[ "$target" == app || "$target" == db || "$target" == caddy ]] || invalid
+  [[ "$tag" =~ ^(nextcloud:[0-9]+\.[0-9]+\.[0-9]+-apache|mariadb:[0-9]+\.[0-9]+\.[0-9]+|caddy:[0-9]+\.[0-9]+\.[0-9]+)$ && "$expires" =~ ^[0-9]{10}$ ]] || invalid
+  case "$target" in app) image=nextcloud;; db) image=mariadb;; caddy) image=caddy;; esac
+  [[ "$tag" == "$image":* ]] || invalid
+  lock; validate_host; freeze_require_current "$freeze_id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$table" && "$(freeze_field table_sha256)" == "$table" ]] || die "upgrade freeze differs"
+  (( $(/usr/bin/date -u +%s) <= 10#$expires )) || die "upgrade-stage approval expired"
+  [[ "$pre_record" != "$candidate_record" && "$pre_compose" != "$candidate_compose" ]] || die "candidate must change the selected image and Compose"
+  [[ "$(live_hash)" == "$pre_record" && "$(upgrade_stage_compose_hash)" == "$pre_compose" ]] || die "upgrade pre-state changed"
+  fetch="$(upgrade_fetch_file "$fetch_id")"; safe_dir "$(upgrade_fetch_root)"; protected_file "$fetch" 0600
+  [[ "$(metadata "$fetch" format)" == upgrade-fetch-v1 && "$(metadata "$fetch" state)" == complete && "$(metadata "$fetch" fingerprint)" == "$fetch_fingerprint" && "$(metadata "$fetch" freeze_id)" == "$freeze_id" && "$(metadata "$fetch" freeze_table_sha256)" == "$table" ]] || die "completed image fetch differs"
+  [[ "$(metadata "$fetch" ref)" =~ ^${image}@sha256:[0-9a-f]{64}$ ]] || die "fetched image target differs"
+  expected="$(metadata "$fetch" expected_id)"
+  [[ "$(/usr/bin/docker image inspect --format '{{.Id}}' "$(metadata "$fetch" ref)")" == "$expected" ]] || die "fetched image ID differs"
+  ensure_parent upgrade-stage; file="$(upgrade_stage_file "$id")"
+  [[ ! -e "$file" && ! -L "$file" && ! -e "$file.new" && ! -L "$file.new" ]] || die "upgrade-stage approval was already consumed"
+  upgrade_stage_write "$id" prepared "$fingerprint" "$freeze_id" "$table" "$fetch_id" "$target" "$tag" "$expected" "$pre_record" "$pre_compose" "$candidate_record" "$candidate_compose" "$expires"
+  out phase prepared; out id "$id"
+}
+cmd_upgrade_stage_boundary() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" tag expected target
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == prepared && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not prepared"
+  [[ "$(live_hash)" == "$(upgrade_stage_field "$id" candidate_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" candidate_compose_sha256)" ]] || die "candidate configuration differs"
+  tag="$(upgrade_stage_field "$id" tag)"; expected="$(upgrade_stage_field "$id" expected_id)"; target="$(upgrade_stage_field "$id" target)"
+  target="${target^^}"
+  [[ "$(/usr/bin/awk -F= -v key="NEXTCLOUD_ACTIVE_IMAGES_${target}_TAG" '$1 == key {n++; v=$2} END {if (n == 1) print v; else exit 1}' "$ACTIVE_RECORD")" == "$tag" && "$(/usr/bin/awk -F= -v key="NEXTCLOUD_ACTIVE_IMAGES_${target}_ID" '$1 == key {n++; v=$2} END {if (n == 1) print v; else exit 1}' "$ACTIVE_RECORD")" == "$expected" ]] || die "candidate active mapping differs from approved target"
+  [[ "$(/usr/bin/docker image inspect --format '{{.Id}}' "$tag")" == "$expected" ]] || die "candidate image ID differs"
+  "$VALIDATOR"
+  upgrade_stage_rewrite "$id" runtime-may-have-changed
+  out phase runtime-may-have-changed; out id "$id"
+}
+cmd_upgrade_stage_status() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  validate_host; upgrade_stage_require "$1"
+  out phase "$(upgrade_stage_field "$1" phase)"; out id "$1"; out target "$(upgrade_stage_field "$1" target)"
+}
+cmd_upgrade_stage_abort() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2"
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == prepared && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "runtime boundary was reached; full restore is required"
+  [[ "$(live_hash)" == "$(upgrade_stage_field "$id" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" pre_compose_sha256)" ]] || die "pre-start rollback is incomplete"
+  upgrade_stage_rewrite "$id" aborted
+  out phase aborted; out id "$id"
+}
+cmd_upgrade_stage_accept() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" service expected running
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not at the runtime boundary"
+  [[ "$(live_hash)" == "$(upgrade_stage_field "$id" candidate_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" candidate_compose_sha256)" ]] || die "candidate configuration changed"
+  "$VALIDATOR"
+  /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "Nextcloud service is not active"
+  for service in APP DB CADDY; do
+    expected="$(/usr/bin/awk -F= -v key="NEXTCLOUD_ACTIVE_IMAGES_${service}_ID" '$1 == key {print $2}' "$ACTIVE_RECORD")"
+    case "$service" in APP) running="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; DB) running="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; CADDY) running="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
+    [[ "$(/usr/bin/docker inspect "$running" --format '{{.Image}} {{.State.Running}}')" == "$expected true" ]] || die "running container image differs from candidate"
+  done
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is still on"
+  upgrade_stage_rewrite "$id" accepted
+  out phase accepted; out id "$id"
+}
 cmd_active_prepare() { [[ $# == 3 ]] || invalid; local id="$1" expected="$2" size="$3" tx marker pre; valid_id "$id" && valid_hash "$expected" && valid_size "$size" || invalid; (( size <= 65536 )) || invalid; lock; validate_host; marker="$(active_marker)"; tx="$(active_tx "$id")"; [[ ! -e "$marker" && ! -L "$marker" && ! -e "$tx" && ! -L "$tx" ]] || die "active transaction is already unresolved"; ensure_parent active-record; /usr/bin/install -d -m 0700 -o root -g root "$tx"; ACTIVE_PREPARE_ABORT_TX="$tx"; trap 'active_prepare_abort "$?"' EXIT HUP INT TERM; read_exact "$tx/candidate" "$size"; [[ "$(hash "$tx/candidate")" == "$expected" ]] || die "candidate hash differs"; "$VALIDATOR" --record "$tx/candidate"; pre="$(live_hash)"; if [[ "$pre" == missing ]]; then : >"$tx/absent"; /usr/bin/chmod 0600 "$tx/absent"; else protected_file "$ACTIVE_RECORD" 0600; /usr/bin/cp -p "$ACTIVE_RECORD" "$tx/snapshot"; fi; write_active_meta "$tx/metadata.tsv" prepared "$pre" "$expected" "$size"; printf '%s\n' "$id" >"$marker"; /usr/bin/chmod 0600 "$marker"; trap - EXIT HUP INT TERM; ACTIVE_PREPARE_ABORT_TX=''; out state prepared; out id "$id"; }
 cmd_active_apply() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx meta pre candidate size live; lock; require_active_tx "$id"; tx="$(active_tx "$id")"; meta="$tx/metadata.tsv"; pre="$(metadata "$meta" pre_sha256)"; candidate="$(metadata "$meta" candidate_sha256)"; size="$(metadata "$meta" size)"; [[ "$(metadata "$meta" state)" == prepared && "$(hash "$tx/candidate")" == "$candidate" ]] || die "active transaction is not prepared"; live="$(live_hash)"; if [[ "$live" == "$candidate" ]]; then "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; return; fi; [[ "$live" == "$pre" ]] || die "active record pre-state changed"; "$VALIDATOR" --record "$tx/candidate"; install_record "$tx/candidate"; "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; }
 cmd_active_rollback() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx meta pre candidate size live state; lock; require_active_tx "$id"; tx="$(active_tx "$id")"; meta="$tx/metadata.tsv"; pre="$(metadata "$meta" pre_sha256)"; candidate="$(metadata "$meta" candidate_sha256)"; size="$(metadata "$meta" size)"; state="$(metadata "$meta" state)"; live="$(live_hash)"; [[ "$state" == prepared || "$state" == applied || "$state" == rolledback ]] || die "active transaction state is invalid"; if [[ "$live" == "$candidate" ]]; then if [[ "$pre" == missing ]]; then /usr/bin/rm -f -- "$ACTIVE_RECORD"; else install_record "$tx/snapshot"; "$VALIDATOR"; fi; elif [[ "$live" != "$pre" ]]; then die "active record changed outside transaction"; fi; [[ "$(live_hash)" == "$pre" ]] || die "rollback verification failed"; write_active_meta "$meta" rolledback "$pre" "$candidate" "$size"; out state rolledback; out id "$id"; }
@@ -368,6 +485,7 @@ case "$command" in
   background-jobs) sub="${1:-}"; shift || true; case "$sub" in state) cmd_background_jobs_state "$@";; pause) cmd_background_jobs_pause "$@";; resume) cmd_background_jobs_resume "$@";; *) invalid;; esac;;
   upgrade-freeze) sub="${1:-}"; shift || true; case "$sub" in check) cmd_upgrade_freeze_check "$@";; status) cmd_upgrade_freeze_status "$@";; activate) cmd_upgrade_freeze_activate "$@";; release) cmd_upgrade_freeze_release "$@";; *) invalid;; esac;;
   upgrade-fetch) sub="${1:-}"; shift || true; case "$sub" in consume) cmd_upgrade_fetch_consume "$@";; complete) cmd_upgrade_fetch_complete "$@";; *) invalid;; esac;;
+  upgrade-stage) sub="${1:-}"; shift || true; case "$sub" in consume) cmd_upgrade_stage_consume "$@";; boundary) cmd_upgrade_stage_boundary "$@";; status) cmd_upgrade_stage_status "$@";; abort) cmd_upgrade_stage_abort "$@";; accept) cmd_upgrade_stage_accept "$@";; *) invalid;; esac;;
   active-record) sub="${1:-}"; shift || true; case "$sub" in prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
   runtime-backup) sub="${1:-}"; shift || true; case "$sub" in size) cmd_runtime_backup_size "$@";; stream) cmd_runtime_backup_stream "$@";; *) invalid;; esac;;
   runtime-recovery) sub="${1:-}"; shift || true; case "$sub" in check) cmd_recovery_check "$@";; prepare) cmd_recovery_prepare "$@";; restore) cmd_recovery_restore "$@";; cleanup) cmd_recovery_cleanup "$@";; *) invalid;; esac;;
