@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 from pathlib import Path
 import stat
 import tempfile
@@ -126,6 +127,40 @@ class ActivationTests(unittest.TestCase):
         a.consumed_acceptance(artifact, self.root, base)
         with self.assertRaisesRegex(a.r.RecoveryError, "evidence changed"):
             a.consumed_acceptance(artifact, self.root, dict(base, tag="changed"))
+
+    def test_completed_fetch_authority_rejects_action_tampering(self) -> None:
+        local = {"candidate_manifest": "a" * 64, "config_manifest": "b" * 64,
+                 "backup_manifest": "c" * 64, "image_manifest": "d" * 64,
+                 "image_attestation": "e" * 64}
+        metadata = {"tag": "nextcloud:31.0.14-apache", "index_digest": "sha256:" + "1" * 64,
+                    "manifest_digest": "sha256:" + "2" * 64, "config_digest": "sha256:" + "3" * 64}
+        record = {"format": "image-upgrade-fetch-v1", "state": "consumed",
+                  "transaction_id": self.stage_id, "candidate_sha256": local["candidate_manifest"],
+                  "source_lock_sha256": a.r.digest(a.r.ROOT / "config/image-lock.env"),
+                  "config_manifest_sha256": local["config_manifest"],
+                  "runtime_manifest_sha256": local["backup_manifest"],
+                  "image_manifest_sha256": local["image_manifest"],
+                  "image_attestation_sha256": local["image_attestation"],
+                  "prestate_sha256": "f" * 64, "freeze_id": self.stage_id,
+                  "freeze_table_sha256": "9" * 64, "tag": metadata["tag"],
+                  "index_digest": metadata["index_digest"],
+                  "manifest_digest": metadata["manifest_digest"],
+                  "config_digest": metadata["config_digest"], "host": "test.example.invalid",
+                  "created": "999", "remote_created": "999", "expires": "1899",
+                  "actions": "pull-exact-digest,verify-loaded-id",
+                  "exclusions": "tag-change,compose,source-lock,active-record,container-start,container-stop,pruning,image-removal,runtime-restore,freeze-release"}
+        record["fingerprint"] = hashlib.sha256("".join(f"{key}\t{record[key]}\n" for key in a.FETCH_AUTHORITY).encode()).hexdigest()
+        path = self.root / "fetch.tsv"
+        path.write_text("".join(f"{key}\t{value}\n" for key, value in record.items()))
+        path.chmod(0o600)
+        self.assertEqual(a.fetch_record(path, local, metadata,
+                                        {"id": self.stage_id, "table_sha256": "9" * 64},
+                                        "test.example.invalid", 1000, "f" * 64)["fingerprint"], record["fingerprint"])
+        path.write_text(path.read_text().replace("pull-exact-digest,verify-loaded-id", "pull-floating-tag"))
+        with self.assertRaisesRegex(a.r.RecoveryError, "actions differ"):
+            a.fetch_record(path, local, metadata,
+                           {"id": self.stage_id, "table_sha256": "9" * 64},
+                           "test.example.invalid", 1000, "f" * 64)
 
     def test_pre_boundary_failure_rolls_back_without_restart(self) -> None:
         target = FakeTarget(fail="compose")

@@ -24,6 +24,7 @@ r = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(r)
 
 FETCH_KEYS = set("format state transaction_id fingerprint candidate_sha256 source_lock_sha256 config_manifest_sha256 runtime_manifest_sha256 image_manifest_sha256 image_attestation_sha256 prestate_sha256 freeze_id freeze_table_sha256 tag index_digest manifest_digest config_digest host created remote_created expires actions exclusions".split())
+FETCH_AUTHORITY = "transaction_id candidate_sha256 source_lock_sha256 config_manifest_sha256 runtime_manifest_sha256 image_manifest_sha256 image_attestation_sha256 prestate_sha256 freeze_id freeze_table_sha256 tag index_digest manifest_digest config_digest host created remote_created expires actions exclusions".split()
 CONTAINERS = {"APP": "nextcloud-docker-app-1", "DB": "nextcloud-docker-db-1", "CADDY": "nextcloud-docker-caddy-1"}
 
 
@@ -77,6 +78,12 @@ def fetch_record(path: Path, local: dict[str, object], metadata: dict[str, str],
         raise r.RecoveryError("fetch approval clock is invalid") from exc
     if expires - created != 900 or abs(created - remote_created) > 60 or not created <= now <= expires:
         r.reject("completed fetch approval expired")
+    if (record["actions"] != "pull-exact-digest,verify-loaded-id" or
+            record["exclusions"] != "tag-change,compose,source-lock,active-record,container-start,container-stop,pruning,image-removal,runtime-restore,freeze-release"):
+        r.reject("completed fetch approval actions differ")
+    authority = "".join(f"{key}\t{record[key]}\n" for key in FETCH_AUTHORITY).encode()
+    if hashlib.sha256(authority).hexdigest() != record["fingerprint"]:
+        r.reject("completed fetch approval fingerprint differs")
     # The protected root marker is the replay authority; the local TSV is evidence only.
     return record
 
