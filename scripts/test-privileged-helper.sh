@@ -363,6 +363,7 @@ EOF
   fi
   printf 'true\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   sudo "$FIXTURE/ops" upgrade-fetch complete "$fetch_id" "$fetch_fingerprint" | grep -Fx $'state\tcomplete' >/dev/null
+  sudo "$FIXTURE/ops" upgrade-fetch status "$fetch_id" | grep -Fx "$(printf 'fingerprint\t%s' "$fetch_fingerprint")" >/dev/null
   pre_record="$(sudo sha256sum "$FIXTURE/active-images.env" | awk '{print $1}')"
   pre_compose="$(sudo sha256sum "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" | awk '{print $1}')"
   printf 'NEXTCLOUD_ACTIVE_IMAGES_MODE=source\nNEXTCLOUD_ACTIVE_IMAGES_APP_TAG=nextcloud:31.0.14-apache\nNEXTCLOUD_ACTIVE_IMAGES_APP_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_DB_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_CADDY_ID=sha256:%064d\n' 2 2 2 >"$SOURCE_DIR/candidate-active.env"
@@ -451,6 +452,13 @@ EOF
   sudo install -m 0644 "$SOURCE_DIR/candidate-compose.yml" "$FIXTURE/mount/nextcloud-docker/docker-compose.yml"
   sudo "$FIXTURE/ops" upgrade-stage boundary "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\truntime-may-have-changed' >/dev/null
   sudo "$FIXTURE/ops" upgrade-stage accept "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\taccepted' >/dev/null
+  printf '%s\n' "$stage_id" | sudo tee "$FIXTURE/state/active-record-current" >/dev/null
+  sudo chmod 600 "$FIXTURE/state/active-record-current"
+  if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
+    printf 'upgrade freeze released with an unresolved active-image transaction\n' >&2
+    exit 1
+  fi
+  sudo rm -- "$FIXTURE/state/active-record-current"
   printf 'true\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
     printf 'upgrade freeze released while maintenance mode was active\n' >&2

@@ -3,7 +3,7 @@
 Recover only from a verified protected artifact bound to the configured target.
 Begin with the read-only validation mode and stop at every stated human approval
 pause. A human approval pause is not a generated approval artifact: deployment,
-image import, and the draft live-runtime restore driver generate expiring,
+image import, and the draft live-runtime restore and activation drivers generate expiring,
 single-use authorization files for their separate operations.
 
 Treat all backups, image archives, attestations, disposable extraction paths,
@@ -63,6 +63,32 @@ policy-bound storage mount. It validates the mount and UUID again before each
 creation, restoration, or recursive cleanup; never substitute a path manually.
 
 ## Draft full-runtime restore after an upgrade boundary
+
+The separate draft `scripts/activate-image-upgrade.py` stages exactly one
+fetched, verified image under the active ingress freeze. It accepts the same
+candidate, source-rendered baseline, configuration backup, held runtime
+backup, and prior image-recovery directories as the restore driver. Its
+`--plan`/`--apply` modes additionally require the consumed `--fetch-approval`;
+`--apply` additionally requires the fresh private `--approval` printed by the
+plan. It verifies the protected completed-fetch marker, loaded digest and
+source runtime, then tags the candidate, installs its active record and Compose,
+records the root boundary, and restarts the stack. A successful stage stops
+with maintenance mode and ingress freeze held. It does not migrate, accept,
+release the freeze, prune images, or alter the repository source lock.
+
+After separate application/migration and health review, `--plan-accept` and
+`--accept` use `--stage-approval` (the consumed stage artifact) and the same
+five directories; `--accept` also requires its newly printed `--approval`.
+Acceptance rechecks the protected stage and candidate image IDs, maintenance
+off, no app host port, and loopback health; it marks the stage accepted and
+commits the active-record transaction. The freeze still requires a separate
+release. If staging fails before the root boundary, the driver attempts only
+the approved pre-start configuration rollback and verifies it. At or after an
+ambiguous boundary, never use config-only rollback: preserve the freeze and
+use the full-runtime restore below or a separately approved forward repair.
+This driver is item-4 code under local test, **not a live Pi upgrade procedure**.
+The real ingress/drain path, disposable rehearsal, reviews, and item-5 approval
+remain outstanding.
 
 `scripts/restore-live-runtime.py` is an item-4 implementation under test, not
 yet an item-5 production instruction. It requires a root-owned upgrade stage
