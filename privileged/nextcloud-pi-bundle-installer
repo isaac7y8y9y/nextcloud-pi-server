@@ -146,6 +146,7 @@ require_no_lifecycles() {
   [[ "$(findmnt -rn --target "$mount" -o TARGET)" == "$mount" && "$(findmnt -rn --target "$mount" -o FSTYPE)" == "$mount_type" && "$(findmnt -rn --target "$mount" -o UUID | tr '[:upper:]' '[:lower:]')" == "${mount_uuid,,}" ]] || die "storage mount is unavailable"
   protected_directory "$STATE" 0700 || die "state root is unsafe"
   [[ ! -e "$STATE/active-record-current" && ! -L "$STATE/active-record-current" ]] || die "active-record lifecycle is unresolved"
+  [[ ! -e "$STATE/upgrade-freeze/current.tsv" && ! -L "$STATE/upgrade-freeze/current.tsv" ]] || die "upgrade freeze is unresolved"
   empty_namespace "$STATE/active-record" 0700 "active-record state"
   empty_namespace "$STATE/runtime-recovery" 0700 "runtime-recovery state"
   empty_namespace "$STATE/image-readiness" 0700 "image-readiness state"
@@ -189,6 +190,7 @@ protected_file "$INSTALL_LOCK" 0600 && protected_file "$OPS_LOCK" 0600 || die "l
 
 case "$action" in
   install)
+    [[ ! -e "$STATE/upgrade-freeze/current.tsv" && ! -L "$STATE/upgrade-freeze/current.tsv" ]] || die "release upgrade freeze before replacing the boot guard"
     [[ $# == 9 ]] || die "invalid install arguments"
     source_stage="$1"; backup_id="$2"; expected="$3"; user="$4"; host="$5"; mount="$6"; uuid="$7"; platform="$8"; project="$9"
     [[ "$backup_id" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ && "$expected" =~ ^[0-9a-f]{64}$ && "$user" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ && "$project" =~ ^/[A-Za-z0-9._/-]+$ && "${project##*/}" == nextcloud-docker ]] || die "unsafe install arguments"
@@ -218,6 +220,7 @@ case "$action" in
     rollback=0; trap - EXIT HUP INT TERM; rm -rf -- "$root_stage"; printf 'Installed privileged interface; rollback ID: %s\n' "$backup_id"
     ;;
   rollback)
+    [[ ! -e "$STATE/upgrade-freeze/current.tsv" && ! -L "$STATE/upgrade-freeze/current.tsv" ]] || die "release upgrade freeze before replacing the boot guard"
     [[ $# == 1 && "$1" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || die "invalid rollback identifier"
     current="$(mktemp -d "$STATE/.rollback.XXXXXX")"; rmdir "$current"; snapshot "$current"; armed=1
     rollback_current() { local status=$?; trap - EXIT HUP INT TERM; (( armed )) && restore "$current" || true; rm -rf -- "$current"; exit "$status"; }

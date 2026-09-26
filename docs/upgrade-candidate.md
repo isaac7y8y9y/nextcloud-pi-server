@@ -94,7 +94,13 @@ that the live LAN rule works; the [ingress proof plan](upgrade-ingress-proof.md)
 and a separately approved release still gate production use. The draft
 `scripts/release-upgrade-freeze.py` driver now binds live configuration,
 container identities, freeze hash, and prior timer state to a private
-single-use approval; it has offline tests only. It does not supply LAN proof.
+single-use approval; it has offline tests only. It refuses release until the
+tracked source image lock agrees with the active record. It does not supply
+LAN proof. The Docker boot guard restores a held firewall rule before Docker
+starts and blocks startup during a partial full-runtime promotion. The
+approval-bound restore driver has a consumed-approval `--resume` path for that
+promotion and its follow-on configuration/health checks. Neither behavior has
+been proved on the Pi.
 
 `backup-runtime-state.sh --check-held <id>` and `--apply-held <id>` require
 that protected freeze. The apply mode writes a `runtime-backup-v2` manifest

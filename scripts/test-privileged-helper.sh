@@ -19,6 +19,8 @@ grep -Fq 'fib daddr type local tcp dport { 80, 443 } drop' "$HELPER"
 grep -Fq 'cmd_upgrade_freeze_activate()' "$HELPER"
 grep -Fq 'cmd_upgrade_freeze_release()' "$HELPER"
 grep -Fq 'cmd_upgrade_freeze_quiescence()' "$HELPER"
+grep -Fq 'cmd_upgrade_freeze_boot_guard()' "$HELPER"
+grep -Fq 'ExecStartPre=/usr/local/libexec/nextcloud-pi-ops upgrade-freeze-boot-guard' "$(dirname "$(dirname "$HELPER")")/systemd/docker.service.d/nextcloud-storage.conf"
 grep -Fq 'cmd_upgrade_freeze_maintenance_off()' "$HELPER"
 grep -Fq 'cmd_upgrade_fetch_consume()' "$HELPER"
 grep -Fq 'cmd_upgrade_fetch_complete()' "$HELPER"
@@ -251,7 +253,7 @@ case "\${1:-}:\${2:-}" in
     ;;
   -j:list) [[ -f "\$state" ]] || exit 1; cat "\$state" ;;
   list:table) [[ -f "\$state" ]] || exit 1 ;;
-  delete:table) [[ -f "\$state" ]] || exit 1; rm "\$state" ;;
+  delete:table) [[ -f "\$state" ]] || exit 1; [[ ! -e '$FIXTURE/nft-delete-fail' ]] || exit 1; rm "\$state" ;;
   *) exit 2 ;;
 esac
 EOF
@@ -353,6 +355,9 @@ EOF
   sudo "$FIXTURE/ops" upgrade-freeze check "$freeze_id" | grep -Fx $'state\tavailable' >/dev/null
   sudo "$FIXTURE/ops" upgrade-freeze activate "$freeze_id" | grep -Fx $'state\tactive' >/dev/null
   sudo "$FIXTURE/ops" upgrade-freeze status | grep -Fx $'state\tactive' >/dev/null
+  sudo rm -- "$FIXTURE/nft-table"
+  sudo env -u SUDO_USER "$FIXTURE/ops" upgrade-freeze-boot-guard
+  [[ -f "$FIXTURE/nft-table" ]] || { printf 'boot guard did not restore ingress freeze\n' >&2; exit 1; }
   sudo "$FIXTURE/ops" upgrade-freeze quiescence "$freeze_id" | grep -Fx $'state\tquiescent' >/dev/null
   sudo touch "$FIXTURE/quiescence-busy"
   if sudo "$FIXTURE/ops" upgrade-freeze quiescence "$freeze_id" >/dev/null 2>&1; then
@@ -460,6 +465,10 @@ EOF
     exit 1
   fi
   sudo "$FIXTURE/ops" runtime-recovery promote "$stage_id" "$stage_fingerprint" | grep -Fx $'state\tpromoted' >/dev/null
+  if sudo "$FIXTURE/ops" runtime-recovery cleanup "$stage_id" >/dev/null 2>&1; then
+    printf 'cleanup discarded unaccepted promoted recovery evidence\n' >&2
+    exit 1
+  fi
   sudo grep -Fxq restored-nextcloud "$FIXTURE/mount/nextcloud/data.txt"
   sudo grep -Fxq restored-database "$FIXTURE/mount/nextcloud_db/data.txt"
   sudo grep -Fxq restored-caddy-data "$FIXTURE/volumes/caddy-data/data.txt"
@@ -491,6 +500,15 @@ EOF
     exit 1
   fi
   sudo "$FIXTURE/ops" upgrade-freeze maintenance-off "$freeze_id" | grep -Fx $'state\tmaintenance-off' >/dev/null
+  sudo touch "$FIXTURE/nft-delete-fail"
+  if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
+    printf 'upgrade freeze ignored firewall deletion failure\n' >&2
+    exit 1
+  fi
+  sudo rm -- "$FIXTURE/nft-delete-fail"
+  sudo rm -- "$FIXTURE/nft-table"
+  sudo env -u SUDO_USER "$FIXTURE/ops" upgrade-freeze-boot-guard
+  [[ -f "$FIXTURE/nft-table" ]] || { printf 'boot guard did not restore interrupted release firewall\n' >&2; exit 1; }
   sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" | grep -Fx $'state\treleased' >/dev/null
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/active-images.env" "$FIXTURE/active-images.env"
   printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null

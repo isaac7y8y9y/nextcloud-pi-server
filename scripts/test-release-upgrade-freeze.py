@@ -2,8 +2,6 @@
 """Offline approval/release-order contract tests."""
 
 import importlib.util
-import json
-import os
 from pathlib import Path
 import tempfile
 from unittest import mock
@@ -15,33 +13,63 @@ spec.loader.exec_module(release)
 
 base = {"format": "upgrade-freeze-release-v1", "freeze_id": "20260926T000000Z-123",
         "freeze_table_sha256": "a" * 64, "timer_was_active": "yes",
-        "maintenance": "on", "actions": "maintenance-off,loopback-health,freeze-release,timer-restore"}
+        "actions": "maintenance-off,loopback-health,freeze-release,timer-restore"}
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     path = release.plan(root, base, 1000)
-    release.authorize(path, root, base, 1001)
+    assert release.authorize(path, root, base, 1001, "active") is False
+    assert release.authorize(path, root, base, 1002, "releasing") is True
     try:
-        release.authorize(path, root, base, 1002)
+        release.authorize(path, root, base, 1002, "active")
     except release.r.RecoveryError:
         pass
     else:
         raise AssertionError("consumed approval replayed")
     tampered = release.plan(root, base, 2000)
     try:
-        release.authorize(tampered, root, dict(base, timer_was_active="no"), 2001)
+        release.authorize(tampered, root, dict(base, timer_was_active="no"), 2001, "active")
     except release.r.RecoveryError:
         pass
     else:
         raise AssertionError("changed prior timer state accepted")
     try:
-        release.authorize(tampered, root, base, 2901)
+        release.authorize(tampered, root, base, 2901, "active")
     except release.r.RecoveryError:
         pass
     else:
         raise AssertionError("expired release approval accepted")
 
+class WrongLockTarget:
+    config = {"NEXTCLOUD_PI_SYSTEM_HOSTNAME": "pi.example.invalid", "NEXTCLOUD_PI_USER": "test",
+              "NEXTCLOUD_REMOTE_PROJECT_DIR": "/private/nextcloud-docker"}
+    def ssh(self, command):
+        if command == "hostname":
+            return "pi.example.invalid"
+        if command == "id -un":
+            return "test"
+        if command.startswith("systemctl is-active"):
+            return "inactive"
+        return ""
+    def ops(self, *args):
+        if args == ("upgrade-freeze", "status"):
+            return {"state": "active", "id": base["freeze_id"], "table_sha256": "a" * 64,
+                    "timer_was_active": "yes"}
+        if args == ("background-jobs", "state"):
+            return {"timer_active": "no"}
+        if args == ("active-images-state",):
+            return {"sha256": "a" * 64, "source_lock_sha256": "0" * 64}
+        raise AssertionError(args)
+
+with mock.patch.object(release.r, "remote_hash", return_value="a" * 64):
+    try:
+        release.evidence(WrongLockTarget())
+    except release.r.RecoveryError as error:
+        assert "source image lock differs" in str(error)
+    else:
+        raise AssertionError("release accepted source-lock/active-record mismatch")
+
 source = Path(__file__).with_name("release-upgrade-freeze.py").read_text()
-assert source.index('authorize(args.approval, root, base, now)') < source.index('target.ops("upgrade-freeze", "maintenance-off"')
+assert source.index('authorize(args.approval, root, base, now, phase)') < source.index('target.ops("upgrade-freeze", "maintenance-off"')
 assert source.index('r.run([str(HERE / "health-check.sh")') < source.index('target.ops("upgrade-freeze", "release"')
 assert source.index('target.ops("upgrade-freeze", "release"') < source.index('target.ops("upgrade-freeze", "status") != {"state": "absent"}')
 print("freeze release approval tests passed")

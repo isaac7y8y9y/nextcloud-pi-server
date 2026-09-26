@@ -35,12 +35,13 @@ def approval_root() -> Path:
     return root
 
 
-def evidence(target: r.Target) -> dict[str, object]:
+def evidence(target: r.Target, *, allow_releasing: bool = False) -> tuple[dict[str, object], str]:
     config = target.config
     if target.ssh("hostname") != config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"] or target.ssh("id -un") != config["NEXTCLOUD_PI_USER"]:
         r.reject("connected Pi identity differs")
     freeze = target.ops("upgrade-freeze", "status")
-    if freeze.get("state") != "active" or not r.IDENTIFIER.fullmatch(freeze.get("id", "")) or not r.HASH.fullmatch(freeze.get("table_sha256", "")):
+    phase = freeze.get("state", "")
+    if phase not in (("active", "releasing") if allow_releasing else ("active",)) or not r.IDENTIFIER.fullmatch(freeze.get("id", "")) or not r.HASH.fullmatch(freeze.get("table_sha256", "")):
         r.reject("protected ingress freeze is not active")
     if freeze.get("timer_was_active") not in ("yes", "no"):
         r.reject("prior timer state is unknown")
@@ -53,8 +54,11 @@ def evidence(target: r.Target) -> dict[str, object]:
     compose = r.remote_hash(target, project + "/docker-compose.yml")
     caddy = r.remote_hash(target, project + "/caddy/Caddyfile")
     active = target.ops("active-images-state")
-    if not r.HASH.fullmatch(active.get("sha256", "")):
+    if not r.HASH.fullmatch(active.get("sha256", "")) or not r.HASH.fullmatch(active.get("source_lock_sha256", "")):
         r.reject("active-image record is invalid")
+    local_lock = r.digest(r.ROOT / "config/image-lock.env")
+    if active["source_lock_sha256"] != local_lock:
+        r.reject("local source image lock differs from the active image record; retain ingress freeze")
     running = {}
     for name in ("nextcloud-docker-app-1", "nextcloud-docker-db-1", "nextcloud-docker-caddy-1"):
         parts = target.ssh("docker inspect " + r.q(name) + " --format '{{.Id}} {{.Image}} {{.State.Running}}'").split()
@@ -73,9 +77,9 @@ def evidence(target: r.Target) -> dict[str, object]:
             "freeze_id": freeze["id"], "freeze_table_sha256": freeze["table_sha256"],
             "timer_was_active": freeze["timer_was_active"],
             "compose_sha256": compose, "caddy_sha256": caddy,
-            "active_record_sha256": active["sha256"], "running": running, "maintenance": maintenance,
+            "active_record_sha256": active["sha256"], "source_lock_sha256": local_lock, "running": running,
             "actions": "maintenance-off,loopback-health,freeze-release,timer-restore",
-            "exclusions": "image-change,restore,prune,backup-deletion"}
+            "exclusions": "image-change,restore,prune,backup-deletion"}, phase
 
 
 def artifact_record(base: dict[str, object], created: int) -> dict[str, object]:
@@ -93,16 +97,21 @@ def plan(root: Path, base: dict[str, object], now: int) -> Path:
     return path
 
 
-def authorize(path: Path, root: Path, base: dict[str, object], now: int) -> None:
+def authorize(path: Path, root: Path, base: dict[str, object], now: int, phase: str) -> bool:
     if path.parent != root or not path.name.startswith(f"release-{base['freeze_id']}-"):
         r.reject("release approval path differs")
     record = json.loads(r.private_file(path))
     if not isinstance(record, dict) or not isinstance(record.get("created"), int):
         r.reject("release approval schema is invalid")
     expected = artifact_record(base, record["created"])
+    consumed = dict(expected, state="consumed")
+    marker = root / f"used-release-{base['freeze_id']}-{record['created']}"
+    if phase == "releasing":
+        if record != consumed or r.private_file(marker) != (expected["fingerprint"] + "\n").encode():
+            r.reject("interrupted release approval differs")
+        return True
     if record != expected or not expected["created"] <= now <= expected["expires"]:
         r.reject("release approval expired or evidence changed")
-    marker = root / f"used-release-{base['freeze_id']}-{record['created']}"
     fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as stream:
         stream.write((record["fingerprint"] + "\n").encode())
@@ -112,6 +121,7 @@ def authorize(path: Path, root: Path, base: dict[str, object], now: int) -> None
     with os.fdopen(fd, "wb") as stream:
         stream.write(r.canonical(consumed) + b"\n")
     os.replace(temporary, path)
+    return False
 
 
 def main() -> int:
@@ -130,7 +140,7 @@ def main() -> int:
         remote_now = target.ssh("date -u +%s")
         if not remote_now.isdecimal() or abs(now - int(remote_now)) > 60:
             r.reject("local and Pi clocks differ by more than 60 seconds")
-        base = evidence(target)
+        base, phase = evidence(target, allow_releasing=args.apply)
         if args.caddyfile.is_symlink() or not args.caddyfile.is_file() or r.digest(args.caddyfile) != base["caddy_sha256"]:
             r.reject("local Caddyfile differs from the live configuration")
         root = approval_root()
@@ -138,11 +148,15 @@ def main() -> int:
             path = plan(root, base, now)
             print(f"Redacted release plan: freeze={base['freeze_id']}\nApproval artifact: {path}")
             return 0
-        authorize(args.approval, root, base, now)
-        if base["maintenance"] == "on":
+        retry = authorize(args.approval, root, base, now, phase)
+        status = target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status")
+        if not retry and "maintenance: true" in status:
             if target.ops("upgrade-freeze", "maintenance-off", str(base["freeze_id"])) != {"state": "maintenance-off", "id": base["freeze_id"]}:
                 r.reject("protected maintenance-off result differs")
-        r.run([str(HERE / "health-check.sh"), "--caddyfile", str(args.caddyfile)], timeout=300)
+        elif "maintenance: false" not in status:
+            r.reject("Nextcloud maintenance state is unknown")
+        if not retry:
+            r.run([str(HERE / "health-check.sh"), "--caddyfile", str(args.caddyfile)], timeout=300)
         if target.ops("upgrade-freeze", "release", str(base["freeze_id"])) != {"state": "released", "id": base["freeze_id"]}:
             r.reject("protected freeze release result differs")
         if target.ops("upgrade-freeze", "status") != {"state": "absent"}:

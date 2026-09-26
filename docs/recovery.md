@@ -108,6 +108,9 @@ scripts/restore-live-runtime.py --plan "$STAGE_ID" "$CANDIDATE" \
 scripts/restore-live-runtime.py --apply "$STAGE_ID" "$CANDIDATE" \
   "$SOURCE_RENDERED" "$CONFIG_BACKUP" "$HELD_RUNTIME_BACKUP" "$PRIOR_IMAGE_RECOVERY" \
   --approval "$RESTORE_APPROVAL"
+scripts/restore-live-runtime.py --resume "$STAGE_ID" "$CANDIDATE" \
+  "$SOURCE_RENDERED" "$CONFIG_BACKUP" "$HELD_RUNTIME_BACKUP" "$PRIOR_IMAGE_RECOVERY" \
+  --approval "$RESTORE_APPROVAL"
 ```
 
 `--plan` is only available after the root-owned runtime boundary and while
@@ -128,8 +131,12 @@ loopback health before marking the stage recovered. It never releases the
 ingress freeze; that requires a separate approved gate.
 
 On any interruption, preserve the stage ID, root recovery state, failed-state
-directories, and ingress freeze. Do not retry the consumed artifact, remove
-staging paths, or reopen LAN access. Diagnose the exact phase and obtain a new
+directories, and ingress freeze. If the protected recovery status is
+`promoting` or `promoted`, the same consumed approval can be used only with
+`--resume`: it rechecks local recovery material, stage/freeze identity, and
+the prior configuration, completes any interrupted directory moves, then
+repeats health and recovered-state checks. Do not retry `--apply`, remove
+staging paths, or reopen LAN access. Diagnose other phases and obtain a new
 reviewed recovery decision. This workflow must not be used on the production
 Pi until its operator tests, live ingress/drain proof, reviews, and bundle
 installation gates have passed.

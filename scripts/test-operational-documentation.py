@@ -43,6 +43,7 @@ EXPECTED_PR_COMMANDS = (
     "bash scripts/test-image-readiness-lifecycle.sh",
     "bash scripts/test-image-readiness-e2e.sh",
     "bash scripts/test-runtime-recovery-regression.sh",
+    "bash scripts/test-recovery-promotion.sh",
     "bash scripts/test-held-runtime-backup.sh",
     "bash scripts/test-ssh-keepalive.sh",
     "bash scripts/test-deploy-config.sh",
@@ -164,8 +165,8 @@ def verify_testing_governance() -> None:
         raise AssertionError(f"runner exposes PR-transitive scripts: {sorted(transitive & set(counts))}")
     if operator_only & set(counts):
         raise AssertionError(f"runner exposes operator-only scripts: {sorted(operator_only & set(counts))}")
-    if len(direct) != 38 or len(transitive) != 1 or len(operator_only) != 3:
-        raise AssertionError("inventory tier counts differ from the approved 38/1/3 split")
+    if len(direct) != 39 or len(transitive) != 1 or len(operator_only) != 3:
+        raise AssertionError("inventory tier counts differ from the approved 39/1/3 split")
 
     for value in (
         "scripts/run-tests.sh pr",

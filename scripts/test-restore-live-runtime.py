@@ -21,7 +21,8 @@ SPEC.loader.exec_module(restore)
 class FakeTarget:
     def __init__(self, mount: str, project: str, old: dict[str, str], *, fail_promote: bool = False,
                  fail_import: bool = False):
-        self.config = {"NEXTCLOUD_STORAGE_MOUNT": mount, "NEXTCLOUD_REMOTE_PROJECT_DIR": project}
+        self.config = {"NEXTCLOUD_STORAGE_MOUNT": mount, "NEXTCLOUD_REMOTE_PROJECT_DIR": project,
+                       "NEXTCLOUD_PI_SYSTEM_HOSTNAME": "pi.example.invalid", "NEXTCLOUD_PI_USER": "test"}
         self.login = "test@pi.example.invalid"
         self.old = old
         self.fail_promote = fail_promote
@@ -45,6 +46,14 @@ class FakeTarget:
         if command.startswith("sha256sum"):
             name = command.rsplit("/", 1)[-1]
             return restore.digest(self.files[name]) + "  staged-file"
+        if "occ status" in command:
+            return "  - maintenance: false"
+        if command == "hostname":
+            return "pi.example.invalid"
+        if command == "id -un":
+            return "test"
+        if command.startswith("systemctl is-active nextcloud.service"):
+            return "inactive"
         return ""
 
     def ops(self, *args: str, **_kwargs: object) -> dict[str, str]:
@@ -53,6 +62,20 @@ class FakeTarget:
             return {"state": "prepared", "root": self.config["NEXTCLOUD_STORAGE_MOUNT"] + "/.recovery-" + args[2]}
         if args[:2] == ("runtime-recovery", "promote") and self.fail_promote:
             raise restore.RecoveryError("injected promotion failure")
+        if args[:2] == ("active-record", "presence"):
+            return {"state": "present"}
+        if args[:2] == ("active-record", "status"):
+            return {"state": "applied"}
+        if args[:1] == ("active-images-state",):
+            return {"sha256": self.source_record}
+        if args[:2] == ("upgrade-stage", "status"):
+            return {"phase": "runtime-may-have-changed", "fingerprint": "f" * 64}
+        if args[:2] == ("upgrade-freeze", "status"):
+            return {"state": "active", "id": "20260926T000000Z-999", "table_sha256": "b" * 64}
+        if args[:2] == ("background-jobs", "state"):
+            return {"timer_active": "no"}
+        if args[:2] == ("runtime-recovery", "status"):
+            return {"state": "promoting", "id": args[2]}
         return {"state": "ok"}
 
 
@@ -103,6 +126,8 @@ class ApprovalTests(unittest.TestCase):
                 "evidence": {"old_tags": old_tags, "old_ids": old_ids,
                              "sql_sha256": restore.digest(runtime / "database/nextcloud.sql"),
                              "source_compose": restore.digest(config / "compose/docker-compose.yml"),
+                             "candidate_compose": restore.digest(config / "compose/docker-compose.yml"),
+                             "source_record": "a" * 64,
                              "source_caddy": restore.digest(config / "caddy/Caddyfile")}}
         target = FakeTarget("/mnt/storage", "/mnt/storage/nextcloud-docker",
                             dict(zip(old_tags.values(), old_ids.values())),
@@ -110,6 +135,7 @@ class ApprovalTests(unittest.TestCase):
         target.files = {"docker-compose.yml": config / "compose/docker-compose.yml",
                         "Caddyfile": config / "caddy/Caddyfile",
                         "atomic-transaction.sh": restore.ROOT / "scripts/lib/atomic-transaction.sh"}
+        target.source_record = "a" * 64
         return target, base, source, config, runtime, images
 
     def test_promotion_failure_retains_freeze_and_failed_state(self) -> None:
@@ -143,6 +169,26 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(lifecycle[-1], "ops upgrade-stage recovered " + self.stage_id + " " + "f" * 64)
         self.assertFalse(any("upgrade-freeze release" in call or "runtime-recovery cleanup" in call
                              for call in target.calls))
+
+    def test_consumed_approval_can_resume_partial_promotion(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        base.update(host="pi.example.invalid", freeze_id="20260926T000000Z-999",
+                    freeze_table_sha256="b" * 64)
+        base["evidence"]["env_sha256"] = "e" * 64
+        artifact = restore.plan(self.root, base, 1000)
+        restore.consume(artifact, self.root, base, 1001)
+        consumed = restore.consumed_for_resume(artifact, self.root, self.stage_id)
+        def remote_hash(_target, path):
+            name = path.rsplit("/", 1)[-1]
+            if name == ".env":
+                return "e" * 64
+            return restore.digest(target.files[name])
+        with mock.patch.object(restore, "verify_local", return_value=base["evidence"]), \
+             mock.patch.object(restore, "remote_hash", side_effect=remote_hash), \
+             mock.patch.object(restore, "run", return_value=""):
+            restore.resume(target, consumed, self.root / "candidate", source, config, runtime, images)
+        self.assertTrue(any(call.startswith("ops runtime-recovery promote") for call in target.calls))
+        self.assertFalse(any("upgrade-freeze release" in call for call in target.calls))
 
 
 if __name__ == "__main__":

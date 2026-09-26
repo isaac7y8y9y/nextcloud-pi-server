@@ -47,6 +47,12 @@ payloads, or raw logs. Before any mutation:
 Activate exactly one protected freeze. The dispatcher must pause the timer,
 wait for an active background-job service to finish, enable maintenance mode,
 install the bound `inet` prerouting rule, and report the active rule hash.
+The reviewed bundle also installs a Docker `ExecStartPre` boot guard: if the
+Pi reboots with an active freeze, it must reinstall and verify the same rule
+before Docker can start Caddy; an unresolved phase or changed rule prevents
+Docker startup. The timer and job service have a marker-based condition so
+they cannot resume work while the freeze is held. Reboot safety still needs
+an observed disposable or approved Pi test before production reliance.
 Immediately verify the timer is stopped and the rule/status hash agrees.
 The first failure leaves the freeze in place; do not bypass it with manual
 firewall edits.
@@ -77,7 +83,10 @@ denial proof, and use the protected single-use release. The maintenance-off
 action rechecks quiescence and refuses unresolved fetch/stage/active-record
 state. The draft `scripts/release-upgrade-freeze.py --plan/--apply` operator
 path binds the active freeze, prior timer state, live Compose/Caddy and
-container identities to a private, single-use 15-minute approval. It turns
+container identities, and the tracked source image lock to a private,
+single-use 15-minute approval. A newly accepted candidate cannot release
+until its candidate lock has become the reviewed local source lock; do not
+silently edit that lock during activation. The driver turns
 maintenance off only if still on, checks Pi loopback health, then asks the
 protected dispatcher to release and verifies the rule is absent and the
 timer has its prior state. It does **not** create the LAN denial proof or

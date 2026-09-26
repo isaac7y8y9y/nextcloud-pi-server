@@ -328,8 +328,118 @@ def consume(artifact: Path, root: Path, base: dict[str, object], now: int) -> di
     return consumed
 
 
+def consumed_for_resume(artifact: Path, root: Path, stage_id: str) -> dict[str, object]:
+    if artifact.parent != root or not artifact.name.startswith(f"restore-{stage_id}-"):
+        reject("restore resume approval path differs")
+    record = json.loads(private_file(artifact))
+    if not isinstance(record, dict) or record.get("state") != "consumed" or record.get("stage_id") != stage_id:
+        reject("restore resume approval is not consumed for this stage")
+    created = record.get("created")
+    if not isinstance(created, int) or record.get("expires") != created + 900:
+        reject("restore resume approval clock differs")
+    original = dict(record, state="unused")
+    original.pop("fingerprint", None)
+    expected = fingerprint(original)
+    if record.get("fingerprint") != expected:
+        reject("restore resume approval fingerprint differs")
+    marker = root / f"used-{stage_id}-{created}"
+    if private_file(marker) != (expected + "\n").encode():
+        reject("restore resume consumption marker differs")
+    return record
+
+
+def resume(target: Target, base: dict[str, object], candidate: Path, source: Path,
+           config_backup: Path, runtime: Path, images: Path) -> None:
+    stage_id = str(base["stage_id"])
+    local = verify_local(candidate, source, config_backup, runtime, images, target.config)
+    if local != base.get("evidence") or base.get("host") != target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"]:
+        reject("restore resume material differs from consumed approval")
+    if target.ssh("hostname") != base["host"] or target.ssh("id -un") != target.config["NEXTCLOUD_PI_USER"]:
+        reject("restore resume target identity differs")
+    freeze = target.ops("upgrade-freeze", "status")
+    stage = target.ops("upgrade-stage", "status", stage_id)
+    if (freeze.get("state") != "active" or freeze.get("id") != base.get("freeze_id") or
+            freeze.get("table_sha256") != base.get("freeze_table_sha256") or
+            stage.get("phase") != "runtime-may-have-changed" or
+            stage.get("fingerprint") != base.get("stage_fingerprint")):
+        reject("restore resume stage or ingress freeze differs")
+    if target.ops("background-jobs", "state").get("timer_active") != "no":
+        reject("background-job timer resumed")
+    if remote_hash(target, target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] + "/.env") != local["env_sha256"]:
+        reject("database environment changed during restore")
+    recovery = target.ops("runtime-recovery", "status", stage_id)
+    if recovery.get("state") not in ("promoting", "promoted") or recovery.get("id") != stage_id:
+        reject("runtime recovery has not reached the promotion boundary")
+    service = target.ssh("systemctl is-active nextcloud.service 2>/dev/null || true")
+    if service == "active":
+        target.ops("service", "stop")
+    elif service not in ("inactive", "failed"):
+        reject("Nextcloud service state is unknown during restore resume")
+    target.ops("runtime-recovery", "promote", stage_id, str(base["stage_fingerprint"]), timeout=3600)
+    finish_promoted(target, base, config_backup)
+
+
 def checked(target: Target, command: str, *, input_file: Path | None = None, timeout: int = 120) -> None:
     target.ssh(command, input_file=input_file, timeout=timeout)
+
+
+def finish_promoted(target: Target, base: dict[str, object], config_backup: Path) -> None:
+    stage_id = str(base["stage_id"])
+    project = target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"]
+    local = base["evidence"]
+    assert isinstance(local, dict)
+    stage = project + "/.restore-stage-" + stage_id
+    for name, expected in (("docker-compose.yml", local["source_compose"]),
+                           ("Caddyfile", local["source_caddy"]),
+                           ("atomic-transaction.sh", digest(ROOT / "scripts/lib/atomic-transaction.sh"))):
+        if remote_hash(target, stage + "/" + name) != expected:
+            reject("staged prior configuration differs during restore resume")
+    for source_name, destination, old_hash, new_hash in (
+        ("docker-compose.yml", project + "/docker-compose.yml", local["candidate_compose"], local["source_compose"]),
+        ("Caddyfile", project + "/caddy/Caddyfile", local["source_caddy"], local["source_caddy"]),
+    ):
+        current = remote_hash(target, destination)
+        if current not in (old_hash, new_hash):
+            reject("live configuration changed during restore")
+        if current != new_hash:
+            checked(target, "set -eu; . " + q(stage + "/atomic-transaction.sh") +
+                    "; atomic_replace_preserve " + q(stage + "/" + source_name) + " " +
+                    q(destination) + " 0644")
+        if remote_hash(target, destination) != new_hash:
+            reject("prior configuration did not restore")
+    presence = target.ops("active-record", "presence", stage_id)
+    if presence.get("state") == "present":
+        active = target.ops("active-record", "status", stage_id)
+        if active.get("state") not in ("applied", "rolledback"):
+            reject("active-record restore phase differs")
+        target.ops("active-record", "rollback", stage_id)
+        target.ops("active-record", "commit", stage_id)
+    elif presence.get("state") != "absent":
+        reject("active-record restore presence differs")
+    if target.ops("active-images-state").get("sha256") != local["source_record"]:
+        reject("prior active record was not restored")
+    target.ops("service", "start", timeout=600)
+    maintenance_off = False
+    for _ in range(12):
+        try:
+            status = target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status")
+            if "maintenance: true" in status:
+                checked(target, "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ maintenance:mode --off >/dev/null", timeout=30)
+            elif "maintenance: false" not in status:
+                reject("restored Nextcloud maintenance state is unknown")
+            maintenance_off = True
+            break
+        except RecoveryError:
+            time.sleep(5)
+    if not maintenance_off:
+        reject("restored Nextcloud did not leave maintenance mode")
+    checked(target, "! docker port nextcloud-docker-app-1 80/tcp >/dev/null 2>&1")
+    run([str(ROOT / "scripts/health-check.sh"), "--caddyfile", str(config_backup / "caddy/Caddyfile")], timeout=300)
+    stage_state = target.ops("upgrade-stage", "status", stage_id)
+    if stage_state.get("phase") == "runtime-may-have-changed":
+        target.ops("upgrade-stage", "recovered", stage_id, str(base["stage_fingerprint"]))
+    elif stage_state.get("phase") != "recovered":
+        reject("upgrade stage recovery phase differs")
 
 
 def apply(target: Target, base: dict[str, object], source: Path,
@@ -417,30 +527,7 @@ def apply(target: Target, base: dict[str, object], source: Path,
 
     target.ops("service", "stop")
     target.ops("runtime-recovery", "promote", stage_id, str(base["stage_fingerprint"]), timeout=3600)
-    checked(target, "set -eu; . " + q(stage + "/atomic-transaction.sh") +
-            "; atomic_replace_preserve " + q(stage + "/docker-compose.yml") + " " +
-            q(project + "/docker-compose.yml") + " 0644; atomic_replace_preserve " +
-            q(stage + "/Caddyfile") + " " + q(project + "/caddy/Caddyfile") + " 0644")
-    target.ops("active-record", "rollback", stage_id)
-    target.ops("active-record", "commit", stage_id)
-    target.ops("service", "start", timeout=600)
-    maintenance_off = False
-    for _ in range(12):
-        try:
-            checked(target, "docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ maintenance:mode --off >/dev/null", timeout=30)
-            maintenance_off = True
-            break
-        except RecoveryError:
-            time.sleep(5)
-    if not maintenance_off:
-        reject("restored Nextcloud did not leave maintenance mode")
-    if remote_hash(target, project + "/docker-compose.yml") != local["source_compose"]:
-        reject("prior Compose was not restored")
-    if remote_hash(target, project + "/caddy/Caddyfile") != local["source_caddy"]:
-        reject("prior Caddyfile was not restored")
-    checked(target, "! docker port nextcloud-docker-app-1 80/tcp >/dev/null 2>&1")
-    run([str(ROOT / "scripts/health-check.sh"), "--caddyfile", str(config_backup / "caddy/Caddyfile")], timeout=300)
-    target.ops("upgrade-stage", "recovered", stage_id, str(base["stage_fingerprint"]))
+    finish_promoted(target, base, config_backup)
 
 
 def main() -> int:
@@ -448,6 +535,7 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--plan", action="store_true")
     mode.add_argument("--apply", action="store_true")
+    mode.add_argument("--resume", action="store_true")
     parser.add_argument("stage_id")
     parser.add_argument("candidate", type=Path)
     parser.add_argument("source_rendered", type=Path)
@@ -456,17 +544,23 @@ def main() -> int:
     parser.add_argument("prior_image_recovery", type=Path)
     parser.add_argument("--approval", type=Path)
     args = parser.parse_args()
-    if args.apply != (args.approval is not None):
-        parser.error("--apply requires --approval, and --plan does not accept it")
+    if (args.apply or args.resume) != (args.approval is not None):
+        parser.error("--apply/--resume require --approval, and --plan does not accept it")
     try:
         target = Target(deployment_config())
         remote_time = target.ssh("date -u +%s")
         now = int(time.time())
         if not remote_time.isdecimal() or abs(now - int(remote_time)) > 60:
             reject("local and Pi clocks differ by more than 60 seconds")
+        root = private_artifact_root()
+        if args.resume:
+            base = consumed_for_resume(args.approval, root, args.stage_id)
+            resume(target, base, args.candidate, args.source_rendered,
+                   args.config_backup, args.held_runtime_backup, args.prior_image_recovery)
+            print("Interrupted full-runtime promotion resumed and verified; ingress freeze remains held.")
+            return 0
         base = evidence(target, args.stage_id, args.candidate, args.source_rendered,
                         args.config_backup, args.held_runtime_backup, args.prior_image_recovery)
-        root = private_artifact_root()
         if args.plan:
             artifact = plan(root, base, now)
             print(f"Redacted full-runtime restore plan: stage={args.stage_id} host={base['host']} freeze-held=yes")
