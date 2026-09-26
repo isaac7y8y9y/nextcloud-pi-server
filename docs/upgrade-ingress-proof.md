@@ -50,8 +50,10 @@ install the bound `inet` prerouting rule, and report the active rule hash.
 The reviewed bundle also installs a Docker `ExecStartPre` boot guard: if the
 Pi reboots with an active freeze, it must reinstall and verify the same rule
 before Docker can start Caddy; an unresolved phase or changed rule prevents
-Docker startup. The timer and job service have a marker-based condition so
-they cannot resume work while the freeze is held. Reboot safety still needs
+Docker startup. The timer has a `timer-held` condition and the job service has
+a separate `current.tsv` condition; release removes the timer hold before
+starting the timer, but keeps the job-service guard until final release.
+They must not run work while the freeze is held. Reboot safety still needs
 an observed disposable or approved Pi test before production reliance.
 Immediately verify the timer is stopped and the rule/status hash agrees.
 The first failure leaves the freeze in place; do not bypass it with manual

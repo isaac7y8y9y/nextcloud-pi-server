@@ -46,8 +46,9 @@ def evidence(target: r.Target, *, allow_releasing: bool = False) -> tuple[dict[s
         r.reject("protected ingress freeze is not active")
     if freeze.get("timer_was_active") not in ("yes", "no"):
         r.reject("prior timer state is unknown")
-    if target.ops("background-jobs", "state").get("timer_active") != "no":
-        r.reject("background-job timer is active")
+    timer_active = target.ops("background-jobs", "state").get("timer_active")
+    if timer_active != "no" and not (phase == "releasing" and freeze["timer_was_active"] == "yes" and timer_active == "yes"):
+        r.reject("background-job timer is unexpectedly active")
     service = target.ssh("systemctl is-active nextcloud-background-jobs.service 2>/dev/null || true")
     if service not in ("inactive", "failed", "unknown"):
         r.reject("background-job service is not inactive")

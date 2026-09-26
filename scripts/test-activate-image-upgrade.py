@@ -229,6 +229,13 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(target.phase, "runtime-may-have-changed")
         self.assertFalse(any("upgrade-stage accept" in call or "upgrade-freeze release" in call for call in target.calls))
 
+    def test_database_stage_refuses_to_start_without_clean_cutover(self) -> None:
+        target = FakeTarget()
+        base = dict(self.base, target="db", tag="mariadb:11.4.13")
+        with self.assertRaisesRegex(a.r.RecoveryError, "clean-directory cutover"):
+            a.stage_apply(target, base, {"fingerprint": "f" * 64}, self.candidate, self.source)
+        self.assertEqual(target.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

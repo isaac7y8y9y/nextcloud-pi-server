@@ -75,8 +75,17 @@ source runtime, then tags the candidate, installs its active record and Compose,
 records the root boundary, and restarts the stack. A successful stage stops
 with maintenance mode and ingress freeze held. It does not migrate, accept,
 release the freeze, prune images, or alter the repository source lock.
+Database-image activation is currently refused by both the driver and the
+root-owned stage consumer. The 11.8-to-11.4 cutover needs a separate clean
+11.4 data directory and verified logical import; changing only the image tag
+must never start 11.4 against the existing 11.8 files.
 
-After separate application/migration and health review, `--plan-accept` and
+After separate application/migration, use `--maintenance-off` with the consumed
+`--stage-approval` and the same five directories. This stage-bound action
+rechecks the freeze, candidate configuration and running image IDs, drains
+work, turns maintenance mode off, and checks loopback health while ingress
+remains blocked. It can be retried if health checking fails. Then
+`--plan-accept` and
 `--accept` use `--stage-approval` (the consumed stage artifact) and the same
 five directories; `--accept` also requires its newly printed `--approval`.
 Acceptance rechecks the protected stage and candidate image IDs, maintenance
@@ -99,6 +108,12 @@ verified one-image candidate. The source configuration backup must include a
 protected `.env` matching the unchanged live project file. Planning is
 read-only on the Pi and creates a private, 15-minute approval artifact outside
 Git; applying consumes it before the first mutation.
+If an interrupted restore is still in the protected `prepared` phase,
+`--resume` checks the consumed approval and current stage/freeze, removes only
+the identity-bound temporary import container, resets the isolated staged
+datasets, and restarts the restore. It never discards the live or preserved
+failed runtime. Promotion-phase resumes continue from the guarded directory
+moves. Both paths retain the ingress freeze until verified recovery.
 
 The draft interface is:
 

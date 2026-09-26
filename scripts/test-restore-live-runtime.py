@@ -20,13 +20,14 @@ SPEC.loader.exec_module(restore)
 
 class FakeTarget:
     def __init__(self, mount: str, project: str, old: dict[str, str], *, fail_promote: bool = False,
-                 fail_import: bool = False):
+                 fail_import: bool = False, recovery_phase: str = "promoting"):
         self.config = {"NEXTCLOUD_STORAGE_MOUNT": mount, "NEXTCLOUD_REMOTE_PROJECT_DIR": project,
                        "NEXTCLOUD_PI_SYSTEM_HOSTNAME": "pi.example.invalid", "NEXTCLOUD_PI_USER": "test"}
         self.login = "test@pi.example.invalid"
         self.old = old
         self.fail_promote = fail_promote
         self.fail_import = fail_import
+        self.recovery_phase = recovery_phase
         self.calls: list[str] = []
 
     def ssh(self, command: str, **_kwargs: object) -> str:
@@ -75,7 +76,9 @@ class FakeTarget:
         if args[:2] == ("background-jobs", "state"):
             return {"timer_active": "no"}
         if args[:2] == ("runtime-recovery", "status"):
-            return {"state": "promoting", "id": args[2]}
+            return {"state": self.recovery_phase, "id": args[2]}
+        if args[:2] == ("runtime-recovery", "reset-prepared"):
+            return {"state": "prepared", "id": args[2], "root": self.config["NEXTCLOUD_STORAGE_MOUNT"] + "/.recovery-" + args[2]}
         return {"state": "ok"}
 
 
@@ -173,7 +176,8 @@ class ApprovalTests(unittest.TestCase):
     def test_consumed_approval_can_resume_partial_promotion(self) -> None:
         target, base, source, config, runtime, images = self.fixture()
         base.update(host="pi.example.invalid", freeze_id="20260926T000000Z-999",
-                    freeze_table_sha256="b" * 64)
+                    freeze_table_sha256="b" * 64, project=target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"],
+                    mount=target.config["NEXTCLOUD_STORAGE_MOUNT"])
         base["evidence"]["env_sha256"] = "e" * 64
         artifact = restore.plan(self.root, base, 1000)
         restore.consume(artifact, self.root, base, 1001)
@@ -189,6 +193,42 @@ class ApprovalTests(unittest.TestCase):
             restore.resume(target, consumed, self.root / "candidate", source, config, runtime, images)
         self.assertTrue(any(call.startswith("ops runtime-recovery promote") for call in target.calls))
         self.assertFalse(any("upgrade-freeze release" in call for call in target.calls))
+
+    def test_consumed_approval_resets_prepared_restore_before_retry(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        target.recovery_phase = "prepared"
+        base.update(host="pi.example.invalid", freeze_id="20260926T000000Z-999",
+                    freeze_table_sha256="b" * 64, project=target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"],
+                    mount=target.config["NEXTCLOUD_STORAGE_MOUNT"])
+        base["evidence"].update(env_sha256="e" * 64, candidate_record="a" * 64)
+        artifact = restore.plan(self.root, base, 1000)
+        consumed = restore.consume(artifact, self.root, base, 1001)
+        def remote_hash(_target, path):
+            name = path.rsplit("/", 1)[-1]
+            return "e" * 64 if name == ".env" else restore.digest(target.files[name])
+        with mock.patch.object(restore, "verify_local", return_value=base["evidence"]), \
+             mock.patch.object(restore, "remote_hash", side_effect=remote_hash), \
+             mock.patch.object(restore, "reset_staged_database") as reset_db, \
+             mock.patch.object(restore, "run", return_value=""):
+            restore.resume(target, consumed, self.root / "candidate", source, config, runtime, images)
+        reset_db.assert_called_once_with(target, self.stage_id)
+        reset_call = "ops runtime-recovery reset-prepared " + self.stage_id + " " + "f" * 64
+        self.assertIn(reset_call, target.calls)
+        self.assertLess(target.calls.index(reset_call), next(i for i, call in enumerate(target.calls) if call.startswith("ops runtime-recovery restore")))
+        self.assertTrue(any("test -d" in call and ".restore-stage-" in call for call in target.calls))
+        self.assertFalse(any("upgrade-freeze release" in call for call in target.calls))
+
+    def test_prepared_retry_only_removes_bound_temporary_database(self) -> None:
+        target, _, _, _, _, _ = self.fixture()
+        target.ssh = mock.Mock(return_value="other-stage /unexpected/mariadb-data")
+        with self.assertRaisesRegex(restore.RecoveryError, "identity differs"):
+            restore.reset_staged_database(target, self.stage_id)
+        self.assertEqual(target.ssh.call_count, 1)
+        target.ssh.reset_mock(return_value=True)
+        target.ssh.return_value = self.stage_id + " /mnt/storage/.recovery-" + self.stage_id + "/mariadb-data"
+        restore.reset_staged_database(target, self.stage_id)
+        self.assertEqual(target.ssh.call_count, 2)
+        self.assertIn("docker rm -f nextcloud-restore-db-", target.ssh.call_args.args[0])
 
 
 if __name__ == "__main__":

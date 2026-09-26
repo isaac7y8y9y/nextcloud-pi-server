@@ -22,6 +22,8 @@ grep -Fq 'cmd_upgrade_freeze_quiescence()' "$HELPER"
 grep -Fq 'cmd_upgrade_freeze_boot_guard()' "$HELPER"
 grep -Fq 'ExecStartPre=/usr/local/libexec/nextcloud-pi-ops upgrade-freeze-boot-guard' "$(dirname "$(dirname "$HELPER")")/systemd/docker.service.d/nextcloud-storage.conf"
 grep -Fq 'cmd_upgrade_freeze_maintenance_off()' "$HELPER"
+grep -Fq 'ConditionPathExists=!/var/lib/nextcloud-pi-ops/upgrade-freeze/timer-held' "$(dirname "$(dirname "$HELPER")")/systemd/nextcloud-background-jobs.timer"
+grep -Fq 'ConditionPathExists=!/var/lib/nextcloud-pi-ops/upgrade-freeze/current.tsv' "$(dirname "$(dirname "$HELPER")")/systemd/nextcloud-background-jobs.service"
 grep -Fq 'cmd_upgrade_fetch_consume()' "$HELPER"
 grep -Fq 'cmd_upgrade_fetch_complete()' "$HELPER"
 grep -Fq 'cmd_upgrade_stage_boundary()' "$HELPER"
@@ -189,6 +191,10 @@ if [[ "\${1:-}:\${2:-}" == volume:inspect ]]; then
   esac
 elif [[ "\${1:-}" == --host && "\${3:-}" == info ]]; then
   exit 0
+elif [[ "\${1:-}" == info ]]; then
+  exit 0
+elif [[ "\${1:-}:\${2:-}" == container:inspect ]]; then
+  exit 1
 elif [[ "\${1:-}" == --host && "\${3:-}:\${4:-}" == ps:-aq ]]; then
   exit 0
 elif [[ "\${1:-}:\${2:-}" == port:nextcloud-docker-caddy-1 ]]; then
@@ -224,7 +230,10 @@ case "\${1:-}" in
   start|restart)
     [[ "\${2:-}" != nextcloud-pi-drill-* ]] || exit 1
     [[ ! -e '$FIXTURE/systemctl-fail' ]] || exit 1
-    if [[ "\${2:-}" == nextcloud-background-jobs.timer ]]; then printf 'active\n' >'$FIXTURE/timer-state'; else printf 'active\n' >"\$state"; fi
+    if [[ "\${2:-}" == nextcloud-background-jobs.timer ]]; then
+      [[ ! -e '$FIXTURE/state/upgrade-freeze/timer-held' ]] || exit 1
+      printf 'active\n' >'$FIXTURE/timer-state'
+    else printf 'active\n' >"\$state"; fi
     ;;
   stop) if [[ "\${2:-}" == nextcloud-background-jobs.timer ]]; then printf 'inactive\n' >'$FIXTURE/timer-state'; else printf 'inactive\n' >"\$state"; fi ;;
   is-active)
@@ -354,6 +363,7 @@ EOF
   freeze_id=20260910T000000Z-109
   sudo "$FIXTURE/ops" upgrade-freeze check "$freeze_id" | grep -Fx $'state\tavailable' >/dev/null
   sudo "$FIXTURE/ops" upgrade-freeze activate "$freeze_id" | grep -Fx $'state\tactive' >/dev/null
+  sudo test -f "$FIXTURE/state/upgrade-freeze/timer-held"
   sudo "$FIXTURE/ops" upgrade-freeze status | grep -Fx $'state\tactive' >/dev/null
   sudo rm -- "$FIXTURE/nft-table"
   sudo env -u SUDO_USER "$FIXTURE/ops" upgrade-freeze-boot-guard
@@ -449,6 +459,16 @@ EOF
     archive="$SOURCE_DIR/restore-$dataset.tar"
     cat "$archive" | sudo "$FIXTURE/ops" runtime-recovery restore "$stage_id" "$dataset" "$(sha256sum "$archive" | awk '{print $1}')" "$(wc -c <"$archive" | tr -d '[:space:]')" | grep -Fx $'state\trestored' >/dev/null
   done
+  if sudo "$FIXTURE/ops" runtime-recovery reset-prepared "$stage_id" "$(printf '%064d' 6)" >/dev/null 2>&1; then
+    printf 'prepared recovery reset accepted wrong stage fingerprint\n' >&2
+    exit 1
+  fi
+  sudo "$FIXTURE/ops" runtime-recovery reset-prepared "$stage_id" "$stage_fingerprint" | grep -Fx $'state\tprepared' >/dev/null
+  sudo test ! -e "$recovery_state/nextcloud.complete" || { printf 'prepared recovery reset kept stale archive attestation\n' >&2; exit 1; }
+  for dataset in nextcloud caddy-data caddy-config; do
+    archive="$SOURCE_DIR/restore-$dataset.tar"
+    cat "$archive" | sudo "$FIXTURE/ops" runtime-recovery restore "$stage_id" "$dataset" "$(sha256sum "$archive" | awk '{print $1}')" "$(wc -c <"$archive" | tr -d '[:space:]')" | grep -Fx $'state\trestored' >/dev/null
+  done
   printf 'restored-database\n' | sudo tee "$recovery_root/mariadb-data/data.txt" >/dev/null
   sudo "$FIXTURE/ops" runtime-recovery attest-database "$stage_id" "$(printf '%064d' 5)" 169 1291 15 | grep -Fx $'state\tattested' >/dev/null
   if sudo "$FIXTURE/ops" runtime-recovery attest-database "$stage_id" "$(printf '%064d' 5)" 169 1291 15 >/dev/null 2>&1; then
@@ -486,14 +506,28 @@ EOF
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/candidate-active.env" "$FIXTURE/active-images.env"
   sudo install -m 0644 "$SOURCE_DIR/candidate-compose.yml" "$FIXTURE/mount/nextcloud-docker/docker-compose.yml"
   sudo "$FIXTURE/ops" upgrade-stage boundary "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\truntime-may-have-changed' >/dev/null
-  sudo "$FIXTURE/ops" upgrade-stage accept "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\taccepted' >/dev/null
+  sudo install -d -m 0700 -o root -g root "$FIXTURE/state/active-record" "$FIXTURE/state/active-record/$stage_id"
+  printf 'format\tactive-record-v1\nstate\tapplied\npre_sha256\t%s\ncandidate_sha256\t%s\nsize\t1\n' "$pre_record" "$candidate_record" | sudo tee "$FIXTURE/state/active-record/$stage_id/metadata.tsv" >/dev/null
+  sudo chmod 0600 "$FIXTURE/state/active-record/$stage_id/metadata.tsv"
   printf '%s\n' "$stage_id" | sudo tee "$FIXTURE/state/active-record-current" >/dev/null
-  sudo chmod 600 "$FIXTURE/state/active-record-current"
+  sudo chmod 0600 "$FIXTURE/state/active-record-current"
+  printf 'true\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
+  if sudo "$FIXTURE/ops" upgrade-stage accept "$stage_id" "$stage_fingerprint" >/dev/null 2>&1; then
+    printf 'upgrade stage accepted before maintenance-off\n' >&2
+    exit 1
+  fi
+  if sudo "$FIXTURE/ops" upgrade-freeze maintenance-off "$freeze_id" >/dev/null 2>&1; then
+    printf 'generic maintenance-off bypassed unresolved stage\n' >&2
+    exit 1
+  fi
+  sudo "$FIXTURE/ops" upgrade-stage maintenance-off "$stage_id" "$stage_fingerprint" | grep -Fx $'state\tmaintenance-off' >/dev/null
+  sudo "$FIXTURE/ops" upgrade-stage accept "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\taccepted' >/dev/null
   if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
     printf 'upgrade freeze released with an unresolved active-image transaction\n' >&2
     exit 1
   fi
   sudo rm -- "$FIXTURE/state/active-record-current"
+  sudo rm -rf -- "$FIXTURE/state/active-record/$stage_id"
   printf 'true\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
     printf 'upgrade freeze released while maintenance mode was active\n' >&2
@@ -510,6 +544,7 @@ EOF
   sudo env -u SUDO_USER "$FIXTURE/ops" upgrade-freeze-boot-guard
   sudo test -f "$FIXTURE/nft-table" || { printf 'boot guard did not restore interrupted release firewall\n' >&2; exit 1; }
   sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" | grep -Fx $'state\treleased' >/dev/null
+  sudo test ! -e "$FIXTURE/state/upgrade-freeze/timer-held"
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/active-images.env" "$FIXTURE/active-images.env"
   printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null
   [[ "$(sudo cat "$FIXTURE/timer-state")" == active && ! -e "$FIXTURE/nft-table" ]]

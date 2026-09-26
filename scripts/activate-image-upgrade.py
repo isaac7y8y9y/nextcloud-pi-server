@@ -108,6 +108,8 @@ def common(target: r.Target, candidate: Path, source: Path, config_backup: Path,
                      images / "manifest.tsv", images / "restore-attestation.tsv"):
             age(path, now)
     metadata = r.fields(candidate / "registry-metadata.tsv")
+    if metadata["image"] == "mariadb":
+        r.reject("database activation requires a separately verified clean-directory cutover")
     if before_stage:
         resolved = r.run(["python3", str(HERE / "resolve-image-upgrade.py"), metadata["tag"],
                           "--expected-index", metadata["index_digest"]], timeout=120)
@@ -175,7 +177,7 @@ def stage_evidence(target: r.Target, candidate: Path, source: Path, config_backu
             "fetch_fingerprint": fetch["fingerprint"], "fetch_artifact_sha256": r.digest(fetch_path),
             "tag": tag, "ref": ref, "target": image_key.lower(), "expected_id": metadata["config_digest"],
             "source_running": before, "evidence": local,
-            "actions": "tag-approved-digest,prepare-active-record,install-compose,mark-boundary,restart-target",
+            "actions": "tag-approved-digest,prepare-active-record,install-compose,mark-boundary,restart-target,stage-maintenance-off",
             "exclusions": "pull,prune,image-removal,source-lock-write,freeze-release,post-boundary-config-only-rollback"}
 
 
@@ -242,6 +244,8 @@ def install_compose(target: r.Target, stage_dir: str, source_name: str, project:
 
 def stage_apply(target: r.Target, base: dict[str, object], approval: dict[str, object],
                 candidate: Path, source: Path) -> None:
+    if base["target"] == "db":
+        r.reject("database activation requires a separately verified clean-directory cutover")
     stage_id = str(base["stage_id"])
     evidence = base["evidence"]
     assert isinstance(evidence, dict)
@@ -323,11 +327,13 @@ def stage_apply(target: r.Target, base: dict[str, object], approval: dict[str, o
 
 def accept_evidence(target: r.Target, candidate: Path, source: Path, config_backup: Path,
                     runtime: Path, images: Path, stage_approval: Path, now: int,
-                    *, allow_accepted: bool = False) -> dict[str, object]:
+                    *, allow_accepted: bool = False, allow_maintenance_on: bool = False) -> dict[str, object]:
     local, metadata = common(target, candidate, source, config_backup, runtime, images, now, before_stage=False)
     stage = json.loads(r.private_file(stage_approval))
     if not isinstance(stage, dict) or stage.get("format") != "image-activation-stage-v1" or stage.get("state") != "consumed":
         r.reject("stage approval was not consumed")
+    if stage.get("actions") != "tag-approved-digest,prepare-active-record,install-compose,mark-boundary,restart-target,stage-maintenance-off":
+        r.reject("stage approval does not authorize maintenance-off")
     if stage_approval.parent != approval_root() or not stage_approval.name.startswith("stage-"):
         r.reject("stage approval path is unsafe")
     unsigned = dict(stage, state="unused")
@@ -365,9 +371,11 @@ def accept_evidence(target: r.Target, candidate: Path, source: Path, config_back
         r.reject("candidate active record differs")
     identities = running(target, candidate / "active-images.env")
     target.ssh("! docker port nextcloud-docker-app-1 80/tcp >/dev/null 2>&1")
-    if "maintenance: false" not in target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status"):
-        r.reject("Nextcloud maintenance mode remains on")
-    r.run([str(HERE / "health-check.sh"), "--caddyfile", str(candidate / "Caddyfile")], timeout=300)
+    status = target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status")
+    if "maintenance: false" in status:
+        r.run([str(HERE / "health-check.sh"), "--caddyfile", str(candidate / "Caddyfile")], timeout=300)
+    elif not allow_maintenance_on or "maintenance: true" not in status:
+        r.reject("Nextcloud maintenance mode remains on or is unknown")
     return {"format": "image-activation-accept-v1", "stage_id": stage_id,
             "stage_fingerprint": stage["fingerprint"], "stage_artifact_sha256": r.digest(stage_approval),
             "host": target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"], "freeze_id": metadata["freeze_id"],
@@ -379,7 +387,7 @@ def accept_evidence(target: r.Target, candidate: Path, source: Path, config_back
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
-    for name in ("plan", "apply", "plan-accept", "accept"):
+    for name in ("plan", "apply", "maintenance-off", "plan-accept", "accept"):
         mode.add_argument("--" + name, action="store_true")
     parser.add_argument("candidate", type=Path)
     parser.add_argument("source_rendered", type=Path)
@@ -390,8 +398,8 @@ def main() -> int:
     parser.add_argument("--stage-approval", type=Path)
     parser.add_argument("--approval", type=Path)
     args = parser.parse_args()
-    if (args.plan or args.apply) != (args.fetch_approval is not None) or (args.plan_accept or args.accept) != (args.stage_approval is not None) or (args.apply or args.accept) != (args.approval is not None):
-        parser.error("stage needs --fetch-approval; acceptance needs --stage-approval; apply/accept need --approval")
+    if (args.plan or args.apply) != (args.fetch_approval is not None) or (args.maintenance_off or args.plan_accept or args.accept) != (args.stage_approval is not None) or (args.apply or args.accept) != (args.approval is not None):
+        parser.error("stage needs --fetch-approval; maintenance-off/acceptance need --stage-approval; apply/accept need --approval")
     try:
         target = r.Target(r.deployment_config())
         now = int(time.time())
@@ -419,7 +427,18 @@ def main() -> int:
         else:
             base = accept_evidence(target, args.candidate, args.source_rendered, args.config_backup,
                                    args.held_runtime_backup, args.prior_image_recovery, args.stage_approval, now,
-                                   allow_accepted=args.accept)
+                                   allow_accepted=args.accept, allow_maintenance_on=args.maintenance_off)
+            if args.maintenance_off:
+                status = target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status")
+                if "maintenance: true" in status:
+                    result = target.ops("upgrade-stage", "maintenance-off", str(base["stage_id"]), str(base["stage_fingerprint"]))
+                    if result != {"state": "maintenance-off", "id": base["stage_id"]}:
+                        r.reject("protected stage maintenance-off result differs")
+                elif "maintenance: false" not in status:
+                    r.reject("Nextcloud maintenance state is unknown")
+                r.run([str(HERE / "health-check.sh"), "--caddyfile", str(args.candidate / "Caddyfile")], timeout=300)
+                print(f"Stage maintenance off and loopback health checked; stage={base['stage_id']}. Ingress freeze remains held.")
+                return 0
             if args.plan_accept:
                 artifact = approval_plan(root, base, now, "accept")
                 print(f"Redacted acceptance plan: stage={base['stage_id']} freeze-held=yes\nApproval artifact: {artifact}")

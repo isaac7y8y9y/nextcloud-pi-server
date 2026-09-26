@@ -70,6 +70,11 @@ blocked. The root commands are safety primitives; the separate draft
 image, install the candidate record and Compose, mark the boundary before
 restart, and pause for a second health-checked acceptance approval. It leaves
 the freeze held and does not release ingress or alter the source lock.
+The driver and root consumer fail closed for DB targets until the approved
+candidate uses a separately imported clean MariaDB directory. For app and
+Caddy stages, a distinct `--maintenance-off` action bound to the consumed
+stage approval checks the running candidate and drain before the acceptance
+plan can be made.
 
 ## In-progress protected backup boundary
 
@@ -98,8 +103,11 @@ single-use approval; it has offline tests only. It refuses release until the
 tracked source image lock agrees with the active record. It does not supply
 LAN proof. The Docker boot guard restores a held firewall rule before Docker
 starts and blocks startup during a partial full-runtime promotion. The
-approval-bound restore driver has a consumed-approval `--resume` path for that
-promotion and its follow-on configuration/health checks. Neither behavior has
+timer's `timer-held` condition keeps it paused until protected release removes
+that hold; the job service separately rejects work while `current.tsv` exists.
+The approval-bound restore driver has a consumed-approval `--resume` path for that
+promotion and for resetting a pre-promotion prepared stage before restaging,
+plus follow-on configuration/health checks. Neither behavior has
 been proved on the Pi.
 
 `backup-runtime-state.sh --check-held <id>` and `--apply-held <id>` require

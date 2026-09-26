@@ -69,6 +69,8 @@ with mock.patch.object(release.r, "remote_hash", return_value="a" * 64):
         raise AssertionError("release accepted source-lock/active-record mismatch")
 
 class MatchedTarget(WrongLockTarget):
+    phase = "active"
+    timer_active = "no"
     def ssh(self, command):
         if command.startswith("docker inspect "):
             return "a" * 64 + " sha256:" + "b" * 64 + " true"
@@ -76,6 +78,11 @@ class MatchedTarget(WrongLockTarget):
             return "  - maintenance: false"
         return super().ssh(command)
     def ops(self, *args):
+        if args == ("upgrade-freeze", "status"):
+            return {"state": self.phase, "id": base["freeze_id"], "table_sha256": "a" * 64,
+                    "timer_was_active": "yes"}
+        if args == ("background-jobs", "state"):
+            return {"timer_active": self.timer_active}
         if args == ("active-images-state",):
             return {"sha256": "a" * 64,
                     "source_lock_sha256": release.r.digest(release.r.ROOT / "config/image-lock.env"),
@@ -86,6 +93,17 @@ class MatchedTarget(WrongLockTarget):
 with mock.patch.object(release.r, "remote_hash", return_value="a" * 64):
     checked, phase = release.evidence(MatchedTarget())
     assert phase == "active" and len(checked["running"]) == 3
+    retry_target = MatchedTarget()
+    retry_target.phase = "releasing"
+    retry_target.timer_active = "yes"
+    checked, phase = release.evidence(retry_target, allow_releasing=True)
+    assert phase == "releasing" and checked["timer_was_active"] == "yes"
+    try:
+        release.evidence(retry_target)
+    except release.r.RecoveryError:
+        pass
+    else:
+        raise AssertionError("active timer accepted before release phase")
 
 source = Path(__file__).with_name("release-upgrade-freeze.py").read_text()
 assert source.index('authorize(args.approval, root, base, now, phase)') < source.index('target.ops("upgrade-freeze", "maintenance-off"')

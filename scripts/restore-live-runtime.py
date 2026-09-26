@@ -352,7 +352,9 @@ def resume(target: Target, base: dict[str, object], candidate: Path, source: Pat
            config_backup: Path, runtime: Path, images: Path) -> None:
     stage_id = str(base["stage_id"])
     local = verify_local(candidate, source, config_backup, runtime, images, target.config)
-    if local != base.get("evidence") or base.get("host") != target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"]:
+    if (local != base.get("evidence") or base.get("host") != target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"] or
+            base.get("project") != target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] or
+            base.get("mount") != target.config["NEXTCLOUD_STORAGE_MOUNT"]):
         reject("restore resume material differs from consumed approval")
     if target.ssh("hostname") != base["host"] or target.ssh("id -un") != target.config["NEXTCLOUD_PI_USER"]:
         reject("restore resume target identity differs")
@@ -368,8 +370,21 @@ def resume(target: Target, base: dict[str, object], candidate: Path, source: Pat
     if remote_hash(target, target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] + "/.env") != local["env_sha256"]:
         reject("database environment changed during restore")
     recovery = target.ops("runtime-recovery", "status", stage_id)
-    if recovery.get("state") not in ("promoting", "promoted") or recovery.get("id") != stage_id:
-        reject("runtime recovery has not reached the promotion boundary")
+    if recovery.get("id") != stage_id:
+        reject("runtime recovery identity differs")
+    if recovery.get("state") == "prepared":
+        if (remote_hash(target, target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] + "/docker-compose.yml") != local["candidate_compose"] or
+                remote_hash(target, target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] + "/caddy/Caddyfile") != local["source_caddy"] or
+                target.ops("active-images-state").get("sha256") != local["candidate_record"]):
+            reject("candidate configuration changed during prepared restore")
+        reset_staged_database(target, stage_id)
+        result = target.ops("runtime-recovery", "reset-prepared", stage_id, str(base["stage_fingerprint"]))
+        if result != {"state": "prepared", "id": stage_id, "root": target.config["NEXTCLOUD_STORAGE_MOUNT"] + "/.recovery-" + stage_id}:
+            reject("prepared recovery reset result differs")
+        apply(target, base, source, config_backup, runtime, images, prepared=True)
+        return
+    if recovery.get("state") not in ("promoting", "promoted"):
+        reject("runtime recovery phase is not resumable")
     service = target.ssh("systemctl is-active nextcloud.service 2>/dev/null || true")
     if service == "active":
         target.ops("service", "stop")
@@ -377,6 +392,20 @@ def resume(target: Target, base: dict[str, object], candidate: Path, source: Pat
         reject("Nextcloud service state is unknown during restore resume")
     target.ops("runtime-recovery", "promote", stage_id, str(base["stage_fingerprint"]), timeout=3600)
     finish_promoted(target, base, config_backup)
+
+
+def reset_staged_database(target: Target, stage_id: str) -> None:
+    name = "nextcloud-restore-db-" + stage_id
+    try:
+        details = target.ssh("docker container inspect --format " +
+                             q('{{index .Config.Labels "nextcloud-pi-restore-stage"}} {{range .Mounts}}{{if eq .Destination "/var/lib/mysql"}}{{.Source}}{{end}}{{end}}') +
+                             " " + q(name))
+    except RecoveryError:
+        return
+    expected = stage_id + " " + target.config["NEXTCLOUD_STORAGE_MOUNT"] + "/.recovery-" + stage_id + "/mariadb-data"
+    if details != expected:
+        reject("temporary restore database identity differs")
+    checked(target, "docker rm -f " + q(name) + " >/dev/null")
 
 
 def checked(target: Target, command: str, *, input_file: Path | None = None, timeout: int = 120) -> None:
@@ -443,7 +472,7 @@ def finish_promoted(target: Target, base: dict[str, object], config_backup: Path
 
 
 def apply(target: Target, base: dict[str, object], source: Path,
-          config_backup: Path, runtime: Path, images: Path) -> None:
+          config_backup: Path, runtime: Path, images: Path, *, prepared: bool = False) -> None:
     stage_id = str(base["stage_id"])
     project = target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"]
     mount = target.config["NEXTCLOUD_STORAGE_MOUNT"]
@@ -465,10 +494,13 @@ def apply(target: Target, base: dict[str, object], source: Path,
         if target.ssh("docker image inspect --format '{{.Id}}' " + q(str(old_tags[key]))) != old_ids[key]:
             reject("loaded prior image identity differs; ingress freeze remains held")
 
-    prepared = target.ops("runtime-recovery", "prepare", stage_id)
-    restore_root = prepared.get("root", "")
-    if prepared.get("state") != "prepared" or restore_root != mount + "/.recovery-" + stage_id:
-        reject("protected recovery staging root differs from policy")
+    if prepared:
+        restore_root = mount + "/.recovery-" + stage_id
+    else:
+        prepared_result = target.ops("runtime-recovery", "prepare", stage_id)
+        restore_root = prepared_result.get("root", "")
+        if prepared_result.get("state") != "prepared" or restore_root != mount + "/.recovery-" + stage_id:
+            reject("protected recovery staging root differs from policy")
     for dataset, relative in (("nextcloud", PATHS[0]), ("caddy-data", PATHS[1]),
                               ("caddy-config", PATHS[2])):
         archive = runtime / relative
@@ -479,6 +511,7 @@ def apply(target: Target, base: dict[str, object], source: Path,
     database_container = "nextcloud-restore-db-" + stage_id
     db_tag = str(old_tags["DB"])
     db_command = ("docker run --pull=never --network none -d --name " + q(database_container) +
+                  " --label " + q("nextcloud-pi-restore-stage=" + stage_id) +
                   " --env-file " + q(project + "/.env") + " --mount " +
                   q("type=bind,source=" + database_dir + ",target=/var/lib/mysql") + " " + q(db_tag) + " >/dev/null")
     checked(target, db_command)
@@ -516,11 +549,14 @@ def apply(target: Target, base: dict[str, object], source: Path,
     target.ops("runtime-recovery", "attest-database", stage_id, str(local["sql_sha256"]), count, columns, files)
 
     stage = project + "/.restore-stage-" + stage_id
-    checked(target, "umask 077; mkdir -m 0700 " + q(stage))
+    checked(target, "umask 077; if test -e " + q(stage) + " || test -L " + q(stage) +
+            "; then test -d " + q(stage) + " && test ! -L " + q(stage) +
+            " && test \"$(stat -c %a " + q(stage) + ")\" = 700; else mkdir -m 0700 " + q(stage) + "; fi")
     files = ((config_backup / "compose/docker-compose.yml", "docker-compose.yml"),
              (config_backup / "caddy/Caddyfile", "Caddyfile"),
              (ROOT / "scripts/lib/atomic-transaction.sh", "atomic-transaction.sh"))
     for local_file, name in files:
+        checked(target, "test ! -L " + q(stage + "/" + name))
         run(["scp", "-q", str(local_file), target.login + ":" + stage + "/" + name], timeout=120)
         if remote_hash(target, stage + "/" + name) != digest(local_file):
             reject("staged prior configuration differs")
@@ -557,7 +593,7 @@ def main() -> int:
             base = consumed_for_resume(args.approval, root, args.stage_id)
             resume(target, base, args.candidate, args.source_rendered,
                    args.config_backup, args.held_runtime_backup, args.prior_image_recovery)
-            print("Interrupted full-runtime promotion resumed and verified; ingress freeze remains held.")
+            print("Interrupted full-runtime restore resumed and verified; ingress freeze remains held.")
             return 0
         base = evidence(target, args.stage_id, args.candidate, args.source_rendered,
                         args.config_backup, args.held_runtime_backup, args.prior_image_recovery)
