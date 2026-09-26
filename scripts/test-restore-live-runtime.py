@@ -101,7 +101,9 @@ class ApprovalTests(unittest.TestCase):
         old_ids = {key: "sha256:" + str(index) * 64 for index, key in enumerate(old_tags, 1)}
         base = {"stage_id": self.stage_id, "stage_fingerprint": "f" * 64,
                 "evidence": {"old_tags": old_tags, "old_ids": old_ids,
-                             "sql_sha256": restore.digest(runtime / "database/nextcloud.sql")}}
+                             "sql_sha256": restore.digest(runtime / "database/nextcloud.sql"),
+                             "source_compose": restore.digest(config / "compose/docker-compose.yml"),
+                             "source_caddy": restore.digest(config / "caddy/Caddyfile")}}
         target = FakeTarget("/mnt/storage", "/mnt/storage/nextcloud-docker",
                             dict(zip(old_tags.values(), old_ids.values())),
                             fail_promote=fail_promote, fail_import=fail_import)
@@ -128,6 +130,19 @@ class ApprovalTests(unittest.TestCase):
         self.assertTrue(any(call.startswith("docker stop --time 60 nextcloud-restore-db-") for call in target.calls))
         self.assertFalse(any(call.startswith("ops service stop") or "runtime-recovery promote" in call
                              or "upgrade-freeze release" in call for call in target.calls))
+
+    def test_success_marks_recovered_without_releasing_freeze(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        with mock.patch.object(restore, "run", return_value=""):
+            restore.apply(target, base, source, config, runtime, images)
+        lifecycle = [call for call in target.calls if call.startswith("ops ")]
+        self.assertLess(lifecycle.index("ops service stop"),
+                        next(index for index, call in enumerate(lifecycle) if call.startswith("ops runtime-recovery promote")))
+        self.assertLess(lifecycle.index("ops active-record rollback " + self.stage_id),
+                        lifecycle.index("ops active-record commit " + self.stage_id))
+        self.assertEqual(lifecycle[-1], "ops upgrade-stage recovered " + self.stage_id + " " + "f" * 64)
+        self.assertFalse(any("upgrade-freeze release" in call or "runtime-recovery cleanup" in call
+                             for call in target.calls))
 
 
 if __name__ == "__main__":
