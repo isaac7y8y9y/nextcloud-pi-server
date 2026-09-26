@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Offline approval and interruption tests for live-runtime restoration."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import stat
+import tempfile
+import unittest
+from unittest import mock
+
+
+HERE = Path(__file__).resolve().parent
+SPEC = importlib.util.spec_from_file_location("restore_live_runtime", HERE / "restore-live-runtime.py")
+assert SPEC and SPEC.loader
+restore = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(restore)
+
+
+class FakeTarget:
+    def __init__(self, mount: str, project: str, old: dict[str, str], *, fail_promote: bool = False,
+                 fail_import: bool = False):
+        self.config = {"NEXTCLOUD_STORAGE_MOUNT": mount, "NEXTCLOUD_REMOTE_PROJECT_DIR": project}
+        self.login = "test@pi.example.invalid"
+        self.old = old
+        self.fail_promote = fail_promote
+        self.fail_import = fail_import
+        self.calls: list[str] = []
+
+    def ssh(self, command: str, **_kwargs: object) -> str:
+        self.calls.append(command)
+        if command.startswith("docker image inspect"):
+            return next(value for tag, value in self.old.items() if tag in command)
+        if command.startswith("docker exec -i") and self.fail_import:
+            raise restore.RecoveryError("injected SQL import failure")
+        if "SELECT COUNT(*)" in command:
+            if "information_schema.columns" in command:
+                return "1291"
+            if "oc_filecache" in command:
+                return "15"
+            return "169"
+        if "SELECT 1" in command:
+            return "1"
+        if command.startswith("sha256sum"):
+            name = command.rsplit("/", 1)[-1]
+            return restore.digest(self.files[name]) + "  staged-file"
+        return ""
+
+    def ops(self, *args: str, **_kwargs: object) -> dict[str, str]:
+        self.calls.append("ops " + " ".join(args))
+        if args[:2] == ("runtime-recovery", "prepare"):
+            return {"state": "prepared", "root": self.config["NEXTCLOUD_STORAGE_MOUNT"] + "/.recovery-" + args[2]}
+        if args[:2] == ("runtime-recovery", "promote") and self.fail_promote:
+            raise restore.RecoveryError("injected promotion failure")
+        return {"state": "ok"}
+
+
+class ApprovalTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.root.chmod(0o700)
+        self.stage_id = "20260926T000000Z-123"
+        self.base: dict[str, object] = {"format": "live-runtime-restore-v1", "stage_id": self.stage_id,
+                                        "host": "pi.example.invalid", "evidence": {"source_record": "a" * 64}}
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_approval_is_single_use_and_bound_to_evidence(self) -> None:
+        artifact = restore.plan(self.root, self.base, 1000)
+        self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o600)
+        changed = dict(self.base, host="other.example.invalid")
+        with self.assertRaisesRegex(restore.RecoveryError, "evidence changed"):
+            restore.consume(artifact, self.root, changed, 1001)
+        self.assertEqual(restore.consume(artifact, self.root, self.base, 1001)["state"], "consumed")
+        with self.assertRaisesRegex(restore.RecoveryError, "not unused"):
+            restore.consume(artifact, self.root, self.base, 1002)
+
+    def test_expired_approval_does_not_create_used_marker(self) -> None:
+        artifact = restore.plan(self.root, self.base, 1000)
+        with self.assertRaisesRegex(restore.RecoveryError, "expired"):
+            restore.consume(artifact, self.root, self.base, 1901)
+        self.assertEqual(list(self.root.glob("used-*")), [])
+
+    def fixture(self, *, fail_promote: bool = False, fail_import: bool = False):
+        candidate = self.root / "candidate"
+        source = self.root / "source"
+        config = self.root / "config"
+        runtime = self.root / "runtime"
+        images = self.root / "images"
+        for path in (candidate, source, config, runtime, images, runtime / "nextcloud", runtime / "caddy",
+                     runtime / "database", config / "compose", config / "caddy"):
+            path.mkdir(exist_ok=True)
+        for path in (runtime / "nextcloud/nextcloud.tar", runtime / "caddy/data.tar",
+                     runtime / "caddy/config.tar", runtime / "database/nextcloud.sql",
+                     config / "compose/docker-compose.yml", config / "caddy/Caddyfile", images / "images.tar"):
+            path.write_bytes(b"fixture\n")
+        old_tags = {"APP": "nextcloud:30.0.17-apache", "DB": "mariadb:11.8.6", "CADDY": "caddy:2.10.2"}
+        old_ids = {key: "sha256:" + str(index) * 64 for index, key in enumerate(old_tags, 1)}
+        base = {"stage_id": self.stage_id, "stage_fingerprint": "f" * 64,
+                "evidence": {"old_tags": old_tags, "old_ids": old_ids,
+                             "sql_sha256": restore.digest(runtime / "database/nextcloud.sql")}}
+        target = FakeTarget("/mnt/storage", "/mnt/storage/nextcloud-docker",
+                            dict(zip(old_tags.values(), old_ids.values())),
+                            fail_promote=fail_promote, fail_import=fail_import)
+        target.files = {"docker-compose.yml": config / "compose/docker-compose.yml",
+                        "Caddyfile": config / "caddy/Caddyfile",
+                        "atomic-transaction.sh": restore.ROOT / "scripts/lib/atomic-transaction.sh"}
+        return target, base, source, config, runtime, images
+
+    def test_promotion_failure_retains_freeze_and_failed_state(self) -> None:
+        target, base, source, config, runtime, images = self.fixture(fail_promote=True)
+        with mock.patch.object(restore, "run", return_value=""):
+            with self.assertRaisesRegex(restore.RecoveryError, "promotion failure"):
+                restore.apply(target, base, source, config, runtime, images)
+        self.assertIn("ops service stop", target.calls)
+        self.assertTrue(any(call.startswith("ops runtime-recovery promote") for call in target.calls))
+        self.assertFalse(any("upgrade-freeze release" in call or "runtime-recovery cleanup" in call
+                             or "active-record commit" in call for call in target.calls))
+
+    def test_sql_failure_stops_temporary_db_before_live_stack(self) -> None:
+        target, base, source, config, runtime, images = self.fixture(fail_import=True)
+        with mock.patch.object(restore, "run", return_value=""):
+            with self.assertRaisesRegex(restore.RecoveryError, "SQL import failure"):
+                restore.apply(target, base, source, config, runtime, images)
+        self.assertTrue(any(call.startswith("docker stop --time 60 nextcloud-restore-db-") for call in target.calls))
+        self.assertFalse(any(call.startswith("ops service stop") or "runtime-recovery promote" in call
+                             or "upgrade-freeze release" in call for call in target.calls))
+
+
+if __name__ == "__main__":
+    unittest.main()

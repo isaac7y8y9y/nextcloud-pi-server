@@ -114,7 +114,7 @@ no_nested_mounts() { /usr/bin/findmnt -rn -o TARGET | /usr/bin/awk -v path="$1" 
 ensure_parent() { local path="$(state_dir "$1")"; if [[ -e "$path" || -L "$path" ]]; then safe_dir "$path"; else /usr/bin/install -d -m 0700 -o root -g root "$path"; fi; }
 read_exact() {
   local target="$1" size="$2" extra="$1.extra"
-  /usr/bin/dd iflag=fullblock bs=1 count="$size" status=none of="$target" || die "input read failed"
+  /usr/bin/dd iflag=fullblock,count_bytes bs=1M count="$size" status=none of="$target" || die "input read failed"
   [[ "$(/usr/bin/stat -c '%s' "$target")" == "$size" ]] || die "input is truncated"
   /usr/bin/dd bs=1 count=1 status=none of="$extra" 2>/dev/null || die "input trailer check failed"
   [[ "$(/usr/bin/stat -c '%s' "$extra")" == 0 ]] || die "input has trailing bytes"
@@ -391,7 +391,20 @@ cmd_upgrade_stage_boundary() {
 cmd_upgrade_stage_status() {
   [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
   validate_host; upgrade_stage_require "$1"
-  out phase "$(upgrade_stage_field "$1" phase)"; out id "$1"; out target "$(upgrade_stage_field "$1" target)"
+  local key
+  out phase "$(upgrade_stage_field "$1" phase)"; out id "$1"
+  for key in fingerprint freeze_id freeze_table_sha256 fetch_id target tag expected_id pre_record_sha256 pre_compose_sha256 candidate_record_sha256 candidate_compose_sha256; do
+    out "$key" "$(upgrade_stage_field "$1" "$key")"
+  done
+}
+cmd_active_status() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  validate_host; require_active_tx "$1"
+  local meta key
+  meta="$(active_tx "$1")/metadata.tsv"; protected_file "$meta" 0600
+  [[ "$(metadata "$meta" format)" == active-record-v1 ]] || die "active transaction format differs"
+  out id "$1"
+  for key in state pre_sha256 candidate_sha256 size; do out "$key" "$(metadata "$meta" "$key")"; done
 }
 cmd_upgrade_stage_abort() {
   [[ $# == 2 ]] || invalid; reject_stdin
@@ -453,7 +466,7 @@ safe_recovery_root() { local id="${1#"${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/${P[NEXTC
 cmd_runtime_backup_size() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; local labels=(nextcloud caddy-data caddy-config) paths=() index bytes; mapfile -t paths < <(runtime_sources); for index in 0 1 2; do [[ -d "${paths[$index]}" && ! -L "${paths[$index]}" ]] || die "runtime source is unsafe"; bytes="$(/usr/bin/du -sb "${paths[$index]}" | /usr/bin/awk '{print $1}')"; out "${labels[$index]}_bytes" "$bytes"; done; }
 cmd_runtime_backup_stream() { [[ $# == 1 ]] || invalid; reject_stdin; local dataset="$1" paths=() source parent name; case "$dataset" in nextcloud|caddy-data|caddy-config);; *) invalid;; esac; validate_host; mapfile -t paths < <(runtime_sources); case "$dataset" in nextcloud) source="${paths[0]}"; parent="$(/usr/bin/dirname "$source")"; name="$(/usr/bin/basename "$source")";; caddy-data) source="${paths[1]}"; parent="$source"; name=.; ;; caddy-config) source="${paths[2]}"; parent="$source"; name=.; ;; esac; [[ -d "$source" && ! -L "$source" ]] || die "runtime source is unsafe"; exec /usr/bin/tar --numeric-owner --acls --xattrs -cpf - -C "$parent" "$name"; }
 cmd_recovery_check() { [[ $# == 2 ]] || invalid; reject_stdin; local id="$1" need="$2" root bytes; valid_id "$id" && valid_size "$need" || invalid; validate_host; root="$(recovery_root "$id")"; [[ ! -e "$root" && ! -L "$root" && ! -e "$(recovery_state "$id")" && ! -L "$(recovery_state "$id")" ]] || die "recovery lifecycle exists"; bytes="$(available)"; [[ "$bytes" =~ ^[0-9]+$ ]] && (( bytes > need )) || die "insufficient recovery space"; out state available; out id "$id"; out available_bytes "$bytes"; }
-cmd_recovery_prepare() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" root state; valid_id "$id" || invalid; lock; validate_host; root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; [[ ! -e "$root" && ! -L "$root" && ! -e "$state" && ! -L "$state" ]] || die "recovery lifecycle exists"; ensure_parent runtime-recovery; /usr/bin/install -d -m 0700 -o root -g root "$state" "$root" "$root/nextcloud" "$root/caddy-data" "$root/caddy-config" "$root/mariadb-data"; printf 'format\truntime-recovery-v1\nstate\tprepared\n' >"$state/metadata.tsv"; /usr/bin/chmod 0600 "$state/metadata.tsv"; out state prepared; out id "$id"; out available_bytes "$(available)"; }
+cmd_recovery_prepare() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" root state; valid_id "$id" || invalid; lock; validate_host; root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; [[ ! -e "$root" && ! -L "$root" && ! -e "$state" && ! -L "$state" ]] || die "recovery lifecycle exists"; ensure_parent runtime-recovery; /usr/bin/install -d -m 0700 -o root -g root "$state" "$root" "$root/nextcloud" "$root/caddy-data" "$root/caddy-config" "$root/mariadb-data"; printf 'format\truntime-recovery-v1\nstate\tprepared\n' >"$state/metadata.tsv"; /usr/bin/chmod 0600 "$state/metadata.tsv"; out state prepared; out id "$id"; out root "$root"; out available_bytes "$(available)"; }
 validate_archive() { /usr/bin/python3 - "$1" <<'PY'
 import posixpath, stat, sys, tarfile
 with tarfile.open(sys.argv[1], 'r:*') as archive:
@@ -479,16 +492,16 @@ PY
 }
 cmd_recovery_restore() { [[ $# == 4 ]] || invalid; local id="$1" dataset="$2" expected="$3" size="$4" root state dest archive; valid_id "$id" && valid_hash "$expected" && valid_size "$size" || invalid; case "$dataset" in nextcloud|caddy-data|caddy-config);; *) invalid;; esac; lock; validate_host; root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; safe_recovery_root "$root"; safe_dir "$state"; dest="$root/$dataset"; safe_dir "$dest"; [[ ! -e "$state/$dataset.complete" ]] || die "dataset already restored"; archive="$state/$dataset.tar"; read_exact "$archive" "$size"; [[ "$(hash "$archive")" == "$expected" ]] || die "archive hash differs"; validate_archive "$archive" || die "archive namespace is unsafe"; [[ -z "$(/usr/bin/find "$dest" -mindepth 1 -print -quit)" ]] || die "restore destination is not empty"; /usr/bin/tar --numeric-owner --acls --xattrs -xpf "$archive" -C "$dest"; /usr/bin/tar --compare --numeric-owner --acls --xattrs -f "$archive" -C "$dest" >/dev/null || die "restore differs"; printf '%s\n' "$expected" >"$state/$dataset.complete"; /usr/bin/chmod 0600 "$state/$dataset.complete"; /usr/bin/rm -f -- "$archive"; out state restored; out id "$id"; out dataset "$dataset"; }
 cmd_recovery_attest_database() {
-  [[ $# == 3 ]] || invalid; reject_stdin
-  local id="$1" sql_hash="$2" tables="$3" root state
-  valid_id "$id" && valid_hash "$sql_hash" && [[ "$tables" =~ ^[1-9][0-9]*$ ]] || invalid
+  [[ $# == 5 ]] || invalid; reject_stdin
+  local id="$1" sql_hash="$2" tables="$3" columns="$4" files="$5" root state
+  valid_id "$id" && valid_hash "$sql_hash" && [[ "$tables" =~ ^[1-9][0-9]*$ && "$columns" =~ ^[1-9][0-9]*$ && "$files" =~ ^[1-9][0-9]*$ ]] || invalid
   lock; validate_host; upgrade_stage_require "$id"
   [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed ]] || die "upgrade stage is not recoverable"
   root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; safe_recovery_root "$root"; safe_dir "$state"
   protected_file "$state/metadata.tsv" 0600
   [[ "$(metadata "$state/metadata.tsv" state)" == prepared && ! -e "$state/database.complete" && ! -L "$state/database.complete" ]] || die "database attestation already exists"
   [[ -d "$root/mariadb-data" && ! -L "$root/mariadb-data" && -n "$(/usr/bin/find "$root/mariadb-data" -mindepth 1 -print -quit)" ]] || die "staged MariaDB directory is empty or unsafe"
-  printf 'sql_sha256\t%s\ntables\t%s\n' "$sql_hash" "$tables" >"$state/database.complete"; /usr/bin/chmod 0600 "$state/database.complete"
+  printf 'sql_sha256\t%s\ntables\t%s\ncolumns\t%s\nfilecache_rows\t%s\n' "$sql_hash" "$tables" "$columns" "$files" >"$state/database.complete"; /usr/bin/chmod 0600 "$state/database.complete"
   out state attested; out id "$id"
 }
 cmd_recovery_promote() {
@@ -504,6 +517,7 @@ cmd_recovery_promote() {
   for service in nextcloud caddy-data caddy-config; do valid_hash "$(<"$state/$service.complete")" || die "restored archive attestation is invalid"; done
   valid_hash "$(metadata "$state/database.complete" sql_sha256)" || die "database SQL attestation is invalid"
   [[ "$(metadata "$state/database.complete" tables)" =~ ^[1-9][0-9]*$ ]] || die "database table attestation is invalid"
+  [[ "$(metadata "$state/database.complete" columns)" =~ ^[1-9][0-9]*$ && "$(metadata "$state/database.complete" filecache_rows)" =~ ^[1-9][0-9]*$ ]] || die "database schema attestation is invalid"
   current="$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)"
   [[ "$current" == inactive || "$current" == failed ]] || die "Nextcloud service must be stopped for full restore"
   for service in "${P[NEXTCLOUD_PI_APP_CONTAINER]}" "${P[NEXTCLOUD_PI_DB_CONTAINER]}" "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}"; do
@@ -574,7 +588,7 @@ case "$command" in
   upgrade-freeze) sub="${1:-}"; shift || true; case "$sub" in check) cmd_upgrade_freeze_check "$@";; status) cmd_upgrade_freeze_status "$@";; activate) cmd_upgrade_freeze_activate "$@";; release) cmd_upgrade_freeze_release "$@";; *) invalid;; esac;;
   upgrade-fetch) sub="${1:-}"; shift || true; case "$sub" in consume) cmd_upgrade_fetch_consume "$@";; complete) cmd_upgrade_fetch_complete "$@";; *) invalid;; esac;;
   upgrade-stage) sub="${1:-}"; shift || true; case "$sub" in consume) cmd_upgrade_stage_consume "$@";; boundary) cmd_upgrade_stage_boundary "$@";; status) cmd_upgrade_stage_status "$@";; abort) cmd_upgrade_stage_abort "$@";; accept) cmd_upgrade_stage_accept "$@";; recovered) cmd_upgrade_stage_recovered "$@";; *) invalid;; esac;;
-  active-record) sub="${1:-}"; shift || true; case "$sub" in prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
+  active-record) sub="${1:-}"; shift || true; case "$sub" in status) cmd_active_status "$@";; prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
   runtime-backup) sub="${1:-}"; shift || true; case "$sub" in size) cmd_runtime_backup_size "$@";; stream) cmd_runtime_backup_stream "$@";; *) invalid;; esac;;
   runtime-recovery) sub="${1:-}"; shift || true; case "$sub" in check) cmd_recovery_check "$@";; prepare) cmd_recovery_prepare "$@";; restore) cmd_recovery_restore "$@";; attest-database) cmd_recovery_attest_database "$@";; promote) cmd_recovery_promote "$@";; cleanup) cmd_recovery_cleanup "$@";; *) invalid;; esac;;
   image-readiness) sub="${1:-}"; shift || true; case "$sub" in check) cmd_readiness_check "$@";; start) cmd_readiness_start "$@";; status) cmd_readiness_status "$@";; stop) cmd_readiness_stop "$@";; cleanup) cmd_readiness_cleanup "$@";; *) invalid;; esac;;

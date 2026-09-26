@@ -389,6 +389,8 @@ EOF
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/candidate-active.env" "$FIXTURE/active-images.env"
   sudo install -m 0644 "$SOURCE_DIR/candidate-compose.yml" "$FIXTURE/mount/nextcloud-docker/docker-compose.yml"
   sudo "$FIXTURE/ops" upgrade-stage boundary "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\truntime-may-have-changed' >/dev/null
+  sudo "$FIXTURE/ops" upgrade-stage status "$stage_id" | grep -Fx "$(printf 'fingerprint\t%s' "$stage_fingerprint")" >/dev/null
+  sudo "$FIXTURE/ops" upgrade-stage status "$stage_id" | grep -Fx "$(printf 'pre_record_sha256\t%s' "$pre_record")" >/dev/null
   if sudo "$FIXTURE/ops" upgrade-stage abort "$stage_id" "$stage_fingerprint" >/dev/null 2>&1; then
     printf 'upgrade stage rolled back after runtime boundary\n' >&2
     exit 1
@@ -416,8 +418,8 @@ EOF
     cat "$archive" | sudo "$FIXTURE/ops" runtime-recovery restore "$stage_id" "$dataset" "$(sha256sum "$archive" | awk '{print $1}')" "$(wc -c <"$archive" | tr -d '[:space:]')" | grep -Fx $'state\trestored' >/dev/null
   done
   printf 'restored-database\n' | sudo tee "$recovery_root/mariadb-data/data.txt" >/dev/null
-  sudo "$FIXTURE/ops" runtime-recovery attest-database "$stage_id" "$(printf '%064d' 5)" 169 | grep -Fx $'state\tattested' >/dev/null
-  if sudo "$FIXTURE/ops" runtime-recovery attest-database "$stage_id" "$(printf '%064d' 5)" 169 >/dev/null 2>&1; then
+  sudo "$FIXTURE/ops" runtime-recovery attest-database "$stage_id" "$(printf '%064d' 5)" 169 1291 15 | grep -Fx $'state\tattested' >/dev/null
+  if sudo "$FIXTURE/ops" runtime-recovery attest-database "$stage_id" "$(printf '%064d' 5)" 169 1291 15 >/dev/null 2>&1; then
     printf 'database attestation replayed\n' >&2
     exit 1
   fi
@@ -480,6 +482,7 @@ EOF
   active_rollback_id=20260910T000000Z-101
   cat "$active_candidate" | sudo "$FIXTURE/ops" active-record prepare "$active_rollback_id" "$active_hash" "$active_size" | grep -Fx $'state\tprepared' >/dev/null
   sudo "$FIXTURE/ops" active-record apply "$active_rollback_id" | grep -Fx $'state\tapplied' >/dev/null
+  sudo "$FIXTURE/ops" active-record status "$active_rollback_id" | grep -Fx $'state\tapplied' >/dev/null
   sudo "$FIXTURE/ops" active-record rollback "$active_rollback_id" | grep -Fx $'state\trolledback' >/dev/null
   sudo "$FIXTURE/ops" active-record commit "$active_rollback_id" | grep -Fx $'state\tcommitted' >/dev/null
   sudo grep -Fxq NEXTCLOUD_ACTIVE_IMAGES_MODE=source "$FIXTURE/active-images.env"

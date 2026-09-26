@@ -51,18 +51,61 @@ scripts/test-runtime-recovery.sh --cleanup "$RECOVERY_TEST_ID"
 Success prints that the disposable recovery-test targets are absent. Never
 construct a different path or remove recovery targets manually.
 
-This drill is the repository's only usable runtime restore automation. The
-privileged dispatcher has staging, dataset verification, database-attestation,
-and stopped-service promotion primitives for a future live restore. They are
-not an operator procedure: no approved workflow yet binds a specific held
-backup to a staged MariaDB import, restores the prior configuration and images,
-or proves health before reopening ingress. Do not call those primitives on the
-production Pi. A passed drill is recovery evidence, not authority or tooling
-for a live runtime restore.
+This drill remains the only *live-tested* runtime restore automation. Draft PR
+#37 also contains a planned, single-use approved live-restore driver described
+below. That driver is not yet a production operator procedure: its failure
+paths have local tests, but it and the ingress freeze have not been proved on
+the Pi's actual network path or passed the required code/PR reviews. A passed
+disposable drill alone does not authorize a live restore.
 
 The helper derives every disposable recovery path from that ID beneath the
 policy-bound storage mount. It validates the mount and UUID again before each
 creation, restoration, or recursive cleanup; never substitute a path manually.
+
+## Draft full-runtime restore after an upgrade boundary
+
+`scripts/restore-live-runtime.py` is an item-4 implementation under test, not
+yet an item-5 production instruction. It requires a root-owned upgrade stage
+already at `runtime-may-have-changed`, its still-applied active-record
+transaction, an active ingress freeze, a matching `runtime-backup-v2` held at
+that freeze, verified prior image recovery, a source-rendered baseline, and a
+verified one-image candidate. The source configuration backup must include a
+protected `.env` matching the unchanged live project file. Planning is
+read-only on the Pi and creates a private, 15-minute approval artifact outside
+Git; applying consumes it before the first mutation.
+
+The draft interface is:
+
+```sh
+scripts/restore-live-runtime.py --plan "$STAGE_ID" "$CANDIDATE" \
+  "$SOURCE_RENDERED" "$CONFIG_BACKUP" "$HELD_RUNTIME_BACKUP" "$PRIOR_IMAGE_RECOVERY"
+scripts/restore-live-runtime.py --apply "$STAGE_ID" "$CANDIDATE" \
+  "$SOURCE_RENDERED" "$CONFIG_BACKUP" "$HELD_RUNTIME_BACKUP" "$PRIOR_IMAGE_RECOVERY" \
+  --approval "$RESTORE_APPROVAL"
+```
+
+`--plan` is only available after the root-owned runtime boundary and while
+the active-record transaction remains applied. It does not create the held
+backup or freeze. Review the private approval record's exact stage, hashes,
+actions, exclusions, and expiry before any future approved apply; the plan
+command alone is not approval.
+
+The approved apply restores three archives into the protected staging root,
+loads and verifies prior image IDs if needed, imports the held SQL into an
+isolated MariaDB bind directory, checks application tables and all databases,
+and stops that temporary container. It then stops the stack, preserves failed
+Nextcloud/MariaDB/Caddy state under transaction-specific names, promotes the
+staged state, restores prior Compose/Caddy and the protected active record,
+starts the prior images, turns off restored maintenance mode, and checks
+loopback health before marking the stage recovered. It never releases the
+ingress freeze; that requires a separate approved gate.
+
+On any interruption, preserve the stage ID, root recovery state, failed-state
+directories, and ingress freeze. Do not retry the consumed artifact, remove
+staging paths, or reopen LAN access. Diagnose the exact phase and obtain a new
+reviewed recovery decision. This workflow must not be used on the production
+Pi until its operator tests, live ingress/drain proof, reviews, and bundle
+installation gates have passed.
 
 ## Image recovery and restore-readiness
 

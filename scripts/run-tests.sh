@@ -22,6 +22,7 @@ readonly -a PR_COMMANDS=(
   'python3 scripts/test-prepare-image-upgrade.py'
   'python3 scripts/test-rehearse-mariadb-upgrade.py'
   'python3 scripts/test-rehearse-nextcloud-upgrade.py'
+  'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-restore-live-runtime.py'
   'bash scripts/test-fetch-image-upgrade.sh'
   'bash scripts/test-active-images.sh'
   'bash scripts/test-compose-launcher.sh'
