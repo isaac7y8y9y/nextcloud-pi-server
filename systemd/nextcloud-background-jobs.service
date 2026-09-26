@@ -1,4 +1,5 @@
 [Unit]
+ConditionPathExists=!/var/lib/nextcloud-pi-ops/upgrade-freeze/current.tsv
 Description=Nextcloud background jobs
 After=nextcloud.service
 RequiresMountsFor=@NEXTCLOUD_STORAGE_MOUNT@

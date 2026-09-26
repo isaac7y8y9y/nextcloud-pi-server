@@ -39,6 +39,7 @@ must be resolved before trusting a Linux integration result.
 | `scripts/check-privileged-sudo-calls.sh` | Rejects non-dispatcher passwordless sudo calls in non-test shell scripts; Bash and ripgrep | Read-only | `0.01s` | Direct | PR-direct |
 | `scripts/check-public-safety.py` | Detects forbidden files, deployment identity, and secret-like material in the tree or reachable history; Python and Git | Read-only; output is redacted | `0.10s` tree; `4.23s` history locally | Direct in both modes | PR-direct |
 | `scripts/test-active-images.sh` | Exercises active-image record schema, modes, binding, ownership contract, and symlink rejection | Disposable local fixture removed by trap | `0.03s` | Direct | PR-direct |
+| `scripts/test-activate-image-upgrade.py` | Checks fetch-authority tampering, stale evidence, single-use approval, pre-prepare/pre-boundary abort, ambiguous/post-boundary retention, image-ID failure, DB fail-closed activation, and pending-acceptance ordering | Python temporary directory removed by cleanup; no Pi access | `<0.1s` | Direct | PR-direct |
 | `scripts/test-atomic-transaction.sh` | Fault-injects the shared deployment transaction and verifies rollback ordering/state | Disposable local fixture and fake sudo; trap cleanup | `0.23s` | Direct | PR-direct |
 | `scripts/test-background-jobs.sh` | Verifies the local timer cadence, passive stopped-stack behavior, dispatcher quiescence, and runtime-backup coordination contracts | Read-only | `<0.1s` | Direct | PR-direct |
 | `scripts/test-compose-env-references.sh` | Exercises the Compose checker against valid and invalid synthetic templates | Disposable Compose fixture removed by trap | `0.02s` | Direct | PR-direct |
@@ -47,7 +48,9 @@ must be resolved before trusting a Linux integration result.
 | `scripts/test-deploy-transaction.sh` | Checks or performs the disposable Pi deployment rollback drill; deployment identity, SSH, helper, systemd, and explicit apply approval | Check is Pi-read-only; apply creates then removes disposable remote state; trap reports cleanup ID | `<1 min` expected on healthy LAN; not run in audit | Syntax only | Operator-only |
 | `scripts/test-deployment-config.sh` | Exercises renderer placeholders, substitutions, permissions, output contents, and overwrite rejection | Disposable rendered tree removed by trap | `0.15s` | Direct | PR-direct |
 | `scripts/test-documentation-links.py` | Unit-tests Markdown-link and heading parsing | Python temporary directories | `0.07s` | Direct | PR-direct |
+| `scripts/test-fetch-image-upgrade.sh` | Uses fake SSH and verifiers to test narrow digest-fetch approval, expiry, tampering, single-use/replay, and no activation; live daemon/network proof remains open | Disposable synthetic fixture removed by trap | `<2s` | Direct | PR-direct |
 | `scripts/test-health-check.sh` | Exercises retry bounds and rendered health/rollback policy with fake remote calls | Disposable fixture removed by trap | `0.06s` | Direct | PR-direct |
+| `scripts/test-held-runtime-backup.sh` | Verifies ordinary and held-freeze runtime manifest schemas and rejects an invalid freeze binding | Disposable local archives removed by trap | `<1s` | Direct | PR-direct |
 | `scripts/test-image-import-interruption.sh` | Fault-injects local image-import lifecycle interruption and recovery handling | Disposable state and fake Docker removed by trap | `0.01s` | Direct | PR-direct |
 | `scripts/test-image-import-transaction.sh` | Exercises image-load/apply/rollback failures with fake transport, Docker, and systemd behavior | Disposable tags/state/fixtures removed by cleanup trap | `1.18s` | Direct | PR-direct |
 | `scripts/test-image-import.sh` | Static import/attestation/approval contract guard plus clock-skew behavior | Read-only plus disposable extracted function | `0.06s` | Direct | PR-direct |
@@ -58,18 +61,37 @@ must be resolved before trusting a Linux integration result.
 | `scripts/test-image-restore-readiness.sh` | Loads a verified private archive into an explicitly isolated Docker daemon and publishes attestation | Mutates isolated daemon and recovery directory; parent lifecycle owns daemon cleanup | Several minutes, archive-size dependent | Syntax plus static assertions in related tests | Operator-only |
 | `scripts/test-operational-documentation.py` | Enforces operator command/runbook contracts and executable promises | Read-only | `0.01s` | Direct | PR-direct |
 | `scripts/test-preflight.sh` | Static guard that preflight reads protected state only through the dispatcher | Read-only | `<0.01s` | Direct | PR-direct |
-| `scripts/test-privileged-helper.sh` | Exercises helper parsing/archive safety portably and the installed dispatcher lifecycle on an ephemeral Linux runner; Bash, Python 3, tar, a C compiler, and Actions sudo | Local temp data; in Actions, root-owned fixtures, fake services, sockets, and units removed by trap | `0.31s` portable subset; CI portion to be measured | Direct | PR-direct |
+| `scripts/test-prepare-image-upgrade.py` | Exercises private one-image candidate creation, source-lock/Compose/record consistency, and tamper rejection | Python temporary directory removed by cleanup | `<0.1s` | Direct | PR-direct |
+| `scripts/test-rehearse-mariadb-upgrade.py` | Checks private rehearsal roots, single-use/expiry/evidence approval, and failed-pull retention | Python temporary directory removed by cleanup | `<0.1s` | Direct | PR-direct |
+| `scripts/test-rehearse-nextcloud-upgrade.py` | Checks private application-rehearsal approval, status gates, and failed-pull retention | Python temporary directory removed by cleanup | `<0.1s` | Direct | PR-direct |
+| `scripts/test-release-upgrade-freeze.py` | Checks release approval binding, replay/expiry denial, expected active-timer retry, and health-before-release ordering | Python temporary directory removed by cleanup; no Pi access | `<0.1s` | Direct | PR-direct |
+| `scripts/test-recovery-promotion.sh` | Injects failure after each of eight runtime directory moves and verifies guarded resume preserves old and restored trees | Disposable local directories removed by trap; no Pi access | `<1s` | Direct | PR-direct |
+| `scripts/test-restore-live-runtime.py` | Checks private restore approval binding, expiry, replay denial, prepared-stage restaging, interrupted-promotion resume, and freeze retention on injected failure | Python temporary directory removed by cleanup; no Pi access | `<0.1s` | Direct | PR-direct |
+| `scripts/test-privileged-helper.sh` | Exercises helper parsing/archive safety portably and the installed dispatcher, including upgrade-freeze state transitions, on an ephemeral Linux runner; Bash, Python 3, tar, a C compiler, and Actions sudo | Local temp data; in Actions, root-owned fixtures, fake services, sockets, and units removed by trap | `0.31s` portable subset; CI portion to be measured | Direct | PR-direct |
 | `scripts/test-privileged-installer.sh` | Exercises bundle install, upgrade, rollback, interruption, revocation, removal refusal, and cleanup; Bash, coreutils, and Actions sudo | In Actions only, disposable root-owned install tree and fake tools removed by trap | `<0.1s` portable subset; CI portion to be measured | Direct | PR-direct |
 | `scripts/test-privileged-locks.sh` | Exercises helper/installer lock-root and lock-file symlink protections and modes; Bash and Actions sudo | In Actions only, disposable root-owned lock fixtures removed by trap | `<0.1s` portable subset; CI portion to be measured | Direct | PR-direct |
 | `scripts/test-privileged-sudoers.sh` | Exercises exact sudoers authorization and denial surface; Bash, sudo, `visudo`, and `useradd` on Actions Linux | In Actions only, temporary system user and fixed-path fixture removed/restored by trap | `<0.1s` portable subset; CI portion to be measured | Direct | PR-direct |
 | `scripts/test-public-config.sh` | Renders synthetic deployment config and validates Compose plus Caddy; Docker, Compose, network/cache for `caddy:2` | Local temp tree and `--rm` container; image may be pulled/cached | `6s` in audited Actions run | Direct separate step | PR-direct |
 | `scripts/test-public-safety.py` | Unit-tests publication-safety detectors using value-safe fixtures | Disposable Git/environment fixtures | `0.13s` | Direct | PR-direct |
+| `scripts/test-resolve-image-upgrade.py` | Verifies ARM64 index and image-config identity parsing and rejects wrong platforms, digests, and floating tags | Read-only synthetic JSON | `<0.1s` | Direct | PR-direct |
 | `scripts/test-runtime-recovery-regression.sh` | Static guard that the live recovery drill uses dispatcher actions and no broad direct sudo | Read-only; does not restore data | `0.01s` | Direct | PR-direct |
 | `scripts/test-runtime-recovery.sh` | Restores a verified private runtime backup into disposable Pi paths and a disposable MariaDB container | Check is Pi-read-only; apply mutates disposable storage/container state and owns cleanup/retry ID | Minutes to tens of minutes, backup-size dependent | Syntax plus static wrapper assertions and helper integration | Operator-only |
 | `scripts/test-ssh-keepalive.sh` | Enforces keepalive options on long image/runtime SSH and SCP streams | Read-only | `0.02s` | Direct | PR-direct |
 <!-- test-inventory:end -->
 
 ## Coverage tiers
+
+The issue-26 failure matrix now has offline coverage for wrong ARM64
+manifest/config identity (`test-resolve-image-upgrade.py`), source-lock and
+Compose drift (`test-prepare-image-upgrade.py`), wrong archive platform or
+mapping (`test-image-recovery-attestation.sh`), fetch approval expiry/tamper/
+replay (`test-fetch-image-upgrade.sh`), stale stage evidence and both sides of
+the first-start boundary (`test-activate-image-upgrade.py`), and SQL import,
+promotion, and retained failed state (`test-restore-live-runtime.py` and the
+Linux privileged fixture). These tests cannot prove the Pi's actual firewall
+path, in-flight application/DB drain, or a disposable full-runtime restore on
+the Pi; those remain explicit gates in the
+[ingress proof plan](upgrade-ingress-proof.md).
 
 - **PR-direct**: the runner executes the script as a program.
 - **PR-transitive**: a directly executed test invokes the script against a

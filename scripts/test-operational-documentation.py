@@ -24,6 +24,14 @@ EXPECTED_PR_COMMANDS = (
     "bash scripts/test-deployment-config.sh",
     "bash scripts/test-compose-env-references.sh",
     "bash scripts/test-image-lock.sh",
+    "python3 scripts/test-resolve-image-upgrade.py",
+    "python3 scripts/test-prepare-image-upgrade.py",
+    "python3 scripts/test-rehearse-mariadb-upgrade.py",
+    "python3 scripts/test-rehearse-nextcloud-upgrade.py",
+    "PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-restore-live-runtime.py",
+    "PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-activate-image-upgrade.py",
+    "PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-release-upgrade-freeze.py",
+    "bash scripts/test-fetch-image-upgrade.sh",
     "bash scripts/test-active-images.sh",
     "bash scripts/test-compose-launcher.sh",
     "bash scripts/test-atomic-transaction.sh",
@@ -35,6 +43,8 @@ EXPECTED_PR_COMMANDS = (
     "bash scripts/test-image-readiness-lifecycle.sh",
     "bash scripts/test-image-readiness-e2e.sh",
     "bash scripts/test-runtime-recovery-regression.sh",
+    "bash scripts/test-recovery-promotion.sh",
+    "bash scripts/test-held-runtime-backup.sh",
     "bash scripts/test-ssh-keepalive.sh",
     "bash scripts/test-deploy-config.sh",
     "bash scripts/test-health-check.sh",
@@ -155,8 +165,8 @@ def verify_testing_governance() -> None:
         raise AssertionError(f"runner exposes PR-transitive scripts: {sorted(transitive & set(counts))}")
     if operator_only & set(counts):
         raise AssertionError(f"runner exposes operator-only scripts: {sorted(operator_only & set(counts))}")
-    if len(direct) != 29 or len(transitive) != 1 or len(operator_only) != 3:
-        raise AssertionError("inventory tier counts differ from the approved 29/1/3 split")
+    if len(direct) != 39 or len(transitive) != 1 or len(operator_only) != 3:
+        raise AssertionError("inventory tier counts differ from the approved 39/1/3 split")
 
     for value in (
         "scripts/run-tests.sh pr",
@@ -284,7 +294,7 @@ def main() -> int:
         "single-use",
         "15 minutes",
         "24 hours old",
-        "There is no script that restores a runtime backup into live",
+        "not yet a production operator procedure",
         "consumed approval cannot be replayed",
     )
     combined_runbooks = " ".join("\n".join((deployment, backup, recovery)).split())

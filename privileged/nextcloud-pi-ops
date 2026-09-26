@@ -114,7 +114,7 @@ no_nested_mounts() { /usr/bin/findmnt -rn -o TARGET | /usr/bin/awk -v path="$1" 
 ensure_parent() { local path="$(state_dir "$1")"; if [[ -e "$path" || -L "$path" ]]; then safe_dir "$path"; else /usr/bin/install -d -m 0700 -o root -g root "$path"; fi; }
 read_exact() {
   local target="$1" size="$2" extra="$1.extra"
-  /usr/bin/dd iflag=fullblock bs=1 count="$size" status=none of="$target" || die "input read failed"
+  /usr/bin/dd iflag=fullblock,count_bytes bs=1M count="$size" status=none of="$target" || die "input read failed"
   [[ "$(/usr/bin/stat -c '%s' "$target")" == "$size" ]] || die "input is truncated"
   /usr/bin/dd bs=1 count=1 status=none of="$extra" 2>/dev/null || die "input trailer check failed"
   [[ "$(/usr/bin/stat -c '%s' "$extra")" == 0 ]] || die "input has trailing bytes"
@@ -135,13 +135,474 @@ active_prepare_abort() { local status="$1" tx="$ACTIVE_PREPARE_ABORT_TX"; trap -
 cmd_version() { [[ $# == 0 ]] || invalid; reject_stdin; out version "${P[NEXTCLOUD_PI_BUNDLE_VERSION]}"; out manifest_sha256 "$(hash "$MANIFEST")"; }
 cmd_check() { local program resolved; [[ $# == 0 ]] || invalid; reject_stdin; validate_host; for program in /bin/bash /usr/bin/awk /usr/bin/basename /usr/bin/cp /usr/bin/dd /usr/bin/df /usr/bin/dirname /usr/bin/docker /usr/bin/dockerd /usr/bin/du /usr/bin/find /usr/bin/findmnt /usr/bin/flock /usr/bin/id /usr/bin/install /usr/bin/kill /usr/bin/mktemp /usr/bin/nohup /usr/bin/python3 /usr/bin/readlink /usr/bin/rm /usr/bin/sha256sum /usr/bin/sleep /usr/bin/stat /usr/bin/systemctl /usr/bin/tail /usr/bin/tar /usr/bin/tr; do [[ -x "$program" ]] || die "required program is unavailable"; resolved="$(/usr/bin/readlink -f "$program")"; [[ -f "$resolved" && ! -L "$resolved" && "$(uid "$resolved")" == 0 && "$(gid "$resolved")" == 0 ]] || die "required program is unsafe"; done; out status ok; }
 cmd_protected_state() { [[ $# == 1 && "$1" != -* ]] || invalid; reject_stdin; local path expected; path="$(resource_path "$1")"; expected="$(resource_mode "$1")"; if [[ ! -e "$path" && ! -L "$path" ]]; then out state missing; out name "$1"; return; fi; protected_file "$path" "$expected"; protected_parents "$path"; out state present; out name "$1"; out sha256 "$(hash "$path")"; out uid 0; out gid 0; out mode "$expected"; }
-cmd_active_images_state() { [[ $# == 0 ]] || invalid; reject_stdin; "$VALIDATOR"; out status ok; out mode "$(/usr/bin/awk -F= '$1 == "NEXTCLOUD_ACTIVE_IMAGES_MODE" { print $2 }' "$ACTIVE_RECORD")"; out sha256 "$(hash "$ACTIVE_RECORD")"; }
+cmd_active_images_state() {
+  [[ $# == 0 ]] || invalid; reject_stdin; "$VALIDATOR"
+  local key
+  out status ok
+  out mode "$(/usr/bin/awk -F= '$1 == "NEXTCLOUD_ACTIVE_IMAGES_MODE" { print $2 }' "$ACTIVE_RECORD")"
+  out sha256 "$(hash "$ACTIVE_RECORD")"
+  out source_lock_sha256 "$(/usr/bin/awk -F= '$1 == "NEXTCLOUD_ACTIVE_IMAGES_PROVENANCE_SHA256" { print $2 }' "$ACTIVE_RECORD")"
+  for key in APP DB CADDY; do
+    out "${key,,}_id" "$(/usr/bin/awk -F= -v wanted="NEXTCLOUD_ACTIVE_IMAGES_${key}_ID" '$1 == wanted { print $2 }' "$ACTIVE_RECORD")"
+  done
+}
 cmd_service() { [[ $# == 1 ]] || invalid; reject_stdin; lock; validate_host; case "$1" in start|restart) /usr/bin/systemctl "$1" "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "service is not active";; stop) /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "service did not stop";; *) invalid;; esac; out state "$1"; }
 background_jobs_timer=nextcloud-background-jobs.timer
 background_jobs_service=nextcloud-background-jobs.service
 cmd_background_jobs_state() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; if /usr/bin/systemctl is-enabled --quiet "$background_jobs_timer"; then out timer_enabled yes; else out timer_enabled no; fi; if /usr/bin/systemctl is-active --quiet "$background_jobs_timer"; then out timer_active yes; else out timer_active no; fi; }
 cmd_background_jobs_pause() { [[ $# == 0 ]] || invalid; reject_stdin; local state attempt; lock; validate_host; /usr/bin/systemctl stop "$background_jobs_timer"; for attempt in {1..300}; do state="$(/usr/bin/systemctl is-active "$background_jobs_service" 2>/dev/null || true)"; case "$state" in inactive|failed|unknown|'') out state paused; return;; active|activating|deactivating) /usr/bin/sleep 1;; *) die "background job service has an unexpected state";; esac; done; die "background job service did not finish before the five-minute backup wait"; }
 cmd_background_jobs_resume() { [[ $# == 0 ]] || invalid; reject_stdin; lock; validate_host; /usr/bin/systemctl start "$background_jobs_timer"; /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background job timer did not start"; out state resumed; }
+
+# A dedicated inet/prerouting rule blocks host-directed Caddy traffic before
+# Docker's destination NAT. It applies to both IP families and established
+# flows; loopback traffic does not enter this non-loopback rule. An interrupted
+# activation intentionally leaves maintenance and the timer paused.
+freeze_table=nextcloud_pi_upgrade
+freeze_root() { state_dir upgrade-freeze; }
+freeze_current() { printf '%s/current.tsv' "$(freeze_root)"; }
+freeze_hold() { printf '%s/timer-held' "$(freeze_root)"; }
+freeze_used() { printf '%s/used-%s' "$(freeze_root)" "$1"; }
+freeze_field() { metadata "$(freeze_current)" "$1"; }
+freeze_write() {
+  local file="$(freeze_current)" temporary
+  temporary="$file.new"
+  printf 'format\tupgrade-freeze-v1\nid\t%s\nphase\t%s\ntimer_active\t%s\ntable_sha256\t%s\n' "$1" "$2" "$3" "$4" >"$temporary"
+  /usr/bin/chmod 0600 "$temporary"
+  /usr/bin/mv -f -- "$temporary" "$file"
+}
+freeze_table_hash() { /usr/sbin/nft -j list table inet "$freeze_table" | /usr/bin/sha256sum | /usr/bin/awk '{print $1}'; }
+freeze_install_rule() {
+  /usr/sbin/nft -f - <<'NFT'
+add table inet nextcloud_pi_upgrade
+add chain inet nextcloud_pi_upgrade ingress { type filter hook prerouting priority -300; policy accept; }
+add rule inet nextcloud_pi_upgrade ingress iifname != "lo" fib daddr type local tcp dport { 80, 443 } drop
+NFT
+}
+freeze_require_current() {
+  local file="$(freeze_current)" id="$1" phase timer table
+  valid_id "$id" || invalid
+  safe_dir "$(freeze_root)"; protected_file "$file" 0600
+  [[ "$(freeze_field format)" == upgrade-freeze-v1 && "$(freeze_field id)" == "$id" ]] || die "freeze transaction differs"
+  phase="$(freeze_field phase)"; timer="$(freeze_field timer_active)"; table="$(freeze_field table_sha256)"
+  [[ "$phase" == preparing || "$phase" == active || "$phase" == releasing ]] || die "freeze phase is invalid"
+  [[ "$timer" == yes || "$timer" == no ]] || die "freeze timer state is invalid"
+  [[ "$table" == pending || "$table" =~ ^[0-9a-f]{64}$ ]] || die "freeze table identity is invalid"
+}
+cmd_upgrade_freeze_check() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid; validate_host
+  [[ -x /usr/sbin/nft && ! -L /usr/sbin/nft ]] || die "nftables is unavailable"
+  local root="$(freeze_root)" current="$(freeze_current)"
+  if [[ -e "$root" || -L "$root" ]]; then
+    safe_dir "$root"
+    [[ ! -e "$current" && ! -L "$current" && ! -e "$(freeze_used "$1")" && ! -L "$(freeze_used "$1")" ]] || die "freeze lifecycle already exists"
+  fi
+  ! /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1 || die "upgrade firewall table already exists"
+  /usr/bin/docker port "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}" 80/tcp >/dev/null || die "Caddy HTTP is not published"
+  /usr/bin/docker port "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}" 443/tcp >/dev/null || die "Caddy HTTPS is not published"
+  [[ ! -e "$(active_marker)" && ! -L "$(active_marker)" ]] || die "an active-image transaction is unresolved"
+  out state available; out id "$1"
+}
+cmd_upgrade_freeze_status() {
+  [[ $# == 0 ]] || invalid; reject_stdin; validate_host
+  local root="$(freeze_root)" current="$(freeze_current)" phase table
+  if [[ ! -e "$root" && ! -L "$root" ]]; then
+    ! /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1 || die "orphaned upgrade firewall table"
+    out state absent; return
+  fi
+  safe_dir "$root"
+  if [[ ! -e "$current" && ! -L "$current" ]]; then
+    ! /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1 || die "orphaned upgrade firewall table"
+    out state absent; return
+  fi
+  protected_file "$current" 0600
+  freeze_require_current "$(freeze_field id)"
+  phase="$(freeze_field phase)"; table="$(freeze_field table_sha256)"
+  if [[ "$phase" == active ]]; then
+    [[ "$(freeze_table_hash)" == "$table" ]] || die "upgrade firewall differs from its protected state"
+  fi
+  out state "$phase"; out id "$(freeze_field id)"; out table_sha256 "$table"; out timer_was_active "$(freeze_field timer_active)"
+}
+cmd_upgrade_freeze_boot_guard() {
+  [[ $# == 0 ]] || invalid
+  local current="$(freeze_current)" root="$(freeze_root)" phase table metadata_file
+  lock; validate_host
+  for metadata_file in "${P[NEXTCLOUD_PI_STATE_ROOT]}"/runtime-recovery/*/metadata.tsv; do
+    [[ -e "$metadata_file" || -L "$metadata_file" ]] || continue
+    protected_file "$metadata_file" 0600
+    [[ "$(metadata "$metadata_file" state)" != promoting ]] || die "partial runtime promotion blocks Docker start"
+  done
+  if [[ ! -e "$root" && ! -L "$root" ]]; then
+    ! /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1 || die "orphaned upgrade firewall table"
+    return
+  fi
+  safe_dir "$root"
+  if [[ ! -e "$current" && ! -L "$current" ]]; then
+    ! /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1 || die "orphaned upgrade firewall table"
+    return
+  fi
+  protected_file "$current" 0600; freeze_require_current "$(freeze_field id)"
+  phase="$(freeze_field phase)"; table="$(freeze_field table_sha256)"
+  [[ "$phase" == active || "$phase" == releasing ]] || die "unresolved freeze phase blocks Docker start"
+  if [[ -e "$(freeze_hold)" || -L "$(freeze_hold)" ]]; then
+    protected_file "$(freeze_hold)" 0600
+  else
+    /usr/bin/install -m 0600 -o root -g root /dev/null "$(freeze_hold)"
+  fi
+  # The service unit independently refuses jobs while current.tsv exists.
+  /usr/bin/systemctl stop "$background_jobs_timer" || die "could not pause background-job timer during boot"
+  ! /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer remains active during boot"
+  if ! /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1; then
+    freeze_install_rule || die "could not restore upgrade firewall before Docker start"
+  fi
+  [[ "$(freeze_table_hash)" == "$table" ]] || die "boot-restored upgrade firewall differs"
+}
+freeze_socket_count() {
+  /usr/bin/docker exec "$1" /usr/bin/awk '$4 == "01" { count++ } END { print count+0 }' /proc/net/tcp /proc/net/tcp6
+}
+freeze_database_count() {
+  /usr/bin/docker exec "${P[NEXTCLOUD_PI_DB_CONTAINER]}" sh -eu -c '
+    test -n "${MYSQL_ROOT_PASSWORD:-}" && test -n "${MYSQL_DATABASE:-}"
+    export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"
+    exec mariadb --protocol=tcp --host=127.0.0.1 -uroot -N --batch "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM information_schema.INNODB_TRX"
+  '
+}
+cmd_upgrade_freeze_quiescence() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  local id="$1" sample app caddy db service
+  validate_host; freeze_require_current "$id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$(freeze_field table_sha256)" ]] || die "upgrade freeze is not active or differs"
+  ! /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer is active"
+  service="$(/usr/bin/systemctl is-active "$background_jobs_service" 2>/dev/null || true)"
+  [[ "$service" == inactive || "$service" == failed || "$service" == unknown ]] || die "background-job service is still running"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*true$' || die "Nextcloud maintenance mode is not on"
+  for sample in 1 2; do
+    app="$(freeze_socket_count "${P[NEXTCLOUD_PI_APP_CONTAINER]}")" || die "application sockets could not be inspected"
+    caddy="$(freeze_socket_count "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}")" || die "Caddy sockets could not be inspected"
+    db="$(freeze_database_count)" || die "database activity could not be inspected"
+    [[ "$app" =~ ^[0-9]+$ && "$caddy" =~ ^[0-9]+$ && "$db" =~ ^[0-9]+$ ]] || die "quiescence counts are invalid"
+    (( 10#$app == 0 && 10#$caddy == 0 && 10#$db == 0 )) || die "application or database activity remains; retain ingress freeze"
+    [[ "$sample" == 2 ]] || /usr/bin/sleep 5
+  done
+  [[ "$(freeze_table_hash)" == "$(freeze_field table_sha256)" ]] || die "upgrade firewall changed during drain"
+  ! /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer resumed during drain"
+  out state quiescent; out id "$id"; out table_sha256 "$(freeze_field table_sha256)"
+}
+cmd_upgrade_freeze_maintenance_off() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  local id="$1"
+  lock; validate_host; freeze_require_current "$id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$(freeze_field table_sha256)" ]] || die "upgrade freeze differs"
+  upgrade_fetch_release_allowed
+  upgrade_stage_release_allowed
+  [[ ! -e "$(active_marker)" && ! -L "$(active_marker)" ]] || die "an active-image transaction is unresolved"
+  ! /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer is active"
+  cmd_upgrade_freeze_quiescence "$id" >/dev/null
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ maintenance:mode --off >/dev/null || die "could not leave maintenance mode"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "maintenance mode remains on"
+  out state maintenance-off; out id "$id"
+}
+cmd_upgrade_freeze_activate() {
+  [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" timer=no service_state attempt table
+  valid_id "$id" || invalid; lock; cmd_upgrade_freeze_check "$id"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is already on"
+  ensure_parent upgrade-freeze
+  /usr/bin/systemctl is-active --quiet "$background_jobs_timer" && timer=yes
+  freeze_write "$id" preparing "$timer" pending
+  /usr/bin/install -m 0600 -o root -g root /dev/null "$(freeze_hold)"
+  /usr/bin/systemctl stop "$background_jobs_timer" || die "could not pause background-job timer"
+  for attempt in {1..300}; do
+    service_state="$(/usr/bin/systemctl is-active "$background_jobs_service" 2>/dev/null || true)"
+    case "$service_state" in inactive|failed|unknown|'') break;; active|activating|deactivating) /usr/bin/sleep 1;; *) die "background-job service state is unexpected";; esac
+  done
+  [[ "$service_state" =~ ^(inactive|failed|unknown|)$ ]] || die "background-job service did not quiesce"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ maintenance:mode --on >/dev/null || die "could not enable maintenance mode"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*true$' || die "maintenance mode was not confirmed"
+  freeze_install_rule || die "upgrade ingress rule did not install; maintenance remains on"
+  table="$(freeze_table_hash)"; [[ "$table" =~ ^[0-9a-f]{64}$ ]] || die "upgrade ingress rule could not be identified"
+  freeze_write "$id" active "$timer" "$table"
+  out state active; out id "$id"; out table_sha256 "$table"
+}
+cmd_upgrade_freeze_release() {
+  [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" phase timer table current used
+  valid_id "$id" || invalid; lock; validate_host; freeze_require_current "$id"
+  phase="$(freeze_field phase)"; timer="$(freeze_field timer_active)"; table="$(freeze_field table_sha256)"
+  [[ "$phase" == active || "$phase" == releasing ]] || die "freeze activation is unresolved; manual recovery is required"
+  if [[ "$phase" == active ]]; then
+    [[ "$(freeze_table_hash)" == "$table" ]] || die "upgrade firewall differs from its protected state"
+    upgrade_fetch_release_allowed
+    upgrade_stage_release_allowed
+    [[ ! -e "$(active_marker)" && ! -L "$(active_marker)" ]] || die "an active-image transaction is unresolved; retain the ingress freeze"
+    /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is still on"
+    freeze_write "$id" releasing "$timer" "$table"
+    /usr/sbin/nft delete table inet "$freeze_table" || die "could not release upgrade firewall"
+  else
+    if /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1; then
+      [[ "$(freeze_table_hash)" == "$table" ]] || die "upgrade firewall differs during release"
+      /usr/sbin/nft delete table inet "$freeze_table" || die "could not finish upgrade firewall release"
+    fi
+  fi
+  if [[ -e "$(freeze_hold)" || -L "$(freeze_hold)" ]]; then
+    protected_file "$(freeze_hold)" 0600
+    /usr/bin/rm -f -- "$(freeze_hold)"
+  else
+    [[ "$phase" == releasing ]] || die "background-job timer hold is missing"
+  fi
+  if [[ "$timer" == yes ]]; then
+    /usr/bin/systemctl start "$background_jobs_timer" || die "could not restore background-job timer"
+    /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer is not active"
+  else
+    /usr/bin/systemctl stop "$background_jobs_timer" || die "could not preserve paused background-job timer"
+    ! /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer is unexpectedly active"
+  fi
+  current="$(freeze_current)"; used="$(freeze_used "$id")"
+  if [[ -e "$used" || -L "$used" ]]; then
+    protected_file "$used" 0600
+  else
+    /usr/bin/install -m 0600 -o root -g root /dev/null "$used"
+  fi
+  /usr/bin/rm -f -- "$current"
+  out state released; out id "$id"
+}
+upgrade_fetch_root() { state_dir upgrade-fetch; }
+upgrade_fetch_file() { printf '%s/%s.tsv' "$(upgrade_fetch_root)" "$1"; }
+upgrade_fetch_write() {
+  local target="$(upgrade_fetch_file "$1")" temporary
+  temporary="$target.new"
+  printf 'format\tupgrade-fetch-v1\nstate\t%s\nid\t%s\nfingerprint\t%s\nfreeze_id\t%s\nfreeze_table_sha256\t%s\nref\t%s\nexpected_id\t%s\nexpires\t%s\n' "$2" "$1" "$3" "$4" "$5" "$6" "$7" "$8" >"$temporary"
+  /usr/bin/chmod 0600 "$temporary"; /usr/bin/mv -f -- "$temporary" "$target"
+}
+upgrade_fetch_release_allowed() {
+  local root="$(upgrade_fetch_root)" file
+  [[ ! -e "$root" && ! -L "$root" ]] && return
+  safe_dir "$root"
+  for file in "$root"/*.tsv; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    protected_file "$file" 0600
+    [[ "$(metadata "$file" format)" == upgrade-fetch-v1 && "$(metadata "$file" state)" == complete ]] || die "an image fetch is unresolved; retain the ingress freeze"
+  done
+}
+cmd_upgrade_fetch_consume() {
+  [[ $# == 8 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" freeze_id="$3" table="$4" ref="$5" expected="$6" expires="$7" reserved="$8" file
+  valid_id "$id" && valid_hash "$fingerprint" && valid_id "$freeze_id" && valid_hash "$table" && valid_hash "${expected#sha256:}" || invalid
+  [[ "$expected" =~ ^sha256:[0-9a-f]{64}$ && "$ref" =~ ^(nextcloud|mariadb|caddy)@sha256:[0-9a-f]{64}$ && "$expires" =~ ^[0-9]{10}$ && "$reserved" == fetch-only ]] || invalid
+  lock; validate_host; freeze_require_current "$freeze_id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$table" && "$(freeze_field table_sha256)" == "$table" ]] || die "upgrade freeze changed"
+  (( $(/usr/bin/date -u +%s) <= 10#$expires )) || die "image-fetch approval expired"
+  ensure_parent upgrade-fetch; file="$(upgrade_fetch_file "$id")"
+  [[ ! -e "$file" && ! -L "$file" && ! -e "$file.new" && ! -L "$file.new" ]] || die "image-fetch approval was already consumed or interrupted"
+  upgrade_fetch_write "$id" pending "$fingerprint" "$freeze_id" "$table" "$ref" "$expected" "$expires"
+  out state pending; out id "$id"
+}
+cmd_upgrade_fetch_complete() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" file freeze_id table ref expected actual
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; safe_dir "$(upgrade_fetch_root)"; file="$(upgrade_fetch_file "$id")"; protected_file "$file" 0600
+  [[ "$(metadata "$file" format)" == upgrade-fetch-v1 && "$(metadata "$file" state)" == pending && "$(metadata "$file" id)" == "$id" && "$(metadata "$file" fingerprint)" == "$fingerprint" ]] || die "image-fetch transaction differs"
+  freeze_id="$(metadata "$file" freeze_id)"; table="$(metadata "$file" freeze_table_sha256)"; ref="$(metadata "$file" ref)"; expected="$(metadata "$file" expected_id)"
+  freeze_require_current "$freeze_id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$table" && "$(freeze_field table_sha256)" == "$table" ]] || die "upgrade freeze changed"
+  actual="$(/usr/bin/docker image inspect --format '{{.Id}}' "$ref")" || die "fetched image is unavailable"
+  [[ "$actual" == "$expected" ]] || die "fetched image ID differs"
+  upgrade_fetch_write "$id" complete "$fingerprint" "$freeze_id" "$table" "$ref" "$expected" "$(metadata "$file" expires)"
+  out state complete; out id "$id"
+}
+cmd_upgrade_fetch_status() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  local file key
+  validate_host; safe_dir "$(upgrade_fetch_root)"; file="$(upgrade_fetch_file "$1")"; protected_file "$file" 0600
+  [[ "$(metadata "$file" format)" == upgrade-fetch-v1 && "$(metadata "$file" id)" == "$1" ]] || die "image fetch marker differs"
+  for key in state id fingerprint freeze_id freeze_table_sha256 ref expected_id expires; do out "$key" "$(metadata "$file" "$key")"; done
+}
+upgrade_stage_root() { state_dir upgrade-stage; }
+upgrade_stage_file() { printf '%s/%s.tsv' "$(upgrade_stage_root)" "$1"; }
+upgrade_stage_compose_hash() {
+  local file="${P[NEXTCLOUD_PI_PROJECT_DIR]}/docker-compose.yml"
+  [[ -f "$file" && ! -L "$file" ]] || die "live Compose file is unsafe"
+  hash "$file"
+}
+upgrade_stage_write() {
+  local file temporary
+  file="$(upgrade_stage_file "$1")"; temporary="$file.new"
+  printf 'format\tupgrade-stage-v1\nphase\t%s\nid\t%s\nfingerprint\t%s\nfreeze_id\t%s\nfreeze_table_sha256\t%s\nfetch_id\t%s\ntarget\t%s\ntag\t%s\nexpected_id\t%s\npre_record_sha256\t%s\npre_compose_sha256\t%s\ncandidate_record_sha256\t%s\ncandidate_compose_sha256\t%s\nexpires\t%s\n' \
+    "$2" "$1" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}" "${11}" "${12}" "${13}" "${14}" >"$temporary"
+  /usr/bin/chmod 0600 "$temporary"; /usr/bin/mv -f -- "$temporary" "$file"
+}
+upgrade_stage_field() { metadata "$(upgrade_stage_file "$1")" "$2"; }
+upgrade_stage_require() {
+  local id="$1" file="$(upgrade_stage_file "$1")" freeze_id table
+  valid_id "$id" || invalid
+  safe_dir "$(upgrade_stage_root)"; protected_file "$file" 0600
+  [[ "$(upgrade_stage_field "$id" format)" == upgrade-stage-v1 && "$(upgrade_stage_field "$id" id)" == "$id" ]] || die "upgrade stage differs"
+  freeze_id="$(upgrade_stage_field "$id" freeze_id)"; table="$(upgrade_stage_field "$id" freeze_table_sha256)"
+  freeze_require_current "$freeze_id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$table" && "$(freeze_field table_sha256)" == "$table" ]] || die "upgrade freeze differs"
+}
+upgrade_stage_rewrite() {
+  local id="$1" phase="$2"
+  upgrade_stage_write "$id" "$phase" "$(upgrade_stage_field "$id" fingerprint)" \
+    "$(upgrade_stage_field "$id" freeze_id)" "$(upgrade_stage_field "$id" freeze_table_sha256)" \
+    "$(upgrade_stage_field "$id" fetch_id)" "$(upgrade_stage_field "$id" target)" \
+    "$(upgrade_stage_field "$id" tag)" "$(upgrade_stage_field "$id" expected_id)" \
+    "$(upgrade_stage_field "$id" pre_record_sha256)" "$(upgrade_stage_field "$id" pre_compose_sha256)" \
+    "$(upgrade_stage_field "$id" candidate_record_sha256)" "$(upgrade_stage_field "$id" candidate_compose_sha256)" \
+    "$(upgrade_stage_field "$id" expires)"
+}
+upgrade_stage_release_allowed() {
+  local root="$(upgrade_stage_root)" file phase
+  [[ ! -e "$root" && ! -L "$root" ]] && return
+  safe_dir "$root"
+  for file in "$root"/*.tsv; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    protected_file "$file" 0600
+    phase="$(metadata "$file" phase)"
+    [[ "$(metadata "$file" format)" == upgrade-stage-v1 && ( "$phase" == accepted || "$phase" == aborted || "$phase" == recovered ) ]] || die "an upgrade stage is unresolved; retain the ingress freeze"
+  done
+}
+cmd_upgrade_stage_maintenance_off() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" file service expected running
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not at the runtime boundary"
+  upgrade_fetch_release_allowed
+  for file in "$(upgrade_stage_root)"/*.tsv; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    protected_file "$file" 0600
+    [[ "$file" == "$(upgrade_stage_file "$id")" ]] && continue
+    case "$(metadata "$file" phase)" in accepted|aborted|recovered);; *) die "another upgrade stage is unresolved";; esac
+  done
+  require_active_tx "$id"
+  [[ "$(metadata "$(active_tx "$id")/metadata.tsv" state)" == applied && "$(metadata "$(active_tx "$id")/metadata.tsv" candidate_sha256)" == "$(upgrade_stage_field "$id" candidate_record_sha256)" ]] || die "candidate active transaction differs"
+  [[ "$(live_hash)" == "$(upgrade_stage_field "$id" candidate_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" candidate_compose_sha256)" ]] || die "candidate configuration differs"
+  "$VALIDATOR"
+  /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "Nextcloud service is not active"
+  for service in APP DB CADDY; do
+    expected="$(/usr/bin/awk -F= -v key="NEXTCLOUD_ACTIVE_IMAGES_${service}_ID" '$1 == key {print $2}' "$ACTIVE_RECORD")"
+    case "$service" in APP) running="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; DB) running="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; CADDY) running="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
+    [[ "$(/usr/bin/docker inspect "$running" --format '{{.Image}} {{.State.Running}}')" == "$expected true" ]] || die "running container image differs from candidate"
+  done
+  cmd_upgrade_freeze_quiescence "$(upgrade_stage_field "$id" freeze_id)" >/dev/null
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ maintenance:mode --off >/dev/null || die "could not leave maintenance mode"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "maintenance mode remains on"
+  out state maintenance-off; out id "$id"
+}
+cmd_upgrade_stage_consume() {
+  [[ $# == 13 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" freeze_id="$3" table="$4" fetch_id="$5" fetch_fingerprint="$6" target="$7" tag="$8" pre_record="$9" pre_compose="${10}" candidate_record="${11}" candidate_compose="${12}" expires="${13}" file fetch expected image
+  valid_id "$id" && valid_hash "$fingerprint" && valid_id "$freeze_id" && valid_hash "$table" && valid_id "$fetch_id" && valid_hash "$fetch_fingerprint" || invalid
+  valid_hash "$pre_record" && valid_hash "$pre_compose" && valid_hash "$candidate_record" && valid_hash "$candidate_compose" || invalid
+  [[ "$target" == app || "$target" == db || "$target" == caddy ]] || invalid
+  [[ "$target" != db ]] || die "database activation requires a separately verified clean-directory cutover"
+  [[ "$tag" =~ ^(nextcloud:[0-9]+\.[0-9]+\.[0-9]+-apache|mariadb:[0-9]+\.[0-9]+\.[0-9]+|caddy:[0-9]+\.[0-9]+\.[0-9]+)$ && "$expires" =~ ^[0-9]{10}$ ]] || invalid
+  case "$target" in app) image=nextcloud;; db) image=mariadb;; caddy) image=caddy;; esac
+  [[ "$tag" == "$image":* ]] || invalid
+  lock; validate_host; freeze_require_current "$freeze_id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$table" && "$(freeze_field table_sha256)" == "$table" ]] || die "upgrade freeze differs"
+  (( $(/usr/bin/date -u +%s) <= 10#$expires )) || die "upgrade-stage approval expired"
+  [[ "$pre_record" != "$candidate_record" && "$pre_compose" != "$candidate_compose" ]] || die "candidate must change the selected image and Compose"
+  [[ "$(live_hash)" == "$pre_record" && "$(upgrade_stage_compose_hash)" == "$pre_compose" ]] || die "upgrade pre-state changed"
+  fetch="$(upgrade_fetch_file "$fetch_id")"; safe_dir "$(upgrade_fetch_root)"; protected_file "$fetch" 0600
+  [[ "$(metadata "$fetch" format)" == upgrade-fetch-v1 && "$(metadata "$fetch" state)" == complete && "$(metadata "$fetch" fingerprint)" == "$fetch_fingerprint" && "$(metadata "$fetch" freeze_id)" == "$freeze_id" && "$(metadata "$fetch" freeze_table_sha256)" == "$table" ]] || die "completed image fetch differs"
+  [[ "$(metadata "$fetch" ref)" =~ ^${image}@sha256:[0-9a-f]{64}$ ]] || die "fetched image target differs"
+  expected="$(metadata "$fetch" expected_id)"
+  [[ "$(/usr/bin/docker image inspect --format '{{.Id}}' "$(metadata "$fetch" ref)")" == "$expected" ]] || die "fetched image ID differs"
+  ensure_parent upgrade-stage; file="$(upgrade_stage_file "$id")"
+  [[ ! -e "$file" && ! -L "$file" && ! -e "$file.new" && ! -L "$file.new" ]] || die "upgrade-stage approval was already consumed"
+  upgrade_stage_write "$id" prepared "$fingerprint" "$freeze_id" "$table" "$fetch_id" "$target" "$tag" "$expected" "$pre_record" "$pre_compose" "$candidate_record" "$candidate_compose" "$expires"
+  out phase prepared; out id "$id"
+}
+cmd_upgrade_stage_boundary() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" tag expected target
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == prepared && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not prepared"
+  [[ "$(live_hash)" == "$(upgrade_stage_field "$id" candidate_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" candidate_compose_sha256)" ]] || die "candidate configuration differs"
+  tag="$(upgrade_stage_field "$id" tag)"; expected="$(upgrade_stage_field "$id" expected_id)"; target="$(upgrade_stage_field "$id" target)"
+  target="${target^^}"
+  [[ "$(/usr/bin/awk -F= -v key="NEXTCLOUD_ACTIVE_IMAGES_${target}_TAG" '$1 == key {n++; v=$2} END {if (n == 1) print v; else exit 1}' "$ACTIVE_RECORD")" == "$tag" && "$(/usr/bin/awk -F= -v key="NEXTCLOUD_ACTIVE_IMAGES_${target}_ID" '$1 == key {n++; v=$2} END {if (n == 1) print v; else exit 1}' "$ACTIVE_RECORD")" == "$expected" ]] || die "candidate active mapping differs from approved target"
+  [[ "$(/usr/bin/docker image inspect --format '{{.Id}}' "$tag")" == "$expected" ]] || die "candidate image ID differs"
+  "$VALIDATOR"
+  upgrade_stage_rewrite "$id" runtime-may-have-changed
+  out phase runtime-may-have-changed; out id "$id"
+}
+cmd_upgrade_stage_status() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  validate_host; upgrade_stage_require "$1"
+  local key
+  out phase "$(upgrade_stage_field "$1" phase)"; out id "$1"
+  for key in fingerprint freeze_id freeze_table_sha256 fetch_id target tag expected_id pre_record_sha256 pre_compose_sha256 candidate_record_sha256 candidate_compose_sha256; do
+    out "$key" "$(upgrade_stage_field "$1" "$key")"
+  done
+}
+cmd_active_status() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  validate_host; require_active_tx "$1"
+  local meta key
+  meta="$(active_tx "$1")/metadata.tsv"; protected_file "$meta" 0600
+  [[ "$(metadata "$meta" format)" == active-record-v1 ]] || die "active transaction format differs"
+  out id "$1"
+  for key in state pre_sha256 candidate_sha256 size; do out "$key" "$(metadata "$meta" "$key")"; done
+}
+cmd_active_presence() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  local marker="$(active_marker)" tx="$(active_tx "$1")"
+  validate_host
+  if [[ ! -e "$marker" && ! -L "$marker" && ! -e "$tx" && ! -L "$tx" ]]; then
+    out state absent; out id "$1"; return
+  fi
+  require_active_tx "$1"
+  out state present; out id "$1"
+}
+cmd_upgrade_stage_abort() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2"
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == prepared && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "runtime boundary was reached; full restore is required"
+  [[ "$(live_hash)" == "$(upgrade_stage_field "$id" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" pre_compose_sha256)" ]] || die "pre-start rollback is incomplete"
+  upgrade_stage_rewrite "$id" aborted
+  out phase aborted; out id "$id"
+}
+cmd_upgrade_stage_accept() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" service expected running
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not at the runtime boundary"
+  [[ "$(live_hash)" == "$(upgrade_stage_field "$id" candidate_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" candidate_compose_sha256)" ]] || die "candidate configuration changed"
+  "$VALIDATOR"
+  /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "Nextcloud service is not active"
+  for service in APP DB CADDY; do
+    expected="$(/usr/bin/awk -F= -v key="NEXTCLOUD_ACTIVE_IMAGES_${service}_ID" '$1 == key {print $2}' "$ACTIVE_RECORD")"
+    case "$service" in APP) running="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; DB) running="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; CADDY) running="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
+    [[ "$(/usr/bin/docker inspect "$running" --format '{{.Image}} {{.State.Running}}')" == "$expected true" ]] || die "running container image differs from candidate"
+  done
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is still on"
+  upgrade_stage_rewrite "$id" accepted
+  out phase accepted; out id "$id"
+}
+cmd_upgrade_stage_recovered() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" state expected running service
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not at the runtime boundary"
+  state="$(recovery_state "$id")"; safe_dir "$state"; protected_file "$state/metadata.tsv" 0600
+  [[ "$(metadata "$state/metadata.tsv" format)" == runtime-recovery-v1 && "$(metadata "$state/metadata.tsv" state)" == promoted && "$(metadata "$state/metadata.tsv" stage_id)" == "$id" ]] || die "matching full runtime was not promoted"
+  [[ "$(live_hash)" == "$(upgrade_stage_field "$id" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" pre_compose_sha256)" ]] || die "prior image/configuration state was not restored"
+  "$VALIDATOR"; /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "restored service is not active"
+  for service in APP DB CADDY; do
+    expected="$(/usr/bin/awk -F= -v key="NEXTCLOUD_ACTIVE_IMAGES_${service}_ID" '$1 == key {print $2}' "$ACTIVE_RECORD")"
+    case "$service" in APP) running="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; DB) running="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; CADDY) running="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
+    [[ "$(/usr/bin/docker inspect "$running" --format '{{.Image}} {{.State.Running}}')" == "$expected true" ]] || die "restored container image differs"
+  done
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "restored Nextcloud remains in maintenance mode"
+  upgrade_stage_rewrite "$id" recovered
+  out phase recovered; out id "$id"
+}
 cmd_active_prepare() { [[ $# == 3 ]] || invalid; local id="$1" expected="$2" size="$3" tx marker pre; valid_id "$id" && valid_hash "$expected" && valid_size "$size" || invalid; (( size <= 65536 )) || invalid; lock; validate_host; marker="$(active_marker)"; tx="$(active_tx "$id")"; [[ ! -e "$marker" && ! -L "$marker" && ! -e "$tx" && ! -L "$tx" ]] || die "active transaction is already unresolved"; ensure_parent active-record; /usr/bin/install -d -m 0700 -o root -g root "$tx"; ACTIVE_PREPARE_ABORT_TX="$tx"; trap 'active_prepare_abort "$?"' EXIT HUP INT TERM; read_exact "$tx/candidate" "$size"; [[ "$(hash "$tx/candidate")" == "$expected" ]] || die "candidate hash differs"; "$VALIDATOR" --record "$tx/candidate"; pre="$(live_hash)"; if [[ "$pre" == missing ]]; then : >"$tx/absent"; /usr/bin/chmod 0600 "$tx/absent"; else protected_file "$ACTIVE_RECORD" 0600; /usr/bin/cp -p "$ACTIVE_RECORD" "$tx/snapshot"; fi; write_active_meta "$tx/metadata.tsv" prepared "$pre" "$expected" "$size"; printf '%s\n' "$id" >"$marker"; /usr/bin/chmod 0600 "$marker"; trap - EXIT HUP INT TERM; ACTIVE_PREPARE_ABORT_TX=''; out state prepared; out id "$id"; }
 cmd_active_apply() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx meta pre candidate size live; lock; require_active_tx "$id"; tx="$(active_tx "$id")"; meta="$tx/metadata.tsv"; pre="$(metadata "$meta" pre_sha256)"; candidate="$(metadata "$meta" candidate_sha256)"; size="$(metadata "$meta" size)"; [[ "$(metadata "$meta" state)" == prepared && "$(hash "$tx/candidate")" == "$candidate" ]] || die "active transaction is not prepared"; live="$(live_hash)"; if [[ "$live" == "$candidate" ]]; then "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; return; fi; [[ "$live" == "$pre" ]] || die "active record pre-state changed"; "$VALIDATOR" --record "$tx/candidate"; install_record "$tx/candidate"; "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; }
 cmd_active_rollback() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx meta pre candidate size live state; lock; require_active_tx "$id"; tx="$(active_tx "$id")"; meta="$tx/metadata.tsv"; pre="$(metadata "$meta" pre_sha256)"; candidate="$(metadata "$meta" candidate_sha256)"; size="$(metadata "$meta" size)"; state="$(metadata "$meta" state)"; live="$(live_hash)"; [[ "$state" == prepared || "$state" == applied || "$state" == rolledback ]] || die "active transaction state is invalid"; if [[ "$live" == "$candidate" ]]; then if [[ "$pre" == missing ]]; then /usr/bin/rm -f -- "$ACTIVE_RECORD"; else install_record "$tx/snapshot"; "$VALIDATOR"; fi; elif [[ "$live" != "$pre" ]]; then die "active record changed outside transaction"; fi; [[ "$(live_hash)" == "$pre" ]] || die "rollback verification failed"; write_active_meta "$meta" rolledback "$pre" "$candidate" "$size"; out state rolledback; out id "$id"; }
@@ -150,12 +611,66 @@ cmd_active_commit() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx m
 runtime_sources() { local data caddy; data="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud"; caddy="$(/usr/bin/docker volume inspect "${P[NEXTCLOUD_PI_CADDY_DATA_VOLUME]}" --format '{{.Mountpoint}}')"; printf '%s\n' "$data" "$caddy" "$(/usr/bin/docker volume inspect "${P[NEXTCLOUD_PI_CADDY_CONFIG_VOLUME]}" --format '{{.Mountpoint}}')"; }
 recovery_root() { printf '%s/%s%s' "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}" "${P[NEXTCLOUD_PI_RUNTIME_RECOVERY_PREFIX]}" "$1"; }
 recovery_state() { printf '%s/runtime-recovery/%s' "${P[NEXTCLOUD_PI_STATE_ROOT]}" "$1"; }
+cmd_recovery_status() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  local state="$(recovery_state "$1")"
+  validate_host; safe_dir "$state"; protected_file "$state/metadata.tsv" 0600
+  [[ "$(metadata "$state/metadata.tsv" format)" == runtime-recovery-v1 ]] || die "recovery format differs"
+  out state "$(metadata "$state/metadata.tsv" state)"; out id "$1"
+}
 available() { /usr/bin/df -B1 --output=avail "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}" | /usr/bin/tail -1 | /usr/bin/tr -d '[:space:]'; }
 safe_recovery_root() { local id="${1#"${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/${P[NEXTCLOUD_PI_RUNTIME_RECOVERY_PREFIX]}"}"; valid_id "$id" || die "recovery root is invalid"; safe_dir "$1"; }
 cmd_runtime_backup_size() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; local labels=(nextcloud caddy-data caddy-config) paths=() index bytes; mapfile -t paths < <(runtime_sources); for index in 0 1 2; do [[ -d "${paths[$index]}" && ! -L "${paths[$index]}" ]] || die "runtime source is unsafe"; bytes="$(/usr/bin/du -sb "${paths[$index]}" | /usr/bin/awk '{print $1}')"; out "${labels[$index]}_bytes" "$bytes"; done; }
 cmd_runtime_backup_stream() { [[ $# == 1 ]] || invalid; reject_stdin; local dataset="$1" paths=() source parent name; case "$dataset" in nextcloud|caddy-data|caddy-config);; *) invalid;; esac; validate_host; mapfile -t paths < <(runtime_sources); case "$dataset" in nextcloud) source="${paths[0]}"; parent="$(/usr/bin/dirname "$source")"; name="$(/usr/bin/basename "$source")";; caddy-data) source="${paths[1]}"; parent="$source"; name=.; ;; caddy-config) source="${paths[2]}"; parent="$source"; name=.; ;; esac; [[ -d "$source" && ! -L "$source" ]] || die "runtime source is unsafe"; exec /usr/bin/tar --numeric-owner --acls --xattrs -cpf - -C "$parent" "$name"; }
 cmd_recovery_check() { [[ $# == 2 ]] || invalid; reject_stdin; local id="$1" need="$2" root bytes; valid_id "$id" && valid_size "$need" || invalid; validate_host; root="$(recovery_root "$id")"; [[ ! -e "$root" && ! -L "$root" && ! -e "$(recovery_state "$id")" && ! -L "$(recovery_state "$id")" ]] || die "recovery lifecycle exists"; bytes="$(available)"; [[ "$bytes" =~ ^[0-9]+$ ]] && (( bytes > need )) || die "insufficient recovery space"; out state available; out id "$id"; out available_bytes "$bytes"; }
-cmd_recovery_prepare() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" root state; valid_id "$id" || invalid; lock; validate_host; root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; [[ ! -e "$root" && ! -L "$root" && ! -e "$state" && ! -L "$state" ]] || die "recovery lifecycle exists"; ensure_parent runtime-recovery; /usr/bin/install -d -m 0700 -o root -g root "$state" "$root" "$root/nextcloud" "$root/caddy-data" "$root/caddy-config" "$root/mariadb-data"; printf 'format\truntime-recovery-v1\nstate\tprepared\n' >"$state/metadata.tsv"; /usr/bin/chmod 0600 "$state/metadata.tsv"; out state prepared; out id "$id"; out available_bytes "$(available)"; }
+cmd_recovery_prepare() {
+  [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" root state paths=()
+  valid_id "$id" || invalid; lock; validate_host
+  root="$(recovery_root "$id")"; state="$(recovery_state "$id")"
+  [[ ! -e "$root" && ! -L "$root" && ! -e "$state" && ! -L "$state" ]] || die "recovery lifecycle exists"
+  mapfile -t paths < <(runtime_sources)
+  [[ "${#paths[@]}" == 3 && "${paths[1]}" == /* && "${paths[2]}" == /* && "${paths[1]}" != *$'\t'* && "${paths[2]}" != *$'\t'* ]] || die "Caddy volume paths are invalid"
+  ensure_parent runtime-recovery
+  /usr/bin/install -d -m 0700 -o root -g root "$state" "$root" "$root/nextcloud" "$root/caddy-data" "$root/caddy-config" "$root/mariadb-data"
+  printf 'format\truntime-recovery-v1\nstate\tprepared\nstage_id\t%s\ncaddy_data_path\t%s\ncaddy_config_path\t%s\n' "$id" "${paths[1]}" "${paths[2]}" >"$state/metadata.tsv"
+  /usr/bin/chmod 0600 "$state/metadata.tsv"
+  out state prepared; out id "$id"; out root "$root"; out available_bytes "$(available)"
+}
+cmd_recovery_reset_prepared() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" root state container file paths=() index live temp failed
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not recoverable"
+  root="$(recovery_root "$id")"; state="$(recovery_state "$id")"
+  safe_dir "$state"; protected_file "$state/metadata.tsv" 0600
+  [[ "$(metadata "$state/metadata.tsv" format)" == runtime-recovery-v1 && "$(metadata "$state/metadata.tsv" state)" == prepared && "$(metadata "$state/metadata.tsv" stage_id)" == "$id" ]] || die "recovery is not in the prepared phase"
+  container="nextcloud-restore-db-$id"
+  /usr/bin/docker info >/dev/null || die "Docker is unavailable during prepared reset"
+  ! /usr/bin/docker container inspect "$container" >/dev/null 2>&1 || die "temporary restore database still exists"
+  mapfile -t paths < <(runtime_sources)
+  [[ "${#paths[@]}" == 3 && "${paths[1]}" == "$(metadata "$state/metadata.tsv" caddy_data_path)" && "${paths[2]}" == "$(metadata "$state/metadata.tsv" caddy_config_path)" ]] || die "Caddy recovery paths changed"
+  for index in 1 2; do
+    live="${paths[$index]}"; temp="$live.restore-$id"; failed="$live.failed-$id"
+    [[ -d "$live" && ! -L "$live" && ! -e "$failed" && ! -L "$failed" ]] || die "Caddy live or failed-state path is unsafe"
+    if [[ -e "$temp" || -L "$temp" ]]; then
+      [[ -d "$temp" && ! -L "$temp" ]] || die "temporary Caddy path is unsafe"
+      no_nested_mounts "$temp" || die "temporary Caddy path contains a nested mount"
+      /usr/bin/rm -rf --one-file-system -- "$temp"
+    fi
+  done
+  if [[ -e "$root" || -L "$root" ]]; then
+    safe_recovery_root "$root"; no_nested_mounts "$root" || die "recovery target contains a nested mount"
+    /usr/bin/rm -rf --one-file-system -- "$root"
+  fi
+  for file in nextcloud caddy-data caddy-config database; do
+    if [[ -e "$state/$file.complete" || -L "$state/$file.complete" ]]; then protected_file "$state/$file.complete" 0600; /usr/bin/rm -f -- "$state/$file.complete"; fi
+    if [[ -e "$state/$file.tar" || -L "$state/$file.tar" ]]; then protected_file "$state/$file.tar" 0600; /usr/bin/rm -f -- "$state/$file.tar"; fi
+    if [[ -e "$state/$file.tar.extra" || -L "$state/$file.tar.extra" ]]; then protected_file "$state/$file.tar.extra" 0600; /usr/bin/rm -f -- "$state/$file.tar.extra"; fi
+  done
+  /usr/bin/install -d -m 0700 -o root -g root "$root" "$root/nextcloud" "$root/caddy-data" "$root/caddy-config" "$root/mariadb-data"
+  out state prepared; out id "$id"; out root "$root"
+}
 validate_archive() { /usr/bin/python3 - "$1" <<'PY'
 import posixpath, stat, sys, tarfile
 with tarfile.open(sys.argv[1], 'r:*') as archive:
@@ -180,7 +695,105 @@ with tarfile.open(sys.argv[1], 'r:*') as archive:
 PY
 }
 cmd_recovery_restore() { [[ $# == 4 ]] || invalid; local id="$1" dataset="$2" expected="$3" size="$4" root state dest archive; valid_id "$id" && valid_hash "$expected" && valid_size "$size" || invalid; case "$dataset" in nextcloud|caddy-data|caddy-config);; *) invalid;; esac; lock; validate_host; root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; safe_recovery_root "$root"; safe_dir "$state"; dest="$root/$dataset"; safe_dir "$dest"; [[ ! -e "$state/$dataset.complete" ]] || die "dataset already restored"; archive="$state/$dataset.tar"; read_exact "$archive" "$size"; [[ "$(hash "$archive")" == "$expected" ]] || die "archive hash differs"; validate_archive "$archive" || die "archive namespace is unsafe"; [[ -z "$(/usr/bin/find "$dest" -mindepth 1 -print -quit)" ]] || die "restore destination is not empty"; /usr/bin/tar --numeric-owner --acls --xattrs -xpf "$archive" -C "$dest"; /usr/bin/tar --compare --numeric-owner --acls --xattrs -f "$archive" -C "$dest" >/dev/null || die "restore differs"; printf '%s\n' "$expected" >"$state/$dataset.complete"; /usr/bin/chmod 0600 "$state/$dataset.complete"; /usr/bin/rm -f -- "$archive"; out state restored; out id "$id"; out dataset "$dataset"; }
-cmd_recovery_cleanup() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" root state; valid_id "$id" || invalid; lock; validate_host; root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; if [[ -e "$root" || -L "$root" ]]; then safe_recovery_root "$root"; no_nested_mounts "$root" || die "recovery target contains a nested mount"; /usr/bin/rm -rf --one-file-system -- "$root"; fi; if [[ -e "$state" || -L "$state" ]]; then safe_dir "$state"; no_nested_mounts "$state" || die "recovery state contains a nested mount"; /usr/bin/rm -rf --one-file-system -- "$state"; fi; [[ ! -e "$root" && ! -L "$root" && ! -e "$state" && ! -L "$state" ]] || die "recovery cleanup failed"; out state absent; out id "$id"; }
+cmd_recovery_attest_database() {
+  [[ $# == 5 ]] || invalid; reject_stdin
+  local id="$1" sql_hash="$2" tables="$3" columns="$4" files="$5" root state
+  valid_id "$id" && valid_hash "$sql_hash" && [[ "$tables" =~ ^[1-9][0-9]*$ && "$columns" =~ ^[1-9][0-9]*$ && "$files" =~ ^[1-9][0-9]*$ ]] || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed ]] || die "upgrade stage is not recoverable"
+  root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; safe_recovery_root "$root"; safe_dir "$state"
+  protected_file "$state/metadata.tsv" 0600
+  [[ "$(metadata "$state/metadata.tsv" state)" == prepared && ! -e "$state/database.complete" && ! -L "$state/database.complete" ]] || die "database attestation already exists"
+  [[ -d "$root/mariadb-data" && ! -L "$root/mariadb-data" && -n "$(/usr/bin/find "$root/mariadb-data" -mindepth 1 -print -quit)" ]] || die "staged MariaDB directory is empty or unsafe"
+  printf 'sql_sha256\t%s\ntables\t%s\ncolumns\t%s\nfilecache_rows\t%s\n' "$sql_hash" "$tables" "$columns" "$files" >"$state/database.complete"; /usr/bin/chmod 0600 "$state/database.complete"
+  out state attested; out id "$id"
+}
+recovery_promote_pair() {
+  local staged="$1" live="$2" failed="$3" path
+  for path in "$staged" "$live" "$failed"; do
+    if [[ -e "$path" || -L "$path" ]]; then
+      [[ -d "$path" && ! -L "$path" ]] || die "recovery promotion path is unsafe"
+      no_nested_mounts "$path" || die "recovery promotion path contains a nested mount"
+    fi
+  done
+  if [[ -d "$staged" && -d "$live" && ! -e "$failed" && ! -L "$failed" ]]; then
+    /usr/bin/mv -T --no-clobber -- "$live" "$failed"
+  fi
+  if [[ -d "$staged" && ! -e "$live" && ! -L "$live" && -d "$failed" ]]; then
+    /usr/bin/mv -T --no-clobber -- "$staged" "$live"
+  fi
+  [[ ! -e "$staged" && ! -L "$staged" && -d "$live" && -d "$failed" ]] || die "recovery promotion move is incomplete"
+}
+cmd_recovery_promote() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" root state source_nc live_nc failed_nc source_db live_db failed_db
+  local paths=() source_caddy temp_caddy failed_caddy index service current phase
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not recoverable"
+  root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; safe_recovery_root "$root"; safe_dir "$state"; protected_file "$state/metadata.tsv" 0600
+  phase="$(metadata "$state/metadata.tsv" state)"
+  [[ "$phase" == prepared || "$phase" == promoting || "$phase" == promoted ]] || die "runtime recovery phase is invalid"
+  for service in nextcloud caddy-data caddy-config database; do protected_file "$state/$service.complete" 0600; done
+  for service in nextcloud caddy-data caddy-config; do valid_hash "$(<"$state/$service.complete")" || die "restored archive attestation is invalid"; done
+  valid_hash "$(metadata "$state/database.complete" sql_sha256)" || die "database SQL attestation is invalid"
+  [[ "$(metadata "$state/database.complete" tables)" =~ ^[1-9][0-9]*$ ]] || die "database table attestation is invalid"
+  [[ "$(metadata "$state/database.complete" columns)" =~ ^[1-9][0-9]*$ && "$(metadata "$state/database.complete" filecache_rows)" =~ ^[1-9][0-9]*$ ]] || die "database schema attestation is invalid"
+  current="$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)"
+  [[ "$current" == inactive || "$current" == failed ]] || die "Nextcloud service must be stopped for full restore"
+  for service in "${P[NEXTCLOUD_PI_APP_CONTAINER]}" "${P[NEXTCLOUD_PI_DB_CONTAINER]}" "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}"; do
+    [[ "$(/usr/bin/docker inspect "$service" --format '{{.State.Running}}' 2>/dev/null || true)" != true ]] || die "runtime container is still running"
+  done
+  source_nc="$root/nextcloud/nextcloud"; live_nc="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud"; failed_nc="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/.nextcloud-failed-$id"
+  source_db="$root/mariadb-data"; live_db="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"; failed_db="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/.nextcloud-db-failed-$id"
+  paths=("$live_nc" "$(metadata "$state/metadata.tsv" caddy_data_path)" "$(metadata "$state/metadata.tsv" caddy_config_path)")
+  [[ "${paths[1]}" == /* && "${paths[2]}" == /* && "${paths[1]}" != *$'\t'* && "${paths[2]}" != *$'\t'* ]] || die "Caddy volume source set is invalid"
+  if [[ "$phase" == prepared ]]; then
+    for service in "$source_nc" "$source_db" "$live_nc" "$live_db" "$root/caddy-data" "$root/caddy-config"; do [[ -d "$service" && ! -L "$service" ]] || die "runtime path is missing or symbolic-linked"; no_nested_mounts "$service" || die "runtime path contains a nested mount"; done
+    [[ ! -e "$failed_nc" && ! -L "$failed_nc" && ! -e "$failed_db" && ! -L "$failed_db" ]] || die "failed-state preservation target already exists"
+    for index in 1 2; do
+      source_caddy="${paths[$index]}"; temp_caddy="$source_caddy.restore-$id"; failed_caddy="$source_caddy.failed-$id"
+      [[ -d "$source_caddy" && ! -L "$source_caddy" && ! -e "$temp_caddy" && ! -L "$temp_caddy" && ! -e "$failed_caddy" && ! -L "$failed_caddy" ]] || die "Caddy restoration target is unsafe"
+      no_nested_mounts "$source_caddy" || die "Caddy volume contains a nested mount"
+    done
+    for index in 1 2; do
+      source_caddy="${paths[$index]}"; temp_caddy="$source_caddy.restore-$id"
+      /usr/bin/install -d -m 0700 -o root -g root "$temp_caddy"
+      if (( index == 1 )); then /usr/bin/cp -a "$root/caddy-data/." "$temp_caddy/"; else /usr/bin/cp -a "$root/caddy-config/." "$temp_caddy/"; fi
+    done
+    printf 'format\truntime-recovery-v1\nstate\tpromoting\nstage_id\t%s\ncaddy_data_path\t%s\ncaddy_config_path\t%s\n' "$id" "${paths[1]}" "${paths[2]}" >"$state/metadata.tsv.new"
+    /usr/bin/chmod 0600 "$state/metadata.tsv.new"; /usr/bin/mv -f -- "$state/metadata.tsv.new" "$state/metadata.tsv"
+  fi
+  recovery_promote_pair "$source_nc" "$live_nc" "$failed_nc"
+  recovery_promote_pair "$source_db" "$live_db" "$failed_db"
+  for index in 1 2; do
+    source_caddy="${paths[$index]}"; temp_caddy="$source_caddy.restore-$id"; failed_caddy="$source_caddy.failed-$id"
+    recovery_promote_pair "$temp_caddy" "$source_caddy" "$failed_caddy"
+  done
+  printf 'format\truntime-recovery-v1\nstate\tpromoted\nstage_id\t%s\ncaddy_data_path\t%s\ncaddy_config_path\t%s\n' "$id" "${paths[1]}" "${paths[2]}" >"$state/metadata.tsv.new"
+  /usr/bin/chmod 0600 "$state/metadata.tsv.new"; /usr/bin/mv -f -- "$state/metadata.tsv.new" "$state/metadata.tsv"
+  out state promoted; out id "$id"
+}
+cmd_recovery_cleanup() {
+  [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" root state stage phase
+  valid_id "$id" || invalid; lock; validate_host
+  stage="$(upgrade_stage_file "$id")"
+  if [[ -e "$stage" || -L "$stage" ]]; then
+    protected_file "$stage" 0600
+    phase="$(upgrade_stage_field "$id" phase)"
+    [[ "$phase" == aborted || "$phase" == accepted || "$phase" == recovered ]] || die "unresolved upgrade stage retains recovery state"
+  fi
+  root="$(recovery_root "$id")"; state="$(recovery_state "$id")"
+  if [[ -e "$state" || -L "$state" ]]; then
+    safe_dir "$state"; protected_file "$state/metadata.tsv" 0600
+    phase="$(metadata "$state/metadata.tsv" state)"
+    [[ "$phase" == prepared || "$phase" == promoted ]] || die "recovery promotion is unresolved"
+  fi
+  if [[ -e "$root" || -L "$root" ]]; then safe_recovery_root "$root"; no_nested_mounts "$root" || die "recovery target contains a nested mount"; /usr/bin/rm -rf --one-file-system -- "$root"; fi
+  if [[ -e "$state" || -L "$state" ]]; then no_nested_mounts "$state" || die "recovery state contains a nested mount"; /usr/bin/rm -rf --one-file-system -- "$state"; fi
+  [[ ! -e "$root" && ! -L "$root" && ! -e "$state" && ! -L "$state" ]] || die "recovery cleanup failed"
+  out state absent; out id "$id"
+}
 
 readiness_root() { printf '%s/%s%s' "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}" "${P[NEXTCLOUD_PI_IMAGE_READINESS_PREFIX]}" "$1"; }
 readiness_state() { printf '%s/image-readiness/%s' "${P[NEXTCLOUD_PI_STATE_ROOT]}" "$1"; }
@@ -199,15 +812,22 @@ cmd_drill_apply() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" unit r
 cmd_drill_cleanup() { [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid; lock; validate_host; [[ ! -L "$(drill_unit "$1")" ]] || die "drill unit is unsafe"; /usr/bin/rm -f -- "$(drill_unit "$1")"; /usr/bin/systemctl daemon-reload; out state absent; out id "$1"; }
 
 load_policy
+if [[ "${1:-}" == upgrade-freeze-boot-guard ]]; then
+  [[ "$EUID" == 0 && -z "${SUDO_USER:-}" ]] || die "boot guard requires systemd root context"
+  shift; validate_installation; cmd_upgrade_freeze_boot_guard "$@"; exit 0
+fi
 require_caller
 validate_installation
 command="${1:-}"; [[ -n "$command" && "$command" != -* ]] || invalid; shift || true
 case "$command" in
   version) cmd_version "$@";; check) cmd_check "$@";; protected-state) cmd_protected_state "$@";; active-images-state) cmd_active_images_state "$@";; service) cmd_service "$@";;
   background-jobs) sub="${1:-}"; shift || true; case "$sub" in state) cmd_background_jobs_state "$@";; pause) cmd_background_jobs_pause "$@";; resume) cmd_background_jobs_resume "$@";; *) invalid;; esac;;
-  active-record) sub="${1:-}"; shift || true; case "$sub" in prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
+  upgrade-freeze) sub="${1:-}"; shift || true; case "$sub" in check) cmd_upgrade_freeze_check "$@";; status) cmd_upgrade_freeze_status "$@";; quiescence) cmd_upgrade_freeze_quiescence "$@";; maintenance-off) cmd_upgrade_freeze_maintenance_off "$@";; activate) cmd_upgrade_freeze_activate "$@";; release) cmd_upgrade_freeze_release "$@";; *) invalid;; esac;;
+  upgrade-fetch) sub="${1:-}"; shift || true; case "$sub" in status) cmd_upgrade_fetch_status "$@";; consume) cmd_upgrade_fetch_consume "$@";; complete) cmd_upgrade_fetch_complete "$@";; *) invalid;; esac;;
+  upgrade-stage) sub="${1:-}"; shift || true; case "$sub" in consume) cmd_upgrade_stage_consume "$@";; boundary) cmd_upgrade_stage_boundary "$@";; status) cmd_upgrade_stage_status "$@";; abort) cmd_upgrade_stage_abort "$@";; maintenance-off) cmd_upgrade_stage_maintenance_off "$@";; accept) cmd_upgrade_stage_accept "$@";; recovered) cmd_upgrade_stage_recovered "$@";; *) invalid;; esac;;
+  active-record) sub="${1:-}"; shift || true; case "$sub" in presence) cmd_active_presence "$@";; status) cmd_active_status "$@";; prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
   runtime-backup) sub="${1:-}"; shift || true; case "$sub" in size) cmd_runtime_backup_size "$@";; stream) cmd_runtime_backup_stream "$@";; *) invalid;; esac;;
-  runtime-recovery) sub="${1:-}"; shift || true; case "$sub" in check) cmd_recovery_check "$@";; prepare) cmd_recovery_prepare "$@";; restore) cmd_recovery_restore "$@";; cleanup) cmd_recovery_cleanup "$@";; *) invalid;; esac;;
+  runtime-recovery) sub="${1:-}"; shift || true; case "$sub" in check) cmd_recovery_check "$@";; status) cmd_recovery_status "$@";; prepare) cmd_recovery_prepare "$@";; reset-prepared) cmd_recovery_reset_prepared "$@";; restore) cmd_recovery_restore "$@";; attest-database) cmd_recovery_attest_database "$@";; promote) cmd_recovery_promote "$@";; cleanup) cmd_recovery_cleanup "$@";; *) invalid;; esac;;
   image-readiness) sub="${1:-}"; shift || true; case "$sub" in check) cmd_readiness_check "$@";; start) cmd_readiness_start "$@";; status) cmd_readiness_status "$@";; stop) cmd_readiness_stop "$@";; cleanup) cmd_readiness_cleanup "$@";; *) invalid;; esac;;
   deployment-drill) sub="${1:-}"; shift || true; case "$sub" in check) cmd_drill_check "$@";; apply) cmd_drill_apply "$@";; cleanup) cmd_drill_cleanup "$@";; *) invalid;; esac;;
   *) invalid;;

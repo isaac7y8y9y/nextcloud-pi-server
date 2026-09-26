@@ -23,6 +23,9 @@ NEXTCLOUD_RUNTIME_BACKUP_ROOT="${NEXTCLOUD_RUNTIME_BACKUP_ROOT:-$HOME/Projects/n
 readonly REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
 
 APPLY=0
+HELD_FREEZE=0
+FREEZE_ID=""
+FREEZE_TABLE_SHA256=""
 MAINTENANCE_RECOVERY=0
 # These variables are cleanup capabilities, not just status. They are populated
 # only after this process successfully creates or reserves the matching target.
@@ -40,12 +43,17 @@ usage() {
   cat <<'EOF'
 Usage:
   ./scripts/backup-runtime-state.sh --check
+  ./scripts/backup-runtime-state.sh --check-held <freeze-id>
   ./scripts/backup-runtime-state.sh --apply
+  ./scripts/backup-runtime-state.sh --apply-held <freeze-id>
   ./scripts/backup-runtime-state.sh --maintenance-off
 
 --check validates prerequisites and reports aggregate source sizes without
 changing the Pi. --apply briefly enables Nextcloud maintenance mode and writes
 a protected runtime-backup-* directory below NEXTCLOUD_RUNTIME_BACKUP_ROOT.
+--apply-held requires an already active protected upgrade ingress freeze and
+leaves maintenance mode, the timer, and the freeze unchanged, even on failure.
+--check-held verifies that held state without creating a backup.
 
 The backup contains private user data, a database dump, configuration secrets,
 and Caddy private keys. Never store it in Git or publish it.
@@ -164,6 +172,33 @@ prepare_backup_root() {
 maintenance_is_off() {
   remote "docker exec --user www-data '$NEXTCLOUD_APP_CONTAINER' php /var/www/html/occ status" |
     grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$'
+}
+
+maintenance_is_on() {
+  remote "docker exec --user www-data '$NEXTCLOUD_APP_CONTAINER' php /var/www/html/occ status" |
+    grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*true$'
+}
+
+verify_held_freeze() {
+  local status timer jobs quiescence
+  status="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops upgrade-freeze status")" ||
+    die "protected upgrade freeze is unavailable"
+  [[ "$(awk -F $'\t' '$1 == "state" {print $2}' <<<"$status")" == active &&
+     "$(awk -F $'\t' '$1 == "id" {print $2}' <<<"$status")" == "$FREEZE_ID" ]] ||
+    die "protected upgrade freeze is not active for this backup"
+  FREEZE_TABLE_SHA256="$(awk -F $'\t' '$1 == "table_sha256" {print $2}' <<<"$status")"
+  [[ "$FREEZE_TABLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "upgrade firewall identity is invalid"
+  timer="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops background-jobs state")" || die "background-job timer state is unavailable"
+  [[ "$(awk -F $'\t' '$1 == "timer_active" {print $2}' <<<"$timer")" == no ]] || die "background-job timer is active during held backup"
+  jobs="$(remote "systemctl is-active nextcloud-background-jobs.service 2>/dev/null || true")"
+  [[ "$jobs" == inactive || "$jobs" == failed || "$jobs" == unknown ]] || die "background-job service is still running"
+  maintenance_is_on || die "Nextcloud maintenance mode is not active during held backup"
+  quiescence="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops upgrade-freeze quiescence '$FREEZE_ID'")" ||
+    die "application or database quiescence is unproved"
+  [[ "$(awk -F $'\t' '$1 == "state" {print $2}' <<<"$quiescence")" == quiescent &&
+     "$(awk -F $'\t' '$1 == "id" {print $2}' <<<"$quiescence")" == "$FREEZE_ID" &&
+     "$(awk -F $'\t' '$1 == "table_sha256" {print $2}' <<<"$quiescence")" == "$FREEZE_TABLE_SHA256" ]] ||
+    die "protected quiescence evidence differs from the freeze"
 }
 
 disable_maintenance() {
@@ -321,8 +356,10 @@ cleanup() {
   # Service availability comes first, followed by operation locks and private
   # partial payloads. Any service/lock cleanup failure changes success to error.
   trap - EXIT
-  disable_maintenance || cleanup_failed=1
-  resume_background_jobs || cleanup_failed=1
+  if (( HELD_FREEZE == 0 )); then
+    disable_maintenance || cleanup_failed=1
+    resume_background_jobs || cleanup_failed=1
+  fi
   release_remote_lock || cleanup_failed=1
   release_local_lock || cleanup_failed=1
   if [[ -n "$STAGING_DIR" && -d "$STAGING_DIR" ]]; then
@@ -365,7 +402,7 @@ check_prerequisites() {
     docker exec '$NEXTCLOUD_DB_CONTAINER' sh -c 'command -v mariadb-dump >/dev/null'
     docker exec '$NEXTCLOUD_DB_CONTAINER' sh -c 'command -v mariadb >/dev/null'
   " >/dev/null
-  maintenance_is_off || die "Nextcloud is already in maintenance mode"
+  if (( HELD_FREEZE )); then verify_held_freeze; else maintenance_is_off || die "Nextcloud is already in maintenance mode"; fi
 
   app_mounts="$(remote "docker inspect '$NEXTCLOUD_APP_CONTAINER' --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}'")"
   [[ "$(grep -Fxc "$NEXTCLOUD_DATA_ROOT -> /var/www/html" <<<"$app_mounts")" == 1 ]] ||
@@ -383,6 +420,17 @@ case "${1:-}" in
   --apply)
     [[ $# -eq 1 ]] || { usage >&2; exit 2; }
     APPLY=1
+    ;;
+  --check-held)
+    [[ $# -eq 2 && "$2" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || { usage >&2; exit 2; }
+    HELD_FREEZE=1
+    FREEZE_ID="$2"
+    ;;
+  --apply-held)
+    [[ $# -eq 2 && "$2" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || { usage >&2; exit 2; }
+    APPLY=1
+    HELD_FREEZE=1
+    FREEZE_ID="$2"
     ;;
   --maintenance-off)
     [[ $# -eq 1 ]] || { usage >&2; exit 2; }
@@ -416,8 +464,12 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 acquire_locks
-maintenance_is_off || die "Nextcloud entered maintenance mode before this backup acquired its lock"
-pause_background_jobs
+if (( HELD_FREEZE )); then
+  verify_held_freeze
+else
+  maintenance_is_off || die "Nextcloud entered maintenance mode before this backup acquired its lock"
+  pause_background_jobs
+fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 final_dir="$NEXTCLOUD_RUNTIME_BACKUP_ROOT/runtime-backup-$timestamp"
@@ -433,12 +485,16 @@ remote_host="$(remote hostname)"
 remote_user="$(remote id -un)"
 database_image="$(remote "docker inspect '$NEXTCLOUD_DB_CONTAINER' --format '{{.Config.Image}}'")"
 
-printf 'Entering Nextcloud maintenance mode for consistent runtime capture...\n'
-# Arm cleanup before the remote command because a lost SSH response cannot tell
-# us whether Nextcloud accepted the maintenance-mode change.
-MAINTENANCE_ENABLED=1
-remote "docker exec --user www-data '$NEXTCLOUD_APP_CONTAINER' php /var/www/html/occ maintenance:mode --on" >/dev/null
-maintenance_is_off && die "Nextcloud did not enter maintenance mode"
+if (( HELD_FREEZE )); then
+  verify_held_freeze
+else
+  printf 'Entering Nextcloud maintenance mode for consistent runtime capture...\n'
+  # Arm cleanup before the remote command because a lost SSH response cannot tell
+  # us whether Nextcloud accepted the maintenance-mode change.
+  MAINTENANCE_ENABLED=1
+  remote "docker exec --user www-data '$NEXTCLOUD_APP_CONTAINER' php /var/www/html/occ maintenance:mode --on" >/dev/null
+  maintenance_is_off && die "Nextcloud did not enter maintenance mode"
+fi
 
 printf 'Capturing Nextcloud files without listing private paths...\n'
 remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-backup stream nextcloud" >"$STAGING_DIR/nextcloud/nextcloud.tar"
@@ -461,14 +517,22 @@ remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-backup stream caddy-
 chmod 600 "$STAGING_DIR/caddy/data.tar" "$STAGING_DIR/caddy/config.tar"
 [[ -s "$STAGING_DIR/caddy/data.tar" && -s "$STAGING_DIR/caddy/config.tar" ]] || die "Caddy archive is empty"
 
-disable_maintenance
-maintenance_is_off || die "Nextcloud did not leave maintenance mode"
-resume_background_jobs || die "runtime backup completed but the background-job timer could not be resumed"
+if (( HELD_FREEZE )); then
+  verify_held_freeze
+else
+  disable_maintenance
+  maintenance_is_off || die "Nextcloud did not leave maintenance mode"
+  resume_background_jobs || die "runtime backup completed but the background-job timer could not be resumed"
+fi
 
 manifest="$STAGING_DIR/manifest.tsv"
 : >"$manifest"
 chmod 600 "$manifest"
-append_manifest_value format "runtime-backup-v1"
+if (( HELD_FREEZE )); then
+  append_manifest_value format "runtime-backup-v2"
+else
+  append_manifest_value format "runtime-backup-v1"
+fi
 append_manifest_value state "complete"
 append_manifest_value timestamp "$timestamp"
 append_manifest_value remote_host "$remote_host"
@@ -480,6 +544,10 @@ append_manifest_value database_image "$database_image"
 append_manifest_value caddy_data_volume "$NEXTCLOUD_CADDY_DATA_VOLUME"
 append_manifest_value caddy_config_volume "$NEXTCLOUD_CADDY_CONFIG_VOLUME"
 append_manifest_value backup_path "$final_dir"
+if (( HELD_FREEZE )); then
+  append_manifest_value freeze_id "$FREEZE_ID"
+  append_manifest_value freeze_table_sha256 "$FREEZE_TABLE_SHA256"
+fi
 append_manifest_payload "nextcloud/nextcloud.tar"
 append_manifest_payload "database/nextcloud.sql"
 append_manifest_payload "caddy/data.tar"
