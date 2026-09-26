@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -60,10 +61,13 @@ def evidence(target: r.Target, *, allow_releasing: bool = False) -> tuple[dict[s
     if active["source_lock_sha256"] != local_lock:
         r.reject("local source image lock differs from the active image record; retain ingress freeze")
     running = {}
-    for name in ("nextcloud-docker-app-1", "nextcloud-docker-db-1", "nextcloud-docker-caddy-1"):
+    for key, name in (("app", "nextcloud-docker-app-1"), ("db", "nextcloud-docker-db-1"),
+                      ("caddy", "nextcloud-docker-caddy-1")):
         parts = target.ssh("docker inspect " + r.q(name) + " --format '{{.Id}} {{.Image}} {{.State.Running}}'").split()
-        if len(parts) != 3 or not all(r.HASH.fullmatch(value) for value in parts[:2]) or parts[2] != "true":
-            r.reject("running container identity is invalid")
+        if (len(parts) != 3 or not r.HASH.fullmatch(parts[0]) or
+                not re.fullmatch(r"sha256:[0-9a-f]{64}", parts[1]) or parts[2] != "true" or
+                parts[1] != active.get(key + "_id")):
+            r.reject("running container differs from the active image record")
         running[name] = parts[:2]
     target.ssh("! docker port nextcloud-docker-app-1 80/tcp >/dev/null 2>&1")
     status = target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status")

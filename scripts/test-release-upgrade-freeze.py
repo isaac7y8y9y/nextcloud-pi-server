@@ -68,6 +68,25 @@ with mock.patch.object(release.r, "remote_hash", return_value="a" * 64):
     else:
         raise AssertionError("release accepted source-lock/active-record mismatch")
 
+class MatchedTarget(WrongLockTarget):
+    def ssh(self, command):
+        if command.startswith("docker inspect "):
+            return "a" * 64 + " sha256:" + "b" * 64 + " true"
+        if "occ status" in command:
+            return "  - maintenance: false"
+        return super().ssh(command)
+    def ops(self, *args):
+        if args == ("active-images-state",):
+            return {"sha256": "a" * 64,
+                    "source_lock_sha256": release.r.digest(release.r.ROOT / "config/image-lock.env"),
+                    "app_id": "sha256:" + "b" * 64, "db_id": "sha256:" + "b" * 64,
+                    "caddy_id": "sha256:" + "b" * 64}
+        return super().ops(*args)
+
+with mock.patch.object(release.r, "remote_hash", return_value="a" * 64):
+    checked, phase = release.evidence(MatchedTarget())
+    assert phase == "active" and len(checked["running"]) == 3
+
 source = Path(__file__).with_name("release-upgrade-freeze.py").read_text()
 assert source.index('authorize(args.approval, root, base, now, phase)') < source.index('target.ops("upgrade-freeze", "maintenance-off"')
 assert source.index('r.run([str(HERE / "health-check.sh")') < source.index('target.ops("upgrade-freeze", "release"')

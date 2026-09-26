@@ -135,7 +135,17 @@ active_prepare_abort() { local status="$1" tx="$ACTIVE_PREPARE_ABORT_TX"; trap -
 cmd_version() { [[ $# == 0 ]] || invalid; reject_stdin; out version "${P[NEXTCLOUD_PI_BUNDLE_VERSION]}"; out manifest_sha256 "$(hash "$MANIFEST")"; }
 cmd_check() { local program resolved; [[ $# == 0 ]] || invalid; reject_stdin; validate_host; for program in /bin/bash /usr/bin/awk /usr/bin/basename /usr/bin/cp /usr/bin/dd /usr/bin/df /usr/bin/dirname /usr/bin/docker /usr/bin/dockerd /usr/bin/du /usr/bin/find /usr/bin/findmnt /usr/bin/flock /usr/bin/id /usr/bin/install /usr/bin/kill /usr/bin/mktemp /usr/bin/nohup /usr/bin/python3 /usr/bin/readlink /usr/bin/rm /usr/bin/sha256sum /usr/bin/sleep /usr/bin/stat /usr/bin/systemctl /usr/bin/tail /usr/bin/tar /usr/bin/tr; do [[ -x "$program" ]] || die "required program is unavailable"; resolved="$(/usr/bin/readlink -f "$program")"; [[ -f "$resolved" && ! -L "$resolved" && "$(uid "$resolved")" == 0 && "$(gid "$resolved")" == 0 ]] || die "required program is unsafe"; done; out status ok; }
 cmd_protected_state() { [[ $# == 1 && "$1" != -* ]] || invalid; reject_stdin; local path expected; path="$(resource_path "$1")"; expected="$(resource_mode "$1")"; if [[ ! -e "$path" && ! -L "$path" ]]; then out state missing; out name "$1"; return; fi; protected_file "$path" "$expected"; protected_parents "$path"; out state present; out name "$1"; out sha256 "$(hash "$path")"; out uid 0; out gid 0; out mode "$expected"; }
-cmd_active_images_state() { [[ $# == 0 ]] || invalid; reject_stdin; "$VALIDATOR"; out status ok; out mode "$(/usr/bin/awk -F= '$1 == "NEXTCLOUD_ACTIVE_IMAGES_MODE" { print $2 }' "$ACTIVE_RECORD")"; out sha256 "$(hash "$ACTIVE_RECORD")"; out source_lock_sha256 "$(/usr/bin/awk -F= '$1 == "NEXTCLOUD_ACTIVE_IMAGES_PROVENANCE_SHA256" { print $2 }' "$ACTIVE_RECORD")"; }
+cmd_active_images_state() {
+  [[ $# == 0 ]] || invalid; reject_stdin; "$VALIDATOR"
+  local key
+  out status ok
+  out mode "$(/usr/bin/awk -F= '$1 == "NEXTCLOUD_ACTIVE_IMAGES_MODE" { print $2 }' "$ACTIVE_RECORD")"
+  out sha256 "$(hash "$ACTIVE_RECORD")"
+  out source_lock_sha256 "$(/usr/bin/awk -F= '$1 == "NEXTCLOUD_ACTIVE_IMAGES_PROVENANCE_SHA256" { print $2 }' "$ACTIVE_RECORD")"
+  for key in APP DB CADDY; do
+    out "${key,,}_id" "$(/usr/bin/awk -F= -v wanted="NEXTCLOUD_ACTIVE_IMAGES_${key}_ID" '$1 == wanted { print $2 }' "$ACTIVE_RECORD")"
+  done
+}
 cmd_service() { [[ $# == 1 ]] || invalid; reject_stdin; lock; validate_host; case "$1" in start|restart) /usr/bin/systemctl "$1" "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "service is not active";; stop) /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "service did not stop";; *) invalid;; esac; out state "$1"; }
 background_jobs_timer=nextcloud-background-jobs.timer
 background_jobs_service=nextcloud-background-jobs.service
