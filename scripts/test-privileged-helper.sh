@@ -18,6 +18,8 @@ grep -Fq 'readonly LOCK_ROOT=/run/nextcloud-pi-locks' "$HELPER"
 grep -Fq 'fib daddr type local tcp dport { 80, 443 } drop' "$HELPER"
 grep -Fq 'cmd_upgrade_freeze_activate()' "$HELPER"
 grep -Fq 'cmd_upgrade_freeze_release()' "$HELPER"
+grep -Fq 'cmd_upgrade_freeze_quiescence()' "$HELPER"
+grep -Fq 'cmd_upgrade_freeze_maintenance_off()' "$HELPER"
 grep -Fq 'cmd_upgrade_fetch_consume()' "$HELPER"
 grep -Fq 'cmd_upgrade_fetch_complete()' "$HELPER"
 grep -Fq 'cmd_upgrade_stage_boundary()' "$HELPER"
@@ -197,6 +199,10 @@ elif [[ "\${1:-}" == inspect ]]; then
   else
     printf 'sha256:%064d %s\n' 2 "\$( [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf true || printf false )"
   fi
+elif [[ "\${1:-}" == exec && "\${2:-}" == nextcloud-docker-* ]]; then
+  if [[ "\${2:-}" == nextcloud-docker-db-1 && -e '$FIXTURE/database-busy' ]]; then printf '1\n'
+  elif [[ "\${2:-}" != nextcloud-docker-db-1 && -e '$FIXTURE/quiescence-busy' ]]; then printf '1\n'
+  else printf '0\n'; fi
 elif [[ "\${1:-}:\${2:-}" == exec:--user ]]; then
   case "\${*: -1}" in
     --on) printf 'true\n' >'$FIXTURE/maintenance-state' ;;
@@ -347,6 +353,19 @@ EOF
   sudo "$FIXTURE/ops" upgrade-freeze check "$freeze_id" | grep -Fx $'state\tavailable' >/dev/null
   sudo "$FIXTURE/ops" upgrade-freeze activate "$freeze_id" | grep -Fx $'state\tactive' >/dev/null
   sudo "$FIXTURE/ops" upgrade-freeze status | grep -Fx $'state\tactive' >/dev/null
+  sudo "$FIXTURE/ops" upgrade-freeze quiescence "$freeze_id" | grep -Fx $'state\tquiescent' >/dev/null
+  sudo touch "$FIXTURE/quiescence-busy"
+  if sudo "$FIXTURE/ops" upgrade-freeze quiescence "$freeze_id" >/dev/null 2>&1; then
+    printf 'upgrade freeze accepted active application sockets or database work\n' >&2
+    exit 1
+  fi
+  sudo rm -- "$FIXTURE/quiescence-busy"
+  sudo touch "$FIXTURE/database-busy"
+  if sudo "$FIXTURE/ops" upgrade-freeze quiescence "$freeze_id" >/dev/null 2>&1; then
+    printf 'upgrade freeze accepted an active database transaction\n' >&2
+    exit 1
+  fi
+  sudo rm -- "$FIXTURE/database-busy"
   [[ "$(sudo cat "$FIXTURE/timer-state")" == inactive && "$(sudo cat "$FIXTURE/maintenance-state")" == true ]]
   fetch_id=20260910T000000Z-110
   fetch_fingerprint="$(printf '%064d' 1)"
@@ -362,6 +381,10 @@ EOF
   printf 'false\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
     printf 'upgrade freeze released with pending image fetch\n' >&2
+    exit 1
+  fi
+  if sudo "$FIXTURE/ops" upgrade-freeze maintenance-off "$freeze_id" >/dev/null 2>&1; then
+    printf 'upgrade freeze left maintenance mode with pending image fetch\n' >&2
     exit 1
   fi
   printf 'true\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
@@ -467,7 +490,7 @@ EOF
     printf 'upgrade freeze released while maintenance mode was active\n' >&2
     exit 1
   fi
-  printf 'false\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
+  sudo "$FIXTURE/ops" upgrade-freeze maintenance-off "$freeze_id" | grep -Fx $'state\tmaintenance-off' >/dev/null
   sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" | grep -Fx $'state\treleased' >/dev/null
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/active-images.env" "$FIXTURE/active-images.env"
   printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null

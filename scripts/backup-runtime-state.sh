@@ -180,7 +180,7 @@ maintenance_is_on() {
 }
 
 verify_held_freeze() {
-  local status timer jobs
+  local status timer jobs quiescence
   status="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops upgrade-freeze status")" ||
     die "protected upgrade freeze is unavailable"
   [[ "$(awk -F $'\t' '$1 == "state" {print $2}' <<<"$status")" == active &&
@@ -193,6 +193,12 @@ verify_held_freeze() {
   jobs="$(remote "systemctl is-active nextcloud-background-jobs.service 2>/dev/null || true")"
   [[ "$jobs" == inactive || "$jobs" == failed || "$jobs" == unknown ]] || die "background-job service is still running"
   maintenance_is_on || die "Nextcloud maintenance mode is not active during held backup"
+  quiescence="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops upgrade-freeze quiescence '$FREEZE_ID'")" ||
+    die "application or database quiescence is unproved"
+  [[ "$(awk -F $'\t' '$1 == "state" {print $2}' <<<"$quiescence")" == quiescent &&
+     "$(awk -F $'\t' '$1 == "id" {print $2}' <<<"$quiescence")" == "$FREEZE_ID" &&
+     "$(awk -F $'\t' '$1 == "table_sha256" {print $2}' <<<"$quiescence")" == "$FREEZE_TABLE_SHA256" ]] ||
+    die "protected quiescence evidence differs from the freeze"
 }
 
 disable_maintenance() {

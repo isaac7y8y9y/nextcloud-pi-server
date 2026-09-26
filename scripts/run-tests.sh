@@ -24,6 +24,7 @@ readonly -a PR_COMMANDS=(
   'python3 scripts/test-rehearse-nextcloud-upgrade.py'
   'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-restore-live-runtime.py'
   'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-activate-image-upgrade.py'
+  'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-release-upgrade-freeze.py'
   'bash scripts/test-fetch-image-upgrade.sh'
   'bash scripts/test-active-images.sh'
   'bash scripts/test-compose-launcher.sh'

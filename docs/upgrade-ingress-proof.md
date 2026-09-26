@@ -34,9 +34,13 @@ payloads, or raw logs. Before any mutation:
    unrelated NAS port work. Never use a real user document as the test file.
 4. Arrange an isolated synthetic in-flight write and a read-only database
    transaction observation. The write must be started before activation and
-   finish or abort before backup capture. If a repeatable test cannot be
-   arranged safely, record drain as **unproved** and do not capture the held
-   snapshot or claim this gate complete.
+   finish or abort before backup capture. The draft protected
+   `upgrade-freeze quiescence <id>` check samples established app/Caddy TCP
+   sockets and active InnoDB transactions twice, five seconds apart, and the
+   held-backup path now requires that check. It is conservative but not a
+   substitute for the client-side write and firewall proof. If a repeatable
+   test cannot be arranged safely, record drain as **unproved** and do not
+   capture the held snapshot or claim this gate complete.
 
 ## Activation and denial matrix
 
@@ -67,9 +71,20 @@ backup or leave the NAS unintentionally inaccessible.
 
 Do not release while a fetch, stage, active-record transaction, or recovery is
 unresolved. For a test with no image stage, verify the original runtime still
-passes loopback health, deliberately turn maintenance mode off using a
-separately reviewed procedure, and use the protected single-use release. The
-draft dispatcher does not yet provide that maintenance-off procedure. Confirm the
+passes loopback health, deliberately turn maintenance mode off with the draft
+protected `upgrade-freeze maintenance-off <id>` action only after the LAN
+denial proof, and use the protected single-use release. The maintenance-off
+action rechecks quiescence and refuses unresolved fetch/stage/active-record
+state. The draft `scripts/release-upgrade-freeze.py --plan/--apply` operator
+path binds the active freeze, prior timer state, live Compose/Caddy and
+container identities to a private, single-use 15-minute approval. It turns
+maintenance off only if still on, checks Pi loopback health, then asks the
+protected dispatcher to release and verifies the rule is absent and the
+timer has its prior state. It does **not** create the LAN denial proof or
+authorize release without the separate measured test and reviewed approval.
+If it fails after maintenance-off, keep the freeze and form a new approval
+from the changed state; if release has begun, inspect the protected phase
+before any recovery. Confirm the
 exact rule table is absent, the timer returns to its pre-freeze state, and a
 repeated release is denied. Recheck LAN browser access and synthetic
 upload/download on each available family, and remove only the synthetic test

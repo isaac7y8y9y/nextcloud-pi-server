@@ -84,13 +84,25 @@ transitions and replay denial, but a separate LAN-client test on the deployed
 network backend is still required to prove both IPv4/IPv6 and old/new-flow
 denial. No live Pi firewall change has been made for this implementation.
 
+The draft `upgrade-freeze quiescence` check fails closed unless established
+app/Caddy TCP sockets and active InnoDB transactions are zero in two samples
+while the freeze, paused timer, and maintenance mode remain in place. Held
+backups now require that protected check. The draft `maintenance-off` action
+requires resolved image transactions and repeats quiescence before turning
+maintenance off, while keeping ingress blocked. Neither command establishes
+that the live LAN rule works; the [ingress proof plan](upgrade-ingress-proof.md)
+and a separately approved release still gate production use. The draft
+`scripts/release-upgrade-freeze.py` driver now binds live configuration,
+container identities, freeze hash, and prior timer state to a private
+single-use approval; it has offline tests only. It does not supply LAN proof.
+
 `backup-runtime-state.sh --check-held <id>` and `--apply-held <id>` require
 that protected freeze. The apply mode writes a `runtime-backup-v2` manifest
 bound to the freeze ID and firewall hash, and it deliberately leaves the
 freeze, maintenance mode, and timer unchanged even when capture fails. The
 existing ordinary backup remains `runtime-backup-v1` and still reopens service
 after its capture. The held mode is not yet a complete approved upgrade
-transaction: in-flight-write drain, external denial proof, disposable Pi
+transaction: measured in-flight-write drain, external denial proof, disposable Pi
 rehearsal, and reviews remain hard gates. See the
 [ingress proof plan](upgrade-ingress-proof.md). Do not use it as a live upgrade
 procedure until those gates pass.

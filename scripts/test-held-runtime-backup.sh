@@ -2,6 +2,7 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+grep -Fq "upgrade-freeze quiescence" "$SCRIPT_DIR/backup-runtime-state.sh"
 fixture_root="$(mktemp -d)"
 trap 'rm -rf -- "$fixture_root"' EXIT HUP INT TERM
 fixture_root="$(cd -- "$fixture_root" && pwd -P)"

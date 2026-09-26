@@ -202,7 +202,52 @@ cmd_upgrade_freeze_status() {
   if [[ "$phase" == active ]]; then
     [[ "$(freeze_table_hash)" == "$table" ]] || die "upgrade firewall differs from its protected state"
   fi
-  out state "$phase"; out id "$(freeze_field id)"; out table_sha256 "$table"
+  out state "$phase"; out id "$(freeze_field id)"; out table_sha256 "$table"; out timer_was_active "$(freeze_field timer_active)"
+}
+freeze_socket_count() {
+  /usr/bin/docker exec "$1" /usr/bin/awk '$4 == "01" { count++ } END { print count+0 }' /proc/net/tcp /proc/net/tcp6
+}
+freeze_database_count() {
+  /usr/bin/docker exec "${P[NEXTCLOUD_PI_DB_CONTAINER]}" sh -eu -c '
+    test -n "${MYSQL_ROOT_PASSWORD:-}" && test -n "${MYSQL_DATABASE:-}"
+    export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"
+    exec mariadb --protocol=tcp --host=127.0.0.1 -uroot -N --batch "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM information_schema.INNODB_TRX"
+  '
+}
+cmd_upgrade_freeze_quiescence() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  local id="$1" sample app caddy db service
+  validate_host; freeze_require_current "$id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$(freeze_field table_sha256)" ]] || die "upgrade freeze is not active or differs"
+  ! /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer is active"
+  service="$(/usr/bin/systemctl is-active "$background_jobs_service" 2>/dev/null || true)"
+  [[ "$service" == inactive || "$service" == failed || "$service" == unknown ]] || die "background-job service is still running"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*true$' || die "Nextcloud maintenance mode is not on"
+  for sample in 1 2; do
+    app="$(freeze_socket_count "${P[NEXTCLOUD_PI_APP_CONTAINER]}")" || die "application sockets could not be inspected"
+    caddy="$(freeze_socket_count "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}")" || die "Caddy sockets could not be inspected"
+    db="$(freeze_database_count)" || die "database activity could not be inspected"
+    [[ "$app" =~ ^[0-9]+$ && "$caddy" =~ ^[0-9]+$ && "$db" =~ ^[0-9]+$ ]] || die "quiescence counts are invalid"
+    (( 10#$app == 0 && 10#$caddy == 0 && 10#$db == 0 )) || die "application or database activity remains; retain ingress freeze"
+    [[ "$sample" == 2 ]] || /usr/bin/sleep 5
+  done
+  [[ "$(freeze_table_hash)" == "$(freeze_field table_sha256)" ]] || die "upgrade firewall changed during drain"
+  ! /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer resumed during drain"
+  out state quiescent; out id "$id"; out table_sha256 "$(freeze_field table_sha256)"
+}
+cmd_upgrade_freeze_maintenance_off() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  local id="$1"
+  lock; validate_host; freeze_require_current "$id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_table_hash)" == "$(freeze_field table_sha256)" ]] || die "upgrade freeze differs"
+  upgrade_fetch_release_allowed
+  upgrade_stage_release_allowed
+  [[ ! -e "$(active_marker)" && ! -L "$(active_marker)" ]] || die "an active-image transaction is unresolved"
+  ! /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer is active"
+  cmd_upgrade_freeze_quiescence "$id" >/dev/null
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ maintenance:mode --off >/dev/null || die "could not leave maintenance mode"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "maintenance mode remains on"
+  out state maintenance-off; out id "$id"
 }
 cmd_upgrade_freeze_activate() {
   [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" timer=no service_state attempt table
@@ -603,7 +648,7 @@ command="${1:-}"; [[ -n "$command" && "$command" != -* ]] || invalid; shift || t
 case "$command" in
   version) cmd_version "$@";; check) cmd_check "$@";; protected-state) cmd_protected_state "$@";; active-images-state) cmd_active_images_state "$@";; service) cmd_service "$@";;
   background-jobs) sub="${1:-}"; shift || true; case "$sub" in state) cmd_background_jobs_state "$@";; pause) cmd_background_jobs_pause "$@";; resume) cmd_background_jobs_resume "$@";; *) invalid;; esac;;
-  upgrade-freeze) sub="${1:-}"; shift || true; case "$sub" in check) cmd_upgrade_freeze_check "$@";; status) cmd_upgrade_freeze_status "$@";; activate) cmd_upgrade_freeze_activate "$@";; release) cmd_upgrade_freeze_release "$@";; *) invalid;; esac;;
+  upgrade-freeze) sub="${1:-}"; shift || true; case "$sub" in check) cmd_upgrade_freeze_check "$@";; status) cmd_upgrade_freeze_status "$@";; quiescence) cmd_upgrade_freeze_quiescence "$@";; maintenance-off) cmd_upgrade_freeze_maintenance_off "$@";; activate) cmd_upgrade_freeze_activate "$@";; release) cmd_upgrade_freeze_release "$@";; *) invalid;; esac;;
   upgrade-fetch) sub="${1:-}"; shift || true; case "$sub" in status) cmd_upgrade_fetch_status "$@";; consume) cmd_upgrade_fetch_consume "$@";; complete) cmd_upgrade_fetch_complete "$@";; *) invalid;; esac;;
   upgrade-stage) sub="${1:-}"; shift || true; case "$sub" in consume) cmd_upgrade_stage_consume "$@";; boundary) cmd_upgrade_stage_boundary "$@";; status) cmd_upgrade_stage_status "$@";; abort) cmd_upgrade_stage_abort "$@";; accept) cmd_upgrade_stage_accept "$@";; recovered) cmd_upgrade_stage_recovered "$@";; *) invalid;; esac;;
   active-record) sub="${1:-}"; shift || true; case "$sub" in presence) cmd_active_presence "$@";; status) cmd_active_status "$@";; prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
