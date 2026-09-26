@@ -357,7 +357,7 @@ EOF
   sudo "$FIXTURE/ops" upgrade-freeze status | grep -Fx $'state\tactive' >/dev/null
   sudo rm -- "$FIXTURE/nft-table"
   sudo env -u SUDO_USER "$FIXTURE/ops" upgrade-freeze-boot-guard
-  [[ -f "$FIXTURE/nft-table" ]] || { printf 'boot guard did not restore ingress freeze\n' >&2; exit 1; }
+  sudo test -f "$FIXTURE/nft-table" || { printf 'boot guard did not restore ingress freeze\n' >&2; exit 1; }
   sudo "$FIXTURE/ops" upgrade-freeze quiescence "$freeze_id" | grep -Fx $'state\tquiescent' >/dev/null
   sudo touch "$FIXTURE/quiescence-busy"
   if sudo "$FIXTURE/ops" upgrade-freeze quiescence "$freeze_id" >/dev/null 2>&1; then
@@ -508,7 +508,7 @@ EOF
   sudo rm -- "$FIXTURE/nft-delete-fail"
   sudo rm -- "$FIXTURE/nft-table"
   sudo env -u SUDO_USER "$FIXTURE/ops" upgrade-freeze-boot-guard
-  [[ -f "$FIXTURE/nft-table" ]] || { printf 'boot guard did not restore interrupted release firewall\n' >&2; exit 1; }
+  sudo test -f "$FIXTURE/nft-table" || { printf 'boot guard did not restore interrupted release firewall\n' >&2; exit 1; }
   sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" | grep -Fx $'state\treleased' >/dev/null
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/active-images.env" "$FIXTURE/active-images.env"
   printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null
