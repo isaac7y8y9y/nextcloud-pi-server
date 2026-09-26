@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -236,6 +237,13 @@ def evidence(target: Target, stage_id: str, candidate: Path, source: Path,
     active = target.ops("active-record", "status", stage_id)
     manifest = manifest_fields(runtime / "manifest.tsv")
     metadata = manifest_fields(candidate / "registry-metadata.tsv")
+    try:
+        stage_time = datetime.strptime(stage_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        backup_time = datetime.strptime(manifest["timestamp"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, KeyError) as exc:
+        raise RecoveryError("held backup or stage timestamp is invalid") from exc
+    if not 0 <= (stage_time - backup_time).total_seconds() <= 86400:
+        reject("held backup was not captured within 24 hours before the stage")
     if (freeze.get("state") != "active" or
             freeze.get("id") != manifest.get("freeze_id") or
             freeze.get("table_sha256") != manifest.get("freeze_table_sha256") or

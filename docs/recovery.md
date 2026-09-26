@@ -2,9 +2,9 @@
 
 Recover only from a verified protected artifact bound to the configured target.
 Begin with the read-only validation mode and stop at every stated human approval
-pause. A human approval pause is not a generated approval artifact: deployment
-and image import are the only workflows here that generate expiring, single-use
-authorization files.
+pause. A human approval pause is not a generated approval artifact: deployment,
+image import, and the draft live-runtime restore driver generate expiring,
+single-use authorization files for their separate operations.
 
 Treat all backups, image archives, attestations, disposable extraction paths,
 and command output as sensitive. Keep them outside Git and do not publish them.
@@ -86,7 +86,8 @@ scripts/restore-live-runtime.py --apply "$STAGE_ID" "$CANDIDATE" \
 
 `--plan` is only available after the root-owned runtime boundary and while
 the active-record transaction remains applied. It does not create the held
-backup or freeze. Review the private approval record's exact stage, hashes,
+backup or freeze; it requires that backup to predate the stage by no more than
+24 hours. Review the private approval record's exact stage, hashes,
 actions, exclusions, and expiry before any future approved apply; the plan
 command alone is not approval.
 
