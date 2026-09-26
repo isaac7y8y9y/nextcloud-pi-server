@@ -3,7 +3,10 @@
 # fixture branch.
 set -euo pipefail
 readonly HELPER="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/privileged/nextcloud-pi-ops"
+readonly BUNDLE_MANIFEST="$(dirname -- "$HELPER")/bundle-manifest.tsv"
 bash -n "$HELPER"
+manifest_hash="$(awk -F '\t' '$1 == "file" && $2 == "privileged-helper" {print $6}' "$BUNDLE_MANIFEST")"
+[[ "$manifest_hash" == "$(shasum -a 256 "$HELPER" | awk '{print $1}')" ]] || { printf 'tracked privileged-helper digest is stale\n' >&2; exit 1; }
 for command in cmd_recovery_check cmd_active_prepare cmd_readiness_start cmd_drill_apply; do grep -Fq "$command" "$HELPER"; done
 grep -Fq 'valid_id' "$HELPER"; grep -Fq 'reject_stdin' "$HELPER"; grep -Fq 'active-record-current' "$HELPER"; grep -Fq 'no_nested_mounts' "$HELPER"
 grep -Fq 'required_unit="nextcloud-pi-drill-required-$id.service"' "$HELPER"; grep -Fq 'Requires=%s' "$HELPER"
@@ -488,7 +491,9 @@ EOF
   active_hash="$(sha256sum "$active_candidate" | awk '{print $1}')"
   active_size="$(wc -c <"$active_candidate" | tr -d '[:space:]')"
   active_rollback_id=20260910T000000Z-101
+  sudo "$FIXTURE/ops" active-record presence "$active_rollback_id" | grep -Fx $'state\tabsent' >/dev/null
   cat "$active_candidate" | sudo "$FIXTURE/ops" active-record prepare "$active_rollback_id" "$active_hash" "$active_size" | grep -Fx $'state\tprepared' >/dev/null
+  sudo "$FIXTURE/ops" active-record presence "$active_rollback_id" | grep -Fx $'state\tpresent' >/dev/null
   sudo "$FIXTURE/ops" active-record apply "$active_rollback_id" | grep -Fx $'state\tapplied' >/dev/null
   sudo "$FIXTURE/ops" active-record status "$active_rollback_id" | grep -Fx $'state\tapplied' >/dev/null
   sudo "$FIXTURE/ops" active-record rollback "$active_rollback_id" | grep -Fx $'state\trolledback' >/dev/null

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 import stat
 import tempfile
@@ -33,6 +34,8 @@ class FakeTarget:
         self.calls.append("ssh " + command)
         if command.startswith("docker image inspect"):
             return "sha256:" + "1" * 64
+        if command.startswith("docker tag") and self.fail == "tag":
+            raise a.r.RecoveryError("injected pre-prepare failure")
         if command.startswith("umask 077"):
             return ""
         if "atomic_replace_preserve" in command:
@@ -49,10 +52,14 @@ class FakeTarget:
             return {"phase": self.phase, "fingerprint": "f" * 64}
         if args[:2] == ("upgrade-stage", "boundary"):
             self.phase = "runtime-may-have-changed"
+            if self.fail == "boundary-response":
+                raise a.r.RecoveryError("injected lost boundary response")
             return {"phase": self.phase, "id": args[2]}
         if args[:2] == ("active-record", "prepare"):
             self.has_tx = True
             return {"state": "prepared"}
+        if args[:2] == ("active-record", "presence"):
+            return {"state": "present" if self.has_tx else "absent", "id": args[2]}
         if args[:2] == ("active-record", "apply"):
             self.active = "d" * 64
             return {"state": "applied"}
@@ -162,6 +169,13 @@ class ActivationTests(unittest.TestCase):
                            {"id": self.stage_id, "table_sha256": "9" * 64},
                            "test.example.invalid", 1000, "f" * 64)
 
+    def test_stale_recovery_evidence_is_rejected_before_stage(self) -> None:
+        path = self.root / "manifest.tsv"
+        path.write_text("timestamp\t20260924T000000Z\n")
+        now = int(datetime(2026, 9, 26, tzinfo=timezone.utc).timestamp())
+        with self.assertRaisesRegex(a.r.RecoveryError, "older than 24 hours"):
+            a.age(path, now)
+
     def test_pre_boundary_failure_rolls_back_without_restart(self) -> None:
         target = FakeTarget(fail="compose")
         with mock.patch.object(a.r, "run", return_value=""), mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash):
@@ -172,6 +186,14 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(target.active, "a" * 64)
         self.assertFalse(any("ops service restart" in call for call in target.calls))
 
+    def test_pre_prepare_failure_aborts_without_active_transaction(self) -> None:
+        target = FakeTarget(fail="tag")
+        with mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash):
+            with self.assertRaisesRegex(a.r.RecoveryError, "prior configuration restored"):
+                a.stage_apply(target, self.base, {"fingerprint": "f" * 64, "expires": 1000}, self.candidate, self.source)
+        self.assertEqual(target.phase, "aborted")
+        self.assertFalse(any("ops active-record rollback" in call or "ops active-record commit" in call for call in target.calls))
+
     def test_post_boundary_failure_never_rolls_back_configuration(self) -> None:
         target = FakeTarget(fail="restart")
         with mock.patch.object(a.r, "run", return_value=""), mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash):
@@ -179,6 +201,24 @@ class ActivationTests(unittest.TestCase):
                 a.stage_apply(target, self.base, {"fingerprint": "f" * 64, "expires": 1000}, self.candidate, self.source)
         self.assertEqual(target.phase, "runtime-may-have-changed")
         self.assertEqual(target.compose, "c" * 64)
+        self.assertEqual(target.active, "d" * 64)
+        self.assertFalse(any("ops active-record rollback" in call for call in target.calls))
+
+    def test_lost_boundary_response_is_not_prestart_rollback(self) -> None:
+        target = FakeTarget(fail="boundary-response")
+        with mock.patch.object(a.r, "run", return_value=""), mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash):
+            with self.assertRaisesRegex(a.r.RecoveryError, "full runtime restore"):
+                a.stage_apply(target, self.base, {"fingerprint": "f" * 64, "expires": 1000}, self.candidate, self.source)
+        self.assertEqual(target.phase, "runtime-may-have-changed")
+        self.assertEqual(target.compose, "c" * 64)
+        self.assertFalse(any("ops active-record rollback" in call for call in target.calls))
+
+    def test_running_id_failure_after_restart_retains_candidate(self) -> None:
+        target = FakeTarget()
+        with mock.patch.object(a.r, "run", return_value=""), mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash), mock.patch.object(a, "running", side_effect=a.r.RecoveryError("image ID mismatch")):
+            with self.assertRaisesRegex(a.r.RecoveryError, "full runtime restore"):
+                a.stage_apply(target, self.base, {"fingerprint": "f" * 64, "expires": 1000}, self.candidate, self.source)
+        self.assertEqual(target.phase, "runtime-may-have-changed")
         self.assertEqual(target.active, "d" * 64)
         self.assertFalse(any("ops active-record rollback" in call for call in target.calls))
 

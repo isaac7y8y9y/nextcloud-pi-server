@@ -295,15 +295,24 @@ def stage_apply(target: r.Target, base: dict[str, object], approval: dict[str, o
             try:
                 if stage_created and r.remote_hash(target, project + "/docker-compose.yml") != evidence["source_compose"]:
                     install_compose(target, stage_dir, "source.yml", project)
-                active = target.ops("active-record", "status", stage_id)
-                if active.get("state") in ("prepared", "applied"):
-                    target.ops("active-record", "rollback", stage_id)
+                presence = target.ops("active-record", "presence", stage_id)
+                if presence == {"state": "present", "id": stage_id}:
+                    active = target.ops("active-record", "status", stage_id)
+                    if active.get("state") in ("prepared", "applied"):
+                        target.ops("active-record", "rollback", stage_id)
+                    elif active.get("state") != "rolledback":
+                        r.reject("active-record rollback state is invalid")
+                elif presence == {"state": "absent", "id": stage_id}:
+                    active = None
+                else:
+                    r.reject("active-record presence is ambiguous")
                 if r.remote_hash(target, project + "/docker-compose.yml") != evidence["source_compose"]:
                     r.reject("pre-start Compose rollback differs")
                 if target.ops("active-images-state").get("sha256") != evidence["source_record"]:
                     r.reject("pre-start active-record rollback differs")
                 target.ops("upgrade-stage", "abort", stage_id, str(approval["fingerprint"]))
-                target.ops("active-record", "commit", stage_id)
+                if active is not None:
+                    target.ops("active-record", "commit", stage_id)
             except r.RecoveryError:
                 r.reject("pre-start rollback is incomplete; freeze must remain held")
             r.reject("activation stopped before first start; prior configuration restored; freeze remains held")

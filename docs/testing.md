@@ -39,7 +39,7 @@ must be resolved before trusting a Linux integration result.
 | `scripts/check-privileged-sudo-calls.sh` | Rejects non-dispatcher passwordless sudo calls in non-test shell scripts; Bash and ripgrep | Read-only | `0.01s` | Direct | PR-direct |
 | `scripts/check-public-safety.py` | Detects forbidden files, deployment identity, and secret-like material in the tree or reachable history; Python and Git | Read-only; output is redacted | `0.10s` tree; `4.23s` history locally | Direct in both modes | PR-direct |
 | `scripts/test-active-images.sh` | Exercises active-image record schema, modes, binding, ownership contract, and symlink rejection | Disposable local fixture removed by trap | `0.03s` | Direct | PR-direct |
-| `scripts/test-activate-image-upgrade.py` | Checks single-use activation approval, expiry/tamper denial, pre-boundary rollback, post-boundary retention, and pending-acceptance ordering | Python temporary directory removed by cleanup; no Pi access | `<0.1s` | Direct | PR-direct |
+| `scripts/test-activate-image-upgrade.py` | Checks fetch-authority tampering, stale evidence, single-use approval, pre-prepare/pre-boundary abort, ambiguous/post-boundary retention, image-ID failure, and pending-acceptance ordering | Python temporary directory removed by cleanup; no Pi access | `<0.1s` | Direct | PR-direct |
 | `scripts/test-atomic-transaction.sh` | Fault-injects the shared deployment transaction and verifies rollback ordering/state | Disposable local fixture and fake sudo; trap cleanup | `0.23s` | Direct | PR-direct |
 | `scripts/test-background-jobs.sh` | Verifies the local timer cadence, passive stopped-stack behavior, dispatcher quiescence, and runtime-backup coordination contracts | Read-only | `<0.1s` | Direct | PR-direct |
 | `scripts/test-compose-env-references.sh` | Exercises the Compose checker against valid and invalid synthetic templates | Disposable Compose fixture removed by trap | `0.02s` | Direct | PR-direct |
@@ -78,6 +78,18 @@ must be resolved before trusting a Linux integration result.
 <!-- test-inventory:end -->
 
 ## Coverage tiers
+
+The issue-26 failure matrix now has offline coverage for wrong ARM64
+manifest/config identity (`test-resolve-image-upgrade.py`), source-lock and
+Compose drift (`test-prepare-image-upgrade.py`), wrong archive platform or
+mapping (`test-image-recovery-attestation.sh`), fetch approval expiry/tamper/
+replay (`test-fetch-image-upgrade.sh`), stale stage evidence and both sides of
+the first-start boundary (`test-activate-image-upgrade.py`), and SQL import,
+promotion, and retained failed state (`test-restore-live-runtime.py` and the
+Linux privileged fixture). These tests cannot prove the Pi's actual firewall
+path, in-flight application/DB drain, or a disposable full-runtime restore on
+the Pi; those remain explicit gates in the
+[ingress proof plan](upgrade-ingress-proof.md).
 
 - **PR-direct**: the runner executes the script as a program.
 - **PR-transitive**: a directly executed test invokes the script against a

@@ -414,6 +414,16 @@ cmd_active_status() {
   out id "$1"
   for key in state pre_sha256 candidate_sha256 size; do out "$key" "$(metadata "$meta" "$key")"; done
 }
+cmd_active_presence() {
+  [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
+  local marker="$(active_marker)" tx="$(active_tx "$1")"
+  validate_host
+  if [[ ! -e "$marker" && ! -L "$marker" && ! -e "$tx" && ! -L "$tx" ]]; then
+    out state absent; out id "$1"; return
+  fi
+  require_active_tx "$1"
+  out state present; out id "$1"
+}
 cmd_upgrade_stage_abort() {
   [[ $# == 2 ]] || invalid; reject_stdin
   local id="$1" fingerprint="$2"
@@ -596,7 +606,7 @@ case "$command" in
   upgrade-freeze) sub="${1:-}"; shift || true; case "$sub" in check) cmd_upgrade_freeze_check "$@";; status) cmd_upgrade_freeze_status "$@";; activate) cmd_upgrade_freeze_activate "$@";; release) cmd_upgrade_freeze_release "$@";; *) invalid;; esac;;
   upgrade-fetch) sub="${1:-}"; shift || true; case "$sub" in status) cmd_upgrade_fetch_status "$@";; consume) cmd_upgrade_fetch_consume "$@";; complete) cmd_upgrade_fetch_complete "$@";; *) invalid;; esac;;
   upgrade-stage) sub="${1:-}"; shift || true; case "$sub" in consume) cmd_upgrade_stage_consume "$@";; boundary) cmd_upgrade_stage_boundary "$@";; status) cmd_upgrade_stage_status "$@";; abort) cmd_upgrade_stage_abort "$@";; accept) cmd_upgrade_stage_accept "$@";; recovered) cmd_upgrade_stage_recovered "$@";; *) invalid;; esac;;
-  active-record) sub="${1:-}"; shift || true; case "$sub" in status) cmd_active_status "$@";; prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
+  active-record) sub="${1:-}"; shift || true; case "$sub" in presence) cmd_active_presence "$@";; status) cmd_active_status "$@";; prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
   runtime-backup) sub="${1:-}"; shift || true; case "$sub" in size) cmd_runtime_backup_size "$@";; stream) cmd_runtime_backup_stream "$@";; *) invalid;; esac;;
   runtime-recovery) sub="${1:-}"; shift || true; case "$sub" in check) cmd_recovery_check "$@";; prepare) cmd_recovery_prepare "$@";; restore) cmd_recovery_restore "$@";; attest-database) cmd_recovery_attest_database "$@";; promote) cmd_recovery_promote "$@";; cleanup) cmd_recovery_cleanup "$@";; *) invalid;; esac;;
   image-readiness) sub="${1:-}"; shift || true; case "$sub" in check) cmd_readiness_check "$@";; start) cmd_readiness_start "$@";; status) cmd_readiness_status "$@";; stop) cmd_readiness_stop "$@";; cleanup) cmd_readiness_cleanup "$@";; *) invalid;; esac;;

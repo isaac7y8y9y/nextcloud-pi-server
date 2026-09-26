@@ -32,12 +32,10 @@ options, verification is self-consistency only and is insufficient for an
 upgrade approval. This check does not re-query the registry or assert that a
 running Pi uses the candidate.
 
-The metadata record is not an approval artifact. Before a live image update, a
-separate transaction must bind a refreshed registry identity to the actual Pi
-pre-state and fresh recovery point, verify the loaded ID after the approved
-pull, and prove the ingress freeze and full-runtime recovery gates. Until that
-transaction is implemented and reviewed, these candidate files are for
-offline preparation and tests only.
+The metadata record is not an approval artifact. The draft fetch, activation,
+and restore transactions below bind registry identity, Pi pre-state, and a
+fresh recovery point, but are not reviewed or proved on the Pi's live network
+path. These candidate files remain for offline preparation and tests only.
 
 `scripts/fetch-image-upgrade.sh` is an in-progress, narrower transaction for
 retrieving **one** image without activating it. Its `--plan` validates the
@@ -53,22 +51,25 @@ until recovery is resolved. It does not
 retag an image, replace Compose, start a target container, change the protected
 record, or release the freeze. A failed pull retains the freeze and fetched
 image for diagnosis. This is **not** an operational upgrade procedure until
-activation, phase-aware full-runtime recovery, ingress/drain proof, isolated
-database rehearsal, and integration tests are completed and reviewed.
+measured ingress/drain proof, disposable integration, and code/PR review are
+completed.
 
 The root-owned dispatcher now also has an `upgrade-stage` state marker. It
 consumes one completed fetch and a second short-lived stage approval bound to
 the freeze, source and candidate record/Compose hashes, target tag, and loaded
 ID. `boundary` must be recorded **before** a target container can be started;
 afterward, the marker rejects pre-start abort and prevents freeze release
-until the candidate is accepted. A separately verified full-restore path is
-still needed for failures after that boundary. `abort` is
+until the candidate is accepted. A draft approval-bound full-restore driver
+exists for failures after that boundary, but is not live-proved or reviewed.
+`abort` is
 limited to the prepared, pre-start phase and requires the original record and
 Compose to be back in place. `accept` checks the candidate configuration,
 running image IDs, service, and maintenance state while ingress remains
-blocked. This is a safety primitive, not an activation interface: no image
-tag, Compose file, container, or runtime is changed by these commands, and
-the live restore and operator transaction are not implemented yet.
+blocked. The root commands are safety primitives; the separate draft
+`scripts/activate-image-upgrade.py` driver uses them to tag the exact fetched
+image, install the candidate record and Compose, mark the boundary before
+restart, and pause for a second health-checked acceptance approval. It leaves
+the freeze held and does not release ingress or alter the source lock.
 
 ## In-progress protected backup boundary
 
@@ -89,9 +90,10 @@ bound to the freeze ID and firewall hash, and it deliberately leaves the
 freeze, maintenance mode, and timer unchanged even when capture fails. The
 existing ordinary backup remains `runtime-backup-v1` and still reopens service
 after its capture. The held mode is not yet a complete approved upgrade
-transaction: in-flight-write drain, external denial proof, stage approval,
-image activation, and full-runtime restore remain hard gates. Do not use it
-as a live upgrade procedure until those gates are implemented and reviewed.
+transaction: in-flight-write drain, external denial proof, disposable Pi
+rehearsal, and reviews remain hard gates. See the
+[ingress proof plan](upgrade-ingress-proof.md). Do not use it as a live upgrade
+procedure until those gates pass.
 
 ## Isolated MariaDB rehearsal
 
