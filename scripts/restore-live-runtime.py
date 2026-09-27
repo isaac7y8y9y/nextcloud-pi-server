@@ -244,6 +244,7 @@ def evidence(target: Target, stage_id: str, candidate: Path, source: Path,
         raise RecoveryError("held backup or stage timestamp is invalid") from exc
     if not 0 <= (stage_time - backup_time).total_seconds() <= 86400:
         reject("held backup was not captured within 24 hours before the stage")
+    database_stage = stage.get("target") == "db"
     if (freeze.get("state") != "active" or
             freeze.get("id") != manifest.get("freeze_id") or
             freeze.get("table_sha256") != manifest.get("freeze_table_sha256") or
@@ -257,25 +258,38 @@ def evidence(target: Target, stage_id: str, candidate: Path, source: Path,
             stage.get("candidate_compose_sha256") != local["candidate_compose"] or
             stage.get("tag") != metadata.get("tag") or
             stage.get("expected_id") != metadata.get("config_digest") or
-            active.get("state") != "applied" or
+            active.get("state") not in (("prepared", "applied") if database_stage else ("applied",)) or
             active.get("id") != stage_id or
             active.get("pre_sha256") != local["source_record"] or
             active.get("candidate_sha256") != local["candidate_record"]):
         reject("protected upgrade stage, held backup, and active transaction differ")
     project = config["NEXTCLOUD_REMOTE_PROJECT_DIR"]
-    for remote_path, local_hash in ((project + "/.env", local["env_sha256"]),
-                                    (project + "/docker-compose.yml", local["candidate_compose"]),
-                                    (project + "/caddy/Caddyfile", local["source_caddy"])):
-        if remote_hash(target, remote_path) != local_hash:
+    for remote_path, allowed in ((project + "/.env", (local["env_sha256"],)),
+                                 (project + "/docker-compose.yml", (local["source_compose"], local["candidate_compose"]) if database_stage else (local["candidate_compose"],)),
+                                 (project + "/caddy/Caddyfile", (local["source_caddy"],))):
+        if remote_hash(target, remote_path) not in allowed:
             reject("live project configuration differs from the bound stage")
     active_state = target.ops("active-images-state")
-    if active_state.get("sha256") != local["candidate_record"]:
+    if active_state.get("sha256") not in ((local["source_record"], local["candidate_record"]) if database_stage else (local["candidate_record"],)):
         reject("protected active record differs from candidate")
+    db_prepare_fingerprint = ""
+    db_cutover_identity: dict[str, str] = {}
+    if database_stage:
+        cutover = target.ops("db-cutover", "status", stage_id)
+        if (cutover.get("phase") not in ("detached", "switching", "candidate-ready", "starting", "running", "recovery-detaching", "recovering", "source-ready") or
+                cutover.get("pre_record_sha256") != local["source_record"] or
+                cutover.get("candidate_record_sha256") != local["candidate_record"] or
+                cutover.get("candidate_compose_sha256") != local["candidate_compose"]):
+            reject("database cutover journal differs from the held recovery point")
+        db_prepare_fingerprint = cutover["prepare_fingerprint"]
+        db_cutover_identity = {key: cutover[key] for key in ("source_inode", "candidate_inode", "candidate_digest", "inventory_sha256", "sql_sha256")}
     timer = target.ops("background-jobs", "state")
     if timer.get("timer_active") != "no":
         reject("background jobs are not paused")
     return {"format": "live-runtime-restore-v1", "stage_id": stage_id,
-            "stage_fingerprint": stage["fingerprint"], "freeze_id": freeze["id"],
+            "stage_fingerprint": stage["fingerprint"], "db_prepare_fingerprint": db_prepare_fingerprint,
+            "db_cutover_identity": db_cutover_identity,
+            "freeze_id": freeze["id"],
             "freeze_table_sha256": freeze["table_sha256"], "host": config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"],
             "project": project, "mount": config["NEXTCLOUD_STORAGE_MOUNT"],
             "evidence": local,
@@ -367,16 +381,30 @@ def resume(target: Target, base: dict[str, object], candidate: Path, source: Pat
         reject("restore resume stage or ingress freeze differs")
     if target.ops("background-jobs", "state").get("timer_active") != "no":
         reject("background-job timer resumed")
+    if base.get("db_prepare_fingerprint"):
+        cutover = target.ops("db-cutover", "status", stage_id)
+        if (cutover.get("prepare_fingerprint") != base["db_prepare_fingerprint"] or
+                {key: cutover.get(key) for key in base["db_cutover_identity"]} != base["db_cutover_identity"]):
+            reject("database cutover identity changed during recovery resume")
     if remote_hash(target, target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] + "/.env") != local["env_sha256"]:
         reject("database environment changed during restore")
     recovery = target.ops("runtime-recovery", "status", stage_id)
     if recovery.get("id") != stage_id:
         reject("runtime recovery identity differs")
     if recovery.get("state") == "prepared":
-        if (remote_hash(target, target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] + "/docker-compose.yml") != local["candidate_compose"] or
+        database_stage = bool(base.get("db_prepare_fingerprint"))
+        compose_allowed = (local["source_compose"], local["candidate_compose"]) if database_stage else (local["candidate_compose"],)
+        record_allowed = (local["source_record"], local["candidate_record"]) if database_stage else (local["candidate_record"],)
+        if (remote_hash(target, target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] + "/docker-compose.yml") not in compose_allowed or
                 remote_hash(target, target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] + "/caddy/Caddyfile") != local["source_caddy"] or
-                target.ops("active-images-state").get("sha256") != local["candidate_record"]):
+                target.ops("active-images-state").get("sha256") not in record_allowed):
             reject("candidate configuration changed during prepared restore")
+        if database_stage and target.ops("db-cutover", "status", stage_id).get("phase") in ("recovery-detaching", "recovering"):
+            target.ops("db-cutover", "recovery-detach", stage_id, str(base["db_prepare_fingerprint"]),
+                       str(base["stage_fingerprint"]))
+            target.ops("runtime-recovery", "promote", stage_id, str(base["stage_fingerprint"]), timeout=3600)
+            finish_promoted(target, base, config_backup)
+            return
         reset_staged_database(target, stage_id)
         result = target.ops("runtime-recovery", "reset-prepared", stage_id, str(base["stage_fingerprint"]))
         if result != {"state": "prepared", "id": stage_id, "root": target.config["NEXTCLOUD_STORAGE_MOUNT"] + "/.recovery-" + stage_id}:
@@ -439,7 +467,7 @@ def finish_promoted(target: Target, base: dict[str, object], config_backup: Path
     presence = target.ops("active-record", "presence", stage_id)
     if presence.get("state") == "present":
         active = target.ops("active-record", "status", stage_id)
-        if active.get("state") not in ("applied", "rolledback"):
+        if active.get("state") not in ("prepared", "applied", "rolledback"):
             reject("active-record restore phase differs")
         target.ops("active-record", "rollback", stage_id)
         target.ops("active-record", "commit", stage_id)
@@ -447,6 +475,11 @@ def finish_promoted(target: Target, base: dict[str, object], config_backup: Path
         reject("active-record restore presence differs")
     if target.ops("active-images-state").get("sha256") != local["source_record"]:
         reject("prior active record was not restored")
+    if base.get("db_prepare_fingerprint"):
+        result = target.ops("db-cutover", "source-ready", stage_id,
+                            str(base["db_prepare_fingerprint"]), str(base["stage_fingerprint"]))
+        if result != {"phase": "source-ready", "id": stage_id}:
+            reject("protected database recovery startup gate differs")
     target.ops("service", "start", timeout=600)
     maintenance_off = False
     for _ in range(12):
@@ -469,6 +502,11 @@ def finish_promoted(target: Target, base: dict[str, object], config_backup: Path
         target.ops("upgrade-stage", "recovered", stage_id, str(base["stage_fingerprint"]))
     elif stage_state.get("phase") != "recovered":
         reject("upgrade stage recovery phase differs")
+    if base.get("db_prepare_fingerprint"):
+        result = target.ops("db-cutover", "recovered", stage_id,
+                            str(base["db_prepare_fingerprint"]), str(base["stage_fingerprint"]))
+        if result != {"phase": "recovered", "id": stage_id}:
+            reject("protected database recovery completion differs")
 
 
 def apply(target: Target, base: dict[str, object], source: Path,
@@ -562,6 +600,13 @@ def apply(target: Target, base: dict[str, object], source: Path,
             reject("staged prior configuration differs")
 
     target.ops("service", "stop")
+    if base.get("db_prepare_fingerprint"):
+        cutover = target.ops("db-cutover", "status", stage_id)
+        if cutover.get("phase") in ("detached", "switching"):
+            target.ops("db-cutover", "switch", stage_id, str(base["db_prepare_fingerprint"]),
+                       str(base["stage_fingerprint"]), timeout=900)
+        target.ops("db-cutover", "recovery-detach", stage_id,
+                   str(base["db_prepare_fingerprint"]), str(base["stage_fingerprint"]), timeout=900)
     target.ops("runtime-recovery", "promote", stage_id, str(base["stage_fingerprint"]), timeout=3600)
     finish_promoted(target, base, config_backup)
 

@@ -17,6 +17,7 @@ value() {
   awk -F= -v key="$key" '$1 == key { count++; value=$2 } END { if (count == 1) print value; else exit 1 }' "$RECORD"
 }
 
+/usr/local/libexec/nextcloud-pi-ops upgrade-startup-guard >/dev/null
 /usr/local/libexec/nextcloud-pi-validate-active-images
 [[ -f "$COMPOSE_FILE" && ! -L "$COMPOSE_FILE" ]] || die "Compose file is missing or unsafe"
 for command in docker python3; do command -v "$command" >/dev/null 2>&1 || die "required command is unavailable: $command"; done

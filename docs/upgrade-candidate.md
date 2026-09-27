@@ -70,11 +70,20 @@ blocked. The root commands are safety primitives; the separate draft
 image, install the candidate record and Compose, mark the boundary before
 restart, and pause for a second health-checked acceptance approval. It leaves
 the freeze held and does not release ingress or alter the source lock.
-The driver and root consumer fail closed for DB targets until the approved
-candidate uses a separately imported clean MariaDB directory. For app and
-Caddy stages, a distinct `--maintenance-off` action bound to the consumed
-stage approval checks the running candidate and drain before the acceptance
-plan can be made.
+For the initial MariaDB 11.8→11.4 stage, the driver now has a draft
+`--plan-prepare-db`/`--prepare-db`/`--resume-prepare-db` sequence. It binds a
+private source inventory and restricted credentials to the held SQL, imports
+into an isolated directory, and attests the stopped target database. A later
+`--plan`/`--apply` consumes a separate cutover approval with
+`--prepare-approval`; `--resume-db` uses the consumed stage approval. The root
+journal removes the old stack containers before moving directories, and the
+launcher blocks startup until configuration and the promoted directory agree.
+`--abort-db` applies only before the directory switch. The cutover driver is
+implementation work awaiting the fault tests and disposable integration in
+the [reviewed design](issue-26-mariadb-cutover-design.md); it is not a Pi
+upgrade instruction. For app and Caddy stages, a distinct `--maintenance-off`
+action bound to the consumed stage approval checks the running candidate and
+drain before the acceptance plan can be made.
 
 ## In-progress protected backup boundary
 

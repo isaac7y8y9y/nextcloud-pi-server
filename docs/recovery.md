@@ -75,10 +75,13 @@ source runtime, then tags the candidate, installs its active record and Compose,
 records the root boundary, and restarts the stack. A successful stage stops
 with maintenance mode and ingress freeze held. It does not migrate, accept,
 release the freeze, prune images, or alter the repository source lock.
-Database-image activation is currently refused by both the driver and the
-root-owned stage consumer. The 11.8-to-11.4 cutover needs a separate clean
-11.4 data directory and verified logical import; changing only the image tag
-must never start 11.4 against the existing 11.8 files.
+The draft database path prepares a clean 11.4 directory from the held SQL
+under a separate approval, removes the old containers, records the full
+recovery boundary, and promotes that directory before candidate startup.
+The original 11.8 directory is preserved. The root startup guard rejects
+partial switches, and `--resume-db` continues a consumed cutover approval.
+This path still requires the fault and disposable Linux tests specified in
+the [cutover design](issue-26-mariadb-cutover-design.md) before live use.
 
 After separate application/migration, use `--maintenance-off` with the consumed
 `--stage-approval` and the same five directories. This stage-bound action
@@ -101,7 +104,7 @@ remain outstanding.
 
 `scripts/restore-live-runtime.py` is an item-4 implementation under test, not
 yet an item-5 production instruction. It requires a root-owned upgrade stage
-already at `runtime-may-have-changed`, its still-applied active-record
+already at `runtime-may-have-changed`, its active-record
 transaction, an active ingress freeze, a matching `runtime-backup-v2` held at
 that freeze, verified prior image recovery, a source-rendered baseline, and a
 verified one-image candidate. The source configuration backup must include a
@@ -114,6 +117,11 @@ the identity-bound temporary import container, resets the isolated staged
 datasets, and restarts the restore. It never discards the live or preserved
 failed runtime. Promotion-phase resumes continue from the guarded directory
 moves. Both paths retain the ingress freeze until verified recovery.
+For a database cutover, restoration first finishes any interrupted directory
+placement under the closed startup gate, removes candidate container objects,
+and then promotes all four datasets. The protected journal permits Docker to
+start for an interrupted container-free recovery while keeping Compose
+startup blocked until the prior configuration and runtime are restored.
 
 The draft interface is:
 
@@ -128,8 +136,10 @@ scripts/restore-live-runtime.py --resume "$STAGE_ID" "$CANDIDATE" \
   --approval "$RESTORE_APPROVAL"
 ```
 
-`--plan` is only available after the root-owned runtime boundary and while
-the active-record transaction remains applied. It does not create the held
+`--plan` is only available after the root-owned runtime boundary. A partial
+database switch may still have its active-record transaction prepared; the
+restore driver binds the protected cutover identities and accepts only the
+recorded source/candidate configuration combinations. It does not create the held
 backup or freeze; it requires that backup to predate the stage by no more than
 24 hours. Review the private approval record's exact stage, hashes,
 actions, exclusions, and expiry before any future approved apply; the plan

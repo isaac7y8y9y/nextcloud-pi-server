@@ -146,7 +146,7 @@ cmd_active_images_state() {
     out "${key,,}_id" "$(/usr/bin/awk -F= -v wanted="NEXTCLOUD_ACTIVE_IMAGES_${key}_ID" '$1 == wanted { print $2 }' "$ACTIVE_RECORD")"
   done
 }
-cmd_service() { [[ $# == 1 ]] || invalid; reject_stdin; lock; validate_host; case "$1" in start|restart) /usr/bin/systemctl "$1" "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "service is not active";; stop) /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "service did not stop";; *) invalid;; esac; out state "$1"; }
+cmd_service() { [[ $# == 1 ]] || invalid; reject_stdin; lock; validate_host; case "$1" in start|restart) db_cutover_startup_guard; /usr/bin/systemctl "$1" "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "service is not active";; stop) /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "service did not stop";; *) invalid;; esac; out state "$1"; }
 background_jobs_timer=nextcloud-background-jobs.timer
 background_jobs_service=nextcloud-background-jobs.service
 cmd_background_jobs_state() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; if /usr/bin/systemctl is-enabled --quiet "$background_jobs_timer"; then out timer_enabled yes; else out timer_enabled no; fi; if /usr/bin/systemctl is-active --quiet "$background_jobs_timer"; then out timer_active yes; else out timer_active no; fi; }
@@ -226,10 +226,17 @@ cmd_upgrade_freeze_boot_guard() {
   [[ $# == 0 ]] || invalid
   local current="$(freeze_current)" root="$(freeze_root)" phase table metadata_file
   lock; validate_host
+  db_cutover_boot_guard
   for metadata_file in "${P[NEXTCLOUD_PI_STATE_ROOT]}"/runtime-recovery/*/metadata.tsv; do
     [[ -e "$metadata_file" || -L "$metadata_file" ]] || continue
     protected_file "$metadata_file" 0600
-    [[ "$(metadata "$metadata_file" state)" != promoting ]] || die "partial runtime promotion blocks Docker start"
+    if [[ "$(metadata "$metadata_file" state)" == promoting ]]; then
+      local recovery_id="${metadata_file%/metadata.tsv}" db_file
+      recovery_id="${recovery_id##*/}"; db_file="$(db_cutover_file "$recovery_id")"
+      [[ -f "$db_file" && ! -L "$db_file" ]] || die "partial runtime promotion blocks Docker start"
+      protected_file "$db_file" 0600
+      [[ "$(metadata "$db_file" phase)" == recovering && "$(metadata "$db_file" objects_removed)" == yes ]] || die "partial runtime promotion blocks Docker start"
+    fi
   done
   if [[ ! -e "$root" && ! -L "$root" ]]; then
     ! /usr/sbin/nft list table inet "$freeze_table" >/dev/null 2>&1 || die "orphaned upgrade firewall table"
@@ -416,6 +423,455 @@ cmd_upgrade_fetch_status() {
   for key in state id fingerprint freeze_id freeze_table_sha256 ref expected_id expires; do out "$key" "$(metadata "$file" "$key")"; done
 }
 upgrade_stage_root() { state_dir upgrade-stage; }
+db_cutover_root() { state_dir db-cutover; }
+db_cutover_file() { printf '%s/%s.tsv' "$(db_cutover_root)" "$1"; }
+db_cutover_field() { metadata "$(db_cutover_file "$1")" "$2"; }
+db_cutover_flush() {
+  local file="$1"
+  /usr/bin/chmod 0600 "$file.new"
+  /usr/bin/sync -f "$file.new"
+  /usr/bin/mv -f -- "$file.new" "$file"
+  /usr/bin/sync -f "$(/usr/bin/dirname -- "$file")"
+}
+db_cutover_rewrite() {
+  local id="$1" phase="$2" removed="$3" inode="$4" digest="$5" file
+  file="$(db_cutover_file "$id")"
+  /usr/bin/awk -F $'\t' -v phase="$phase" -v removed="$removed" -v inode="$inode" -v digest="$digest" '
+    $1 == "phase" { $2 = phase }
+    $1 == "objects_removed" { $2 = removed }
+    $1 == "candidate_inode" { $2 = inode }
+    $1 == "candidate_digest" { $2 = digest }
+    { print $1 "\t" $2 }
+  ' "$file" >"$file.new"
+  db_cutover_flush "$file"
+}
+db_cutover_temp_record() {
+  local id="$1" container_id="$2" file
+  [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || die "temporary database container ID is invalid"
+  file="$(db_cutover_file "$id")"
+  /usr/bin/awk -F $'\t' -v value="$container_id" '$1 == "temp_container_id" { $2 = value } { print $1 "\t" $2 }' "$file" >"$file.new"
+  db_cutover_flush "$file"
+}
+db_cutover_require() {
+  local id="$1" fingerprint="$2" file
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  safe_dir "$(db_cutover_root)"; file="$(db_cutover_file "$id")"; protected_file "$file" 0600
+  [[ "$(db_cutover_field "$id" format)" == db-cutover-v1 && "$(db_cutover_field "$id" id)" == "$id" && "$(db_cutover_field "$id" prepare_fingerprint)" == "$fingerprint" ]] || die "database cutover authorization differs"
+  freeze_require_current "$(db_cutover_field "$id" freeze_id)"
+  [[ "$(freeze_field phase)" == active && "$(freeze_field table_sha256)" == "$(db_cutover_field "$id" freeze_table_sha256)" && "$(freeze_table_hash)" == "$(db_cutover_field "$id" freeze_table_sha256)" ]] || die "database cutover ingress freeze differs"
+}
+db_cutover_path() { printf '%s/.db-cutover-%s/data' "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}" "$1"; }
+db_cutover_inode() { /usr/bin/stat -c '%d:%i' "$1"; }
+db_cutover_space_required() {
+  local paths=() item total=1073741824 size
+  mapfile -t paths < <(runtime_sources)
+  paths+=("${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db")
+  [[ "${#paths[@]}" == 4 ]] || die "runtime source inventory is incomplete"
+  for item in "${paths[@]}"; do
+    [[ -d "$item" && ! -L "$item" ]] || die "runtime source directory is unsafe"
+    size="$(/usr/bin/du -sb "$item" | /usr/bin/awk '{print $1}')"
+    [[ "$size" =~ ^[0-9]+$ ]] || die "runtime source size is invalid"
+    total=$((total + 2 * size))
+  done
+  printf '%s' "$total"
+}
+db_cutover_no_consumers() {
+  local path="$1" container source sources containers
+  containers="$(/usr/bin/docker ps -aq --no-trunc)" || die "container inventory failed"
+  for container in $containers; do
+    sources="$(/usr/bin/docker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$container")" || die "container mount inspection failed"
+    while IFS= read -r source; do
+      [[ "$source" != "$path" && "$source" != "$path/"* ]] || die "a container still mounts database cutover data"
+    done <<<"$sources"
+  done
+}
+db_cutover_source_consumers() {
+  local id="$1" path="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db" container containers sources source allowed key
+  containers="$(/usr/bin/docker ps -aq --no-trunc)" || die "container inventory failed"
+  for container in $containers; do
+    sources="$(/usr/bin/docker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$container")" || die "container mount inspection failed"
+    while IFS= read -r source; do
+      if [[ "$source" == "$path" || "$source" == "$path/"* ]]; then
+        allowed=no
+        for key in app db caddy; do
+          [[ "$container" != "$(db_cutover_field "$id" "${key}_container_id")" ]] || allowed=yes
+        done
+        [[ "$allowed" == yes ]] || die "an unrecorded container mounts the source database"
+      fi
+    done <<<"$sources"
+  done
+}
+db_cutover_digest() {
+  local path="$1"
+  [[ -d "$path" && ! -L "$path" && -n "$(/usr/bin/find "$path" -mindepth 1 -print -quit)" ]] || die "staged database directory is empty or unsafe"
+  no_nested_mounts "$path" || die "staged database directory contains a nested mount"
+  [[ -z "$(/usr/bin/find "$path" -mindepth 1 ! -type d ! -type f -print -quit)" ]] || die "staged database contains a special file or link"
+  (cd -- "$path" && /usr/bin/find . -type f -print0 | /usr/bin/sort -z | /usr/bin/xargs -0 -r /usr/bin/sha256sum | /usr/bin/sha256sum | /usr/bin/awk '{print $1}')
+}
+cmd_db_cutover_begin() {
+  [[ $# == 13 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" freeze_id="$3" table="$4" pre_record="$5" pre_compose="$6" candidate_record="$7" candidate_compose="$8" expected_id="$9" env_hash="${10}" restricted_hash="${11}" sql_hash="${12}" inventory_hash="${13}" file parent data source ids=() name current
+  valid_id "$id" && valid_hash "$fingerprint" && valid_id "$freeze_id" && valid_hash "$table" && valid_hash "$pre_record" && valid_hash "$pre_compose" && valid_hash "$candidate_record" && valid_hash "$candidate_compose" && [[ "$expected_id" =~ ^sha256:[0-9a-f]{64}$ ]] && valid_hash "$env_hash" && valid_hash "$restricted_hash" && valid_hash "$sql_hash" && valid_hash "$inventory_hash" || invalid
+  lock; validate_host; freeze_require_current "$freeze_id"
+  [[ "$(freeze_field phase)" == active && "$(freeze_field table_sha256)" == "$table" && "$(freeze_table_hash)" == "$table" ]] || die "database cutover ingress freeze differs"
+  [[ "$(live_hash)" == "$pre_record" && "$(upgrade_stage_compose_hash)" == "$pre_compose" && "$(hash "${P[NEXTCLOUD_PI_PROJECT_DIR]}/.env")" == "$env_hash" ]] || die "database cutover source configuration differs"
+  source="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"; [[ -d "$source" && ! -L "$source" ]] || die "source database directory is unsafe"
+  no_nested_mounts "$source" || die "source database directory contains a nested mount"
+  (( $(available) > $(db_cutover_space_required) )) || die "insufficient space for clean import and full recovery"
+  file="$(db_cutover_file "$id")"; parent="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/.db-cutover-$id"; data="$(db_cutover_path "$id")"
+  if [[ -e "$file" || -L "$file" ]]; then
+    db_cutover_require "$id" "$fingerprint"
+    [[ "$(db_cutover_field "$id" phase)" == preparing && "$(db_cutover_field "$id" source_inode)" == "$(db_cutover_inode "$source")" && "$(db_cutover_field "$id" pre_record_sha256)" == "$pre_record" && "$(db_cutover_field "$id" pre_compose_sha256)" == "$pre_compose" && "$(db_cutover_field "$id" candidate_record_sha256)" == "$candidate_record" && "$(db_cutover_field "$id" candidate_compose_sha256)" == "$candidate_compose" && "$(db_cutover_field "$id" expected_id)" == "$expected_id" && "$(db_cutover_field "$id" env_sha256)" == "$env_hash" && "$(db_cutover_field "$id" restricted_env_sha256)" == "$restricted_hash" && "$(db_cutover_field "$id" sql_sha256)" == "$sql_hash" && "$(db_cutover_field "$id" inventory_sha256)" == "$inventory_hash" ]] || die "database preparation retry differs"
+  else
+    [[ ! -e "$parent" && ! -L "$parent" ]] || die "unbound database staging path exists"
+    for name in "${P[NEXTCLOUD_PI_APP_CONTAINER]}" "${P[NEXTCLOUD_PI_DB_CONTAINER]}" "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}"; do
+      current="$(/usr/bin/docker inspect --format '{{.Id}} {{.State.Running}}' "$name")" || die "source stack container is missing"
+      [[ "$current" =~ ^[0-9a-f]{64}\ true$ ]] || die "source stack container is not running"
+      ids+=("${current%% *}")
+    done
+    ensure_parent db-cutover
+    printf 'format\tdb-cutover-v1\nid\t%s\nphase\tpreparing\nprepare_fingerprint\t%s\nfreeze_id\t%s\nfreeze_table_sha256\t%s\nsource_inode\t%s\ncandidate_inode\tpending\ncandidate_digest\tpending\nobjects_removed\tno\npre_record_sha256\t%s\npre_compose_sha256\t%s\ncandidate_record_sha256\t%s\ncandidate_compose_sha256\t%s\nexpected_id\t%s\nenv_sha256\t%s\nrestricted_env_sha256\t%s\nsql_sha256\t%s\ninventory_sha256\t%s\napp_container_id\t%s\ndb_container_id\t%s\ncaddy_container_id\t%s\ntemp_container_id\tpending\n' "$id" "$fingerprint" "$freeze_id" "$table" "$(db_cutover_inode "$source")" "$pre_record" "$pre_compose" "$candidate_record" "$candidate_compose" "$expected_id" "$env_hash" "$restricted_hash" "$sql_hash" "$inventory_hash" "${ids[0]}" "${ids[1]}" "${ids[2]}" >"$file.new"
+    db_cutover_flush "$file"
+  fi
+  if [[ ! -e "$parent" && ! -L "$parent" ]]; then /usr/bin/install -d -m 0700 -o root -g root "$parent"; fi
+  safe_dir "$parent"
+  if [[ ! -e "$data" && ! -L "$data" ]]; then /usr/bin/install -d -m 0700 -o root -g root "$data"; fi
+  [[ -d "$data" && ! -L "$data" ]] || die "database staging directory is unsafe"
+  db_cutover_source_consumers "$id"
+  out phase preparing; out id "$id"; out data "$data"
+}
+cmd_db_cutover_env_install() {
+  [[ $# == 4 ]] || invalid
+  local id="$1" fingerprint="$2" expected="$3" size="$4" path line key value seen='|' count=0
+  valid_id "$id" && valid_hash "$fingerprint" && valid_hash "$expected" && [[ "$size" =~ ^[1-9][0-9]*$ ]] && (( size <= 4096 )) || invalid
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"
+  [[ "$(db_cutover_field "$id" phase)" == preparing && "$(db_cutover_field "$id" restricted_env_sha256)" == "$expected" ]] || die "database environment is not authorized"
+  path="$(db_cutover_root)/$id.env"
+  [[ ! -L "$path.new" ]] || die "database environment staging is unsafe"
+  /usr/bin/rm -f -- "$path.new"
+  read_exact "$path.new" "$size"
+  [[ "$(hash "$path.new")" == "$expected" ]] || die "database environment hash differs"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^(MYSQL_ROOT_PASSWORD|MYSQL_PASSWORD|MYSQL_DATABASE|MYSQL_USER)=([^[:space:]]+)$ ]] || die "restricted database environment schema is invalid"
+    key="${BASH_REMATCH[1]}"; value="${BASH_REMATCH[2]}"
+    [[ "$seen" != *"|$key|"* ]] || die "restricted database environment duplicates a key"
+    seen+="$key|"; count=$((count + 1))
+    if [[ "$key" == MYSQL_DATABASE || "$key" == MYSQL_USER ]]; then [[ "$value" =~ ^[A-Za-z0-9_]+$ ]] || die "database name or user is invalid"; fi
+  done <"$path.new"
+  [[ "$count" == 4 ]] || die "restricted database environment is incomplete"
+  if [[ -e "$path" || -L "$path" ]]; then
+    protected_file "$path" 0600
+    [[ "$(hash "$path")" == "$expected" ]] || die "protected database environment differs"
+    /usr/bin/rm -f -- "$path.new"
+  else
+    db_cutover_flush "$path"
+  fi
+  out state installed; out id "$id"
+}
+cmd_db_cutover_temp_start() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" path data name image container_id actual
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"
+  [[ "$(db_cutover_field "$id" phase)" == preparing ]] || die "clean database preparation is not active"
+  path="$(db_cutover_root)/$id.env"; protected_file "$path" 0600
+  [[ "$(hash "$path")" == "$(db_cutover_field "$id" restricted_env_sha256)" ]] || die "restricted database environment changed"
+  data="$(db_cutover_path "$id")"; [[ -d "$data" && ! -L "$data" ]] || die "database staging path is unsafe"
+  db_cutover_no_consumers "$data"
+  name="nextcloud-cutover-db-$id"; ! /usr/bin/docker inspect "$name" >/dev/null 2>&1 || die "temporary database container already exists; resume preparation to remove it"
+  image="$(db_cutover_field "$id" expected_id)"
+  [[ "$(/usr/bin/docker image inspect --format '{{.Id}}' "$image")" == "$image" ]] || die "candidate MariaDB image differs"
+  container_id="$(/usr/bin/docker create --network none --restart=no --name "$name" --label "nextcloud-pi-db-cutover=$id" --env-file "$path" --mount "type=bind,source=$data,target=/var/lib/mysql" "$image")" || die "temporary database container creation failed"
+  [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || die "temporary database container ID is invalid"
+  db_cutover_temp_record "$id" "$container_id"
+  /usr/bin/docker start "$container_id" >/dev/null || die "temporary database container start failed"
+  out state started; out id "$id"; out container_id "$container_id"
+}
+cmd_db_cutover_attest() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" data digest
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"
+  [[ "$(db_cutover_field "$id" phase)" == preparing ]] || die "database preparation is not active"
+  data="$(db_cutover_path "$id")"; db_cutover_no_consumers "$data"
+  [[ "$(db_cutover_field "$id" temp_container_id)" =~ ^[0-9a-f]{64}$ ]] || die "temporary database container identity was not recorded"
+  digest="$(db_cutover_digest "$data")"
+  db_cutover_rewrite "$id" prepared no "$(db_cutover_inode "$data")" "$digest"
+  out phase prepared; out id "$id"; out candidate_digest "$digest"
+}
+cmd_db_cutover_reset_preparing() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" data
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"
+  [[ "$(db_cutover_field "$id" phase)" == preparing ]] || die "only incomplete isolated preparation can be reset"
+  data="$(db_cutover_path "$id")"; [[ -d "$data" && ! -L "$data" ]] || die "database staging directory is unsafe"
+  no_nested_mounts "$data" || die "database staging contains a nested mount"
+  db_cutover_no_consumers "$data"
+  /usr/bin/rm -rf --one-file-system -- "$data"
+  /usr/bin/install -d -m 0700 -o root -g root "$data"
+  out phase preparing; out id "$id"
+}
+db_cutover_stage_bound() {
+  local id="$1" stage_fingerprint="$2"
+  upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" fingerprint)" == "$stage_fingerprint" && "$(upgrade_stage_field "$id" target)" == db && "$(upgrade_stage_field "$id" pre_record_sha256)" == "$(db_cutover_field "$id" pre_record_sha256)" && "$(upgrade_stage_field "$id" pre_compose_sha256)" == "$(db_cutover_field "$id" pre_compose_sha256)" && "$(upgrade_stage_field "$id" candidate_record_sha256)" == "$(db_cutover_field "$id" candidate_record_sha256)" && "$(upgrade_stage_field "$id" candidate_compose_sha256)" == "$(db_cutover_field "$id" candidate_compose_sha256)" && "$(upgrade_stage_field "$id" expected_id)" == "$(db_cutover_field "$id" expected_id)" ]] || die "database cutover and activation approvals differ"
+}
+db_cutover_old_objects_absent() {
+  local name
+  /usr/bin/docker info >/dev/null || die "Docker is unavailable during database cutover"
+  for name in "${P[NEXTCLOUD_PI_APP_CONTAINER]}" "${P[NEXTCLOUD_PI_DB_CONTAINER]}" "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}"; do
+    ! /usr/bin/docker inspect "$name" >/dev/null 2>&1 || die "old stack container still exists"
+  done
+  db_cutover_no_consumers "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"
+  db_cutover_no_consumers "$(db_cutover_path "$1")"
+}
+cmd_db_cutover_detach() {
+  [[ $# == 3 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" stage_fingerprint="$3" phase name key expected actual
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"; db_cutover_stage_bound "$id" "$stage_fingerprint"
+  [[ "$(upgrade_stage_field "$id" phase)" == prepared ]] || die "activation stage is not prepared"
+  phase="$(db_cutover_field "$id" phase)"
+  [[ "$phase" == prepared || "$phase" == detaching || "$phase" == detached ]] || die "database stage cannot detach"
+  [[ "$(live_hash)" == "$(db_cutover_field "$id" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(db_cutover_field "$id" pre_compose_sha256)" ]] || die "source configuration changed before detach"
+  [[ "$(db_cutover_inode "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db")" == "$(db_cutover_field "$id" source_inode)" ]] || die "source database directory changed"
+  [[ "$(db_cutover_inode "$(db_cutover_path "$id")")" == "$(db_cutover_field "$id" candidate_inode)" && "$(db_cutover_digest "$(db_cutover_path "$id")")" == "$(db_cutover_field "$id" candidate_digest)" ]] || die "prepared database changed"
+  (( $(available) > $(db_cutover_space_required) / 2 )) || die "insufficient space for full recovery during database cutover"
+  if [[ "$phase" == prepared ]]; then db_cutover_rewrite "$id" detaching no "$(db_cutover_field "$id" candidate_inode)" "$(db_cutover_field "$id" candidate_digest)"; fi
+  for key in app db caddy; do
+    case "$key" in app) name="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; db) name="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; caddy) name="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
+    expected="$(db_cutover_field "$id" "${key}_container_id")"
+    actual="$(/usr/bin/docker inspect --format '{{.Id}}' "$name" 2>/dev/null || true)"
+    [[ -z "$actual" || "$actual" == "$expected" ]] || die "source container identity changed"
+    if [[ -n "$actual" ]]; then /usr/bin/docker update --restart=no "$name" >/dev/null; fi
+  done
+  /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "source service did not stop cleanly"
+  for key in app db caddy; do
+    case "$key" in app) name="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; db) name="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; caddy) name="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
+    expected="$(db_cutover_field "$id" "${key}_container_id")"
+    actual="$(/usr/bin/docker inspect --format '{{.Id}} {{.State.Running}}' "$name" 2>/dev/null || true)"
+    if [[ "$actual" == "$expected true" ]]; then
+      /usr/bin/docker stop --time 120 "$name" >/dev/null || die "source container did not stop cleanly"
+      actual="$(/usr/bin/docker inspect --format '{{.Id}} {{.State.Running}}' "$name")"
+    fi
+    [[ -z "$actual" || "$actual" == "$expected false" ]] || die "source container did not stop or identity changed"
+    if [[ "$key" == db && -n "$actual" ]]; then
+      [[ "$(/usr/bin/docker inspect --format '{{.State.ExitCode}}' "$name")" == 0 ]] || die "source MariaDB did not stop gracefully"
+    fi
+    if [[ -n "$actual" ]]; then /usr/bin/docker rm "$name" >/dev/null; fi
+  done
+  db_cutover_old_objects_absent "$id"
+  db_cutover_rewrite "$id" detached yes "$(db_cutover_field "$id" candidate_inode)" "$(db_cutover_field "$id" candidate_digest)"
+  out phase detached; out id "$id"
+}
+cmd_db_cutover_switch() {
+  [[ $# == 3 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" stage_fingerprint="$3" phase data live preserved source_inode candidate_inode
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"; db_cutover_stage_bound "$id" "$stage_fingerprint"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed ]] || die "full recovery boundary was not recorded"
+  phase="$(db_cutover_field "$id" phase)"
+  [[ "$phase" == detached || "$phase" == switching ]] || die "database stage cannot switch"
+  db_cutover_old_objects_absent "$id"
+  data="$(db_cutover_path "$id")"; live="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"; preserved="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/.nextcloud-db-before-$id"
+  source_inode="$(db_cutover_field "$id" source_inode)"; candidate_inode="$(db_cutover_field "$id" candidate_inode)"
+  if [[ "$phase" == detached ]]; then
+    [[ -d "$live" && ! -L "$live" && "$(db_cutover_inode "$live")" == "$source_inode" && -d "$data" && ! -L "$data" && "$(db_cutover_inode "$data")" == "$candidate_inode" && ! -e "$preserved" && ! -L "$preserved" ]] || die "database switch source paths differ"
+    [[ "$(db_cutover_digest "$data")" == "$(db_cutover_field "$id" candidate_digest)" ]] || die "prepared database content changed"
+    db_cutover_rewrite "$id" switching yes "$candidate_inode" "$(db_cutover_field "$id" candidate_digest)"
+  fi
+  if [[ -d "$live" && ! -L "$live" && "$(db_cutover_inode "$live")" == "$source_inode" && ! -e "$preserved" && ! -L "$preserved" ]]; then
+    /usr/bin/mv -T --no-clobber -- "$live" "$preserved"
+    /usr/bin/sync -f "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}"
+  fi
+  [[ -d "$preserved" && ! -L "$preserved" && "$(db_cutover_inode "$preserved")" == "$source_inode" ]] || die "preserved source database differs"
+  if [[ -d "$data" && ! -L "$data" && "$(db_cutover_inode "$data")" == "$candidate_inode" && ! -e "$live" && ! -L "$live" ]]; then
+    /usr/bin/mv -T --no-clobber -- "$data" "$live"
+    /usr/bin/sync -f "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}"
+  fi
+  [[ -d "$live" && ! -L "$live" && "$(db_cutover_inode "$live")" == "$candidate_inode" && ! -e "$data" && ! -L "$data" ]] || die "candidate database placement is incomplete"
+  out phase switching; out id "$id"
+}
+cmd_db_cutover_candidate_ready() {
+  [[ $# == 3 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" stage_fingerprint="$3" live preserved
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"; db_cutover_stage_bound "$id" "$stage_fingerprint"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(db_cutover_field "$id" phase)" == switching ]] || die "database switch was not completed"
+  db_cutover_old_objects_absent "$id"
+  live="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"; preserved="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/.nextcloud-db-before-$id"
+  [[ -d "$live" && ! -L "$live" && "$(db_cutover_inode "$live")" == "$(db_cutover_field "$id" candidate_inode)" && -d "$preserved" && ! -L "$preserved" && "$(db_cutover_inode "$preserved")" == "$(db_cutover_field "$id" source_inode)" ]] || die "database directory placement differs"
+  [[ "$(db_cutover_digest "$live")" == "$(db_cutover_field "$id" candidate_digest)" ]] || die "promoted clean database content changed before first start"
+  [[ "$(live_hash)" == "$(db_cutover_field "$id" candidate_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(db_cutover_field "$id" candidate_compose_sha256)" ]] || die "candidate configuration was not installed"
+  "$VALIDATOR"
+  db_cutover_rewrite "$id" candidate-ready yes "$(db_cutover_field "$id" candidate_inode)" "$(db_cutover_field "$id" candidate_digest)"
+  out phase candidate-ready; out id "$id"
+}
+cmd_db_cutover_running() {
+  [[ $# == 3 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" stage_fingerprint="$3" name key expected actual mount
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"; db_cutover_stage_bound "$id" "$stage_fingerprint"
+  [[ "$(db_cutover_field "$id" phase)" == candidate-ready || "$(db_cutover_field "$id" phase)" == starting || "$(db_cutover_field "$id" phase)" == running ]] || die "database candidate is not ready"
+  if [[ "$(db_cutover_field "$id" phase)" == candidate-ready ]]; then
+    db_cutover_rewrite "$id" starting yes "$(db_cutover_field "$id" candidate_inode)" "$(db_cutover_field "$id" candidate_digest)"
+  fi
+  db_cutover_scan
+  /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "candidate service is not active"
+  for key in APP DB CADDY; do
+    case "$key" in APP) name="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; DB) name="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; CADDY) name="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
+    expected="$(/usr/bin/awk -F= -v wanted="NEXTCLOUD_ACTIVE_IMAGES_${key}_ID" '$1 == wanted {print $2}' "$ACTIVE_RECORD")"
+    actual="$(/usr/bin/docker inspect --format '{{.Image}} {{.State.Running}}' "$name")" || die "candidate container is missing"
+    [[ "$actual" == "$expected true" ]] || die "candidate container image differs"
+  done
+  mount="$(/usr/bin/docker inspect --format '{{range .Mounts}}{{if eq .Destination "/var/lib/mysql"}}{{.Source}}{{end}}{{end}}' "${P[NEXTCLOUD_PI_DB_CONTAINER]}")"
+  [[ "$mount" == "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db" ]] || die "candidate database mount differs"
+  db_cutover_rewrite "$id" running yes "$(db_cutover_field "$id" candidate_inode)" "$(db_cutover_field "$id" candidate_digest)"
+  out phase running; out id "$id"
+}
+cmd_db_cutover_accepted() {
+  [[ $# == 3 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" stage_fingerprint="$3"
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"; db_cutover_stage_bound "$id" "$stage_fingerprint"
+  [[ "$(upgrade_stage_field "$id" phase)" == accepted && ( "$(db_cutover_field "$id" phase)" == running || "$(db_cutover_field "$id" phase)" == accepted ) ]] || die "database stage has not been accepted"
+  db_cutover_rewrite "$id" accepted yes "$(db_cutover_field "$id" candidate_inode)" "$(db_cutover_field "$id" candidate_digest)"
+  out phase accepted; out id "$id"
+}
+cmd_db_cutover_status() {
+  [[ $# == 1 ]] || invalid; reject_stdin
+  local id="$1" file key
+  valid_id "$id" || invalid; validate_host; safe_dir "$(db_cutover_root)"
+  file="$(db_cutover_file "$id")"; protected_file "$file" 0600
+  [[ "$(db_cutover_field "$id" format)" == db-cutover-v1 && "$(db_cutover_field "$id" id)" == "$id" ]] || die "database cutover journal differs"
+  for key in id phase prepare_fingerprint freeze_id freeze_table_sha256 source_inode candidate_inode candidate_digest objects_removed pre_record_sha256 pre_compose_sha256 candidate_record_sha256 candidate_compose_sha256 expected_id env_sha256 restricted_env_sha256 sql_sha256 inventory_sha256 app_container_id db_container_id caddy_container_id temp_container_id; do out "$key" "$(db_cutover_field "$id" "$key")"; done
+}
+cmd_db_cutover_abort() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" phase live data stage key name expected actual
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"
+  phase="$(db_cutover_field "$id" phase)"
+  [[ "$phase" == preparing || "$phase" == prepared || "$phase" == detaching || "$phase" == detached ]] || die "database cutover crossed the full recovery boundary"
+  live="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"; data="$(db_cutover_path "$id")"
+  [[ -d "$live" && ! -L "$live" && "$(db_cutover_inode "$live")" == "$(db_cutover_field "$id" source_inode)" && "$(live_hash)" == "$(db_cutover_field "$id" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(db_cutover_field "$id" pre_compose_sha256)" ]] || die "source database or configuration changed"
+  [[ ! -e "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/.nextcloud-db-before-$id" && ! -L "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/.nextcloud-db-before-$id" ]] || die "database switch may have begun"
+  stage="$(upgrade_stage_file "$id")"
+  if [[ -e "$stage" || -L "$stage" ]]; then
+    protected_file "$stage" 0600
+    [[ "$(upgrade_stage_field "$id" phase)" == aborted ]] || die "activation stage must be aborted first"
+  fi
+  [[ -d "$data" && ! -L "$data" ]] || die "database staging directory is unsafe"
+  no_nested_mounts "$data" || die "database staging contains a nested mount"
+  db_cutover_no_consumers "$data"
+  if [[ "$phase" == detaching || "$phase" == detached ]]; then
+    /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "source service did not stop during abort"
+    for key in app db caddy; do
+      case "$key" in app) name="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; db) name="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; caddy) name="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
+      expected="$(db_cutover_field "$id" "${key}_container_id")"
+      actual="$(/usr/bin/docker inspect --format '{{.Id}} {{.State.Running}}' "$name" 2>/dev/null || true)"
+      [[ -z "$actual" || "$actual" == "$expected false" || "$actual" == "$expected true" ]] || die "source container identity differs during abort"
+      if [[ -n "$actual" ]]; then
+        /usr/bin/docker update --restart=no "$name" >/dev/null
+        [[ "$actual" != "$expected true" ]] || /usr/bin/docker stop --time 120 "$name" >/dev/null
+        /usr/bin/docker rm "$name" >/dev/null
+      fi
+    done
+    db_cutover_old_objects_absent "$id"
+  fi
+  db_cutover_rewrite "$id" aborted "$(db_cutover_field "$id" objects_removed)" "$(db_cutover_field "$id" candidate_inode)" "$(db_cutover_field "$id" candidate_digest)"
+  out phase aborted; out id "$id"
+}
+cmd_db_cutover_recovery_detach() {
+  [[ $# == 3 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" stage_fingerprint="$3" phase state file name key expected actual project_label
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"; db_cutover_stage_bound "$id" "$stage_fingerprint"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed ]] || die "database stage is not recoverable"
+  state="$(recovery_state "$id")"; safe_dir "$state"; file="$state/metadata.tsv"; protected_file "$file" 0600
+  [[ "$(metadata "$file" state)" == prepared || "$(metadata "$file" state)" == promoting ]] || die "runtime recovery has not been staged"
+  for key in nextcloud caddy-data caddy-config database; do protected_file "$state/$key.complete" 0600; done
+  phase="$(db_cutover_field "$id" phase)"
+  [[ "$phase" == switching || "$phase" == candidate-ready || "$phase" == starting || "$phase" == running || "$phase" == recovery-detaching || "$phase" == recovering ]] || die "database recovery phase is invalid"
+  [[ -d "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db" && ! -L "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db" && "$(db_cutover_inode "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db")" == "$(db_cutover_field "$id" candidate_inode)" ]] || die "candidate database is not in canonical position"
+  [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "candidate service must be stopped before recovery"
+  if [[ "$phase" != recovering ]]; then
+    db_cutover_rewrite "$id" recovery-detaching yes "$(db_cutover_field "$id" candidate_inode)" "$(db_cutover_field "$id" candidate_digest)"
+  fi
+  for key in APP DB CADDY; do
+    case "$key" in APP) name="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; DB) name="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; CADDY) name="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
+    actual="$(/usr/bin/docker inspect --format '{{.Image}} {{.State.Running}} {{index .Config.Labels "com.docker.compose.project"}}' "$name" 2>/dev/null || true)"
+    [[ -z "$actual" ]] && continue
+    expected="$(/usr/bin/awk -F= -v wanted="NEXTCLOUD_ACTIVE_IMAGES_${key}_ID" '$1 == wanted {print $2}' "$ACTIVE_RECORD")"
+    project_label="${P[NEXTCLOUD_PI_PROJECT_DIR]##*/}"
+    [[ ( "$actual" == "$expected false $project_label" || "$actual" == "$expected true $project_label" ) && "$(live_hash)" == "$(db_cutover_field "$id" candidate_record_sha256)" ]] || die "candidate container differs during recovery"
+    /usr/bin/docker update --restart=no "$name" >/dev/null
+    if [[ "$actual" == "$expected true $project_label" ]]; then
+      /usr/bin/docker stop --time 120 "$name" >/dev/null || die "candidate container did not stop cleanly"
+      [[ "$(/usr/bin/docker inspect --format '{{.State.Running}}' "$name")" == false ]] || die "candidate container remains running"
+    fi
+    /usr/bin/docker rm "$name" >/dev/null
+  done
+  db_cutover_old_objects_absent "$id"
+  db_cutover_rewrite "$id" recovering yes "$(db_cutover_field "$id" candidate_inode)" "$(db_cutover_field "$id" candidate_digest)"
+  out phase recovering; out id "$id"
+}
+cmd_db_cutover_source_ready() {
+  [[ $# == 3 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" stage_fingerprint="$3" state
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"; db_cutover_stage_bound "$id" "$stage_fingerprint"
+  state="$(recovery_state "$id")"; safe_dir "$state"; protected_file "$state/metadata.tsv" 0600
+  [[ "$(metadata "$state/metadata.tsv" state)" == promoted && ( "$(db_cutover_field "$id" phase)" == recovering || "$(db_cutover_field "$id" phase)" == source-ready ) ]] || die "prior runtime was not promoted"
+  [[ -d "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db" && ! -L "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db" && "$(live_hash)" == "$(db_cutover_field "$id" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(db_cutover_field "$id" pre_compose_sha256)" ]] || die "restored source configuration differs"
+  db_cutover_old_objects_absent "$id"
+  db_cutover_rewrite "$id" source-ready yes "$(db_cutover_field "$id" candidate_inode)" "$(db_cutover_field "$id" candidate_digest)"
+  out phase source-ready; out id "$id"
+}
+cmd_db_cutover_recovered() {
+  [[ $# == 3 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" stage_fingerprint="$3"
+  lock; validate_host; db_cutover_require "$id" "$fingerprint"; db_cutover_stage_bound "$id" "$stage_fingerprint"
+  [[ "$(upgrade_stage_field "$id" phase)" == recovered && "$(db_cutover_field "$id" phase)" == source-ready ]] || die "database full recovery is incomplete"
+  db_cutover_rewrite "$id" recovered yes "$(db_cutover_field "$id" candidate_inode)" "$(db_cutover_field "$id" candidate_digest)"
+  out phase recovered; out id "$id"
+}
+db_cutover_scan() {
+  local root="$(db_cutover_root)" file id phase source candidate preserved
+  [[ ! -e "$root" && ! -L "$root" ]] && return
+  safe_dir "$root"
+  for file in "$root"/*.tsv; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    protected_file "$file" 0600
+    id="${file##*/}"; id="${id%.tsv}"
+    valid_id "$id" && [[ "$(metadata "$file" format)" == db-cutover-v1 && "$(metadata "$file" id)" == "$id" ]] || die "database cutover journal is invalid"
+    phase="$(metadata "$file" phase)"
+    case "$phase" in
+      aborted|accepted|recovered) continue ;;
+      preparing|prepared|detaching)
+        source="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"
+        [[ -d "$source" && ! -L "$source" && "$(/usr/bin/stat -c '%d:%i' "$source")" == "$(metadata "$file" source_inode)" ]] || die "source database directory differs during cutover"
+        [[ "$(live_hash)" == "$(metadata "$file" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(metadata "$file" pre_compose_sha256)" ]] || die "source configuration differs during cutover"
+        ;;
+      detached|switching|candidate-ready|starting|running|recovery-detaching|recovering|source-ready)
+        [[ "$(metadata "$file" objects_removed)" == yes ]] || die "database containers were not durably detached"
+        if [[ "$phase" == candidate-ready || "$phase" == starting || "$phase" == running ]]; then
+          candidate="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"
+          preserved="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/.nextcloud-db-before-$id"
+          [[ -d "$candidate" && ! -L "$candidate" && "$(/usr/bin/stat -c '%d:%i' "$candidate")" == "$(metadata "$file" candidate_inode)" && -d "$preserved" && ! -L "$preserved" && "$(/usr/bin/stat -c '%d:%i' "$preserved")" == "$(metadata "$file" source_inode)" ]] || die "candidate database placement differs"
+          [[ "$(live_hash)" == "$(metadata "$file" candidate_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(metadata "$file" candidate_compose_sha256)" ]] || die "candidate configuration differs during cutover"
+        fi
+        if [[ "$phase" == source-ready ]]; then
+          source="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"
+          [[ -d "$source" && ! -L "$source" && "$(live_hash)" == "$(metadata "$file" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(metadata "$file" pre_compose_sha256)" ]] || die "restored source database or configuration differs"
+        fi
+        ;;
+      *) die "database cutover phase is invalid" ;;
+    esac
+  done
+}
+db_cutover_boot_guard() { db_cutover_scan; }
+db_cutover_startup_guard() {
+  local root="$(db_cutover_root)" file phase
+  db_cutover_scan
+  [[ ! -e "$root" && ! -L "$root" ]] && return
+  for file in "$root"/*.tsv; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    phase="$(metadata "$file" phase)"
+    case "$phase" in aborted|accepted|recovered|candidate-ready|starting|running|source-ready) ;; *) die "database cutover has not reached a safe startup phase" ;; esac
+  done
+}
+cmd_upgrade_startup_guard() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; db_cutover_startup_guard; out state permitted; }
 upgrade_stage_file() { printf '%s/%s.tsv' "$(upgrade_stage_root)" "$1"; }
 upgrade_stage_compose_hash() {
   local file="${P[NEXTCLOUD_PI_PROJECT_DIR]}/docker-compose.yml"
@@ -450,7 +906,7 @@ upgrade_stage_rewrite() {
     "$(upgrade_stage_field "$id" expires)"
 }
 upgrade_stage_release_allowed() {
-  local root="$(upgrade_stage_root)" file phase
+  local root="$(upgrade_stage_root)" file phase db_root="$(db_cutover_root)"
   [[ ! -e "$root" && ! -L "$root" ]] && return
   safe_dir "$root"
   for file in "$root"/*.tsv; do
@@ -459,6 +915,16 @@ upgrade_stage_release_allowed() {
     phase="$(metadata "$file" phase)"
     [[ "$(metadata "$file" format)" == upgrade-stage-v1 && ( "$phase" == accepted || "$phase" == aborted || "$phase" == recovered ) ]] || die "an upgrade stage is unresolved; retain the ingress freeze"
   done
+  if [[ -e "$db_root" || -L "$db_root" ]]; then
+    safe_dir "$db_root"
+    for file in "$db_root"/*.tsv; do
+      [[ -e "$file" || -L "$file" ]] || continue
+      protected_file "$file" 0600
+      [[ "$(metadata "$file" format)" == db-cutover-v1 ]] || die "database cutover journal is invalid"
+      phase="$(metadata "$file" phase)"
+      [[ "$phase" == accepted || "$phase" == aborted || "$phase" == recovered ]] || die "database cutover is unresolved; retain the ingress freeze"
+    done
+  fi
 }
 cmd_upgrade_stage_maintenance_off() {
   [[ $# == 2 ]] || invalid; reject_stdin
@@ -466,6 +932,11 @@ cmd_upgrade_stage_maintenance_off() {
   valid_id "$id" && valid_hash "$fingerprint" || invalid
   lock; validate_host; upgrade_stage_require "$id"
   [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not at the runtime boundary"
+  if [[ "$(upgrade_stage_field "$id" target)" == db ]]; then
+    protected_file "$(db_cutover_file "$id")" 0600
+    [[ "$(db_cutover_field "$id" phase)" == running ]] || die "clean database candidate is not running"
+    db_cutover_scan
+  fi
   upgrade_fetch_release_allowed
   for file in "$(upgrade_stage_root)"/*.tsv; do
     [[ -e "$file" || -L "$file" ]] || continue
@@ -494,7 +965,11 @@ cmd_upgrade_stage_consume() {
   valid_id "$id" && valid_hash "$fingerprint" && valid_id "$freeze_id" && valid_hash "$table" && valid_id "$fetch_id" && valid_hash "$fetch_fingerprint" || invalid
   valid_hash "$pre_record" && valid_hash "$pre_compose" && valid_hash "$candidate_record" && valid_hash "$candidate_compose" || invalid
   [[ "$target" == app || "$target" == db || "$target" == caddy ]] || invalid
-  [[ "$target" != db ]] || die "database activation requires a separately verified clean-directory cutover"
+  if [[ "$target" == db ]]; then
+    [[ "$tag" =~ ^mariadb:11\.4\.[0-9]+$ ]] || die "only the reviewed clean MariaDB 11.4 cutover is supported"
+    safe_dir "$(db_cutover_root)"; protected_file "$(db_cutover_file "$id")" 0600
+    [[ "$(db_cutover_field "$id" phase)" == prepared && "$(db_cutover_field "$id" pre_record_sha256)" == "$pre_record" && "$(db_cutover_field "$id" pre_compose_sha256)" == "$pre_compose" && "$(db_cutover_field "$id" candidate_record_sha256)" == "$candidate_record" && "$(db_cutover_field "$id" candidate_compose_sha256)" == "$candidate_compose" && "$(db_cutover_field "$id" expected_id)" == "$(/usr/bin/docker image inspect --format '{{.Id}}' "$(metadata "$(upgrade_fetch_file "$fetch_id")" ref)")" ]] || die "database activation lacks prepared clean import"
+  fi
   [[ "$tag" =~ ^(nextcloud:[0-9]+\.[0-9]+\.[0-9]+-apache|mariadb:[0-9]+\.[0-9]+\.[0-9]+|caddy:[0-9]+\.[0-9]+\.[0-9]+)$ && "$expires" =~ ^[0-9]{10}$ ]] || invalid
   case "$target" in app) image=nextcloud;; db) image=mariadb;; caddy) image=caddy;; esac
   [[ "$tag" == "$image":* ]] || invalid
@@ -519,6 +994,13 @@ cmd_upgrade_stage_boundary() {
   valid_id "$id" && valid_hash "$fingerprint" || invalid
   lock; validate_host; upgrade_stage_require "$id"
   [[ "$(upgrade_stage_field "$id" phase)" == prepared && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not prepared"
+  if [[ "$(upgrade_stage_field "$id" target)" == db ]]; then
+    db_cutover_stage_bound "$id" "$fingerprint"
+    [[ "$(db_cutover_field "$id" phase)" == detached && "$(db_cutover_field "$id" objects_removed)" == yes && "$(live_hash)" == "$(upgrade_stage_field "$id" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" pre_compose_sha256)" ]] || die "database cutover is not durably detached"
+    db_cutover_old_objects_absent "$id"
+    upgrade_stage_rewrite "$id" runtime-may-have-changed
+    out phase runtime-may-have-changed; out id "$id"; return
+  fi
   [[ "$(live_hash)" == "$(upgrade_stage_field "$id" candidate_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" candidate_compose_sha256)" ]] || die "candidate configuration differs"
   tag="$(upgrade_stage_field "$id" tag)"; expected="$(upgrade_stage_field "$id" expected_id)"; target="$(upgrade_stage_field "$id" target)"
   target="${target^^}"
@@ -572,6 +1054,11 @@ cmd_upgrade_stage_accept() {
   valid_id "$id" && valid_hash "$fingerprint" || invalid
   lock; validate_host; upgrade_stage_require "$id"
   [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not at the runtime boundary"
+  if [[ "$(upgrade_stage_field "$id" target)" == db ]]; then
+    protected_file "$(db_cutover_file "$id")" 0600
+    [[ "$(db_cutover_field "$id" phase)" == running ]] || die "clean database candidate is not running"
+    db_cutover_scan
+  fi
   [[ "$(live_hash)" == "$(upgrade_stage_field "$id" candidate_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" candidate_compose_sha256)" ]] || die "candidate configuration changed"
   "$VALIDATOR"
   /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "Nextcloud service is not active"
@@ -731,6 +1218,11 @@ cmd_recovery_promote() {
   valid_id "$id" && valid_hash "$fingerprint" || invalid
   lock; validate_host; upgrade_stage_require "$id"
   [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not recoverable"
+  if [[ "$(upgrade_stage_field "$id" target)" == db ]]; then
+    protected_file "$(db_cutover_file "$id")" 0600
+    [[ "$(db_cutover_field "$id" phase)" == recovering && "$(db_cutover_field "$id" objects_removed)" == yes ]] || die "database containers were not detached for recovery"
+    db_cutover_old_objects_absent "$id"
+  fi
   root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; safe_recovery_root "$root"; safe_dir "$state"; protected_file "$state/metadata.tsv" 0600
   phase="$(metadata "$state/metadata.tsv" state)"
   [[ "$phase" == prepared || "$phase" == promoting || "$phase" == promoted ]] || die "runtime recovery phase is invalid"
@@ -816,6 +1308,10 @@ if [[ "${1:-}" == upgrade-freeze-boot-guard ]]; then
   [[ "$EUID" == 0 && -z "${SUDO_USER:-}" ]] || die "boot guard requires systemd root context"
   shift; validate_installation; cmd_upgrade_freeze_boot_guard "$@"; exit 0
 fi
+if [[ "${1:-}" == upgrade-startup-guard ]]; then
+  [[ "$EUID" == 0 && -z "${SUDO_USER:-}" ]] || die "startup guard requires systemd root context"
+  shift; validate_installation; cmd_upgrade_startup_guard "$@"; exit 0
+fi
 require_caller
 validate_installation
 command="${1:-}"; [[ -n "$command" && "$command" != -* ]] || invalid; shift || true
@@ -825,6 +1321,7 @@ case "$command" in
   upgrade-freeze) sub="${1:-}"; shift || true; case "$sub" in check) cmd_upgrade_freeze_check "$@";; status) cmd_upgrade_freeze_status "$@";; quiescence) cmd_upgrade_freeze_quiescence "$@";; maintenance-off) cmd_upgrade_freeze_maintenance_off "$@";; activate) cmd_upgrade_freeze_activate "$@";; release) cmd_upgrade_freeze_release "$@";; *) invalid;; esac;;
   upgrade-fetch) sub="${1:-}"; shift || true; case "$sub" in status) cmd_upgrade_fetch_status "$@";; consume) cmd_upgrade_fetch_consume "$@";; complete) cmd_upgrade_fetch_complete "$@";; *) invalid;; esac;;
   upgrade-stage) sub="${1:-}"; shift || true; case "$sub" in consume) cmd_upgrade_stage_consume "$@";; boundary) cmd_upgrade_stage_boundary "$@";; status) cmd_upgrade_stage_status "$@";; abort) cmd_upgrade_stage_abort "$@";; maintenance-off) cmd_upgrade_stage_maintenance_off "$@";; accept) cmd_upgrade_stage_accept "$@";; recovered) cmd_upgrade_stage_recovered "$@";; *) invalid;; esac;;
+  db-cutover) sub="${1:-}"; shift || true; case "$sub" in begin) cmd_db_cutover_begin "$@";; env-install) cmd_db_cutover_env_install "$@";; temp-start) cmd_db_cutover_temp_start "$@";; reset-preparing) cmd_db_cutover_reset_preparing "$@";; attest) cmd_db_cutover_attest "$@";; detach) cmd_db_cutover_detach "$@";; switch) cmd_db_cutover_switch "$@";; candidate-ready) cmd_db_cutover_candidate_ready "$@";; running) cmd_db_cutover_running "$@";; accepted) cmd_db_cutover_accepted "$@";; abort) cmd_db_cutover_abort "$@";; recovery-detach) cmd_db_cutover_recovery_detach "$@";; source-ready) cmd_db_cutover_source_ready "$@";; recovered) cmd_db_cutover_recovered "$@";; status) cmd_db_cutover_status "$@";; *) invalid;; esac;;
   active-record) sub="${1:-}"; shift || true; case "$sub" in presence) cmd_active_presence "$@";; status) cmd_active_status "$@";; prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
   runtime-backup) sub="${1:-}"; shift || true; case "$sub" in size) cmd_runtime_backup_size "$@";; stream) cmd_runtime_backup_stream "$@";; *) invalid;; esac;;
   runtime-recovery) sub="${1:-}"; shift || true; case "$sub" in check) cmd_recovery_check "$@";; status) cmd_recovery_status "$@";; prepare) cmd_recovery_prepare "$@";; reset-prepared) cmd_recovery_reset_prepared "$@";; restore) cmd_recovery_restore "$@";; attest-database) cmd_recovery_attest_database "$@";; promote) cmd_recovery_promote "$@";; cleanup) cmd_recovery_cleanup "$@";; *) invalid;; esac;;

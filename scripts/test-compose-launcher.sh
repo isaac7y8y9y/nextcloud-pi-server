@@ -21,6 +21,11 @@ NEXTCLOUD_PUBLIC_HOSTNAME=nextcloud.test.invalid \
 NEXTCLOUD_DEPLOYMENT_ENV_FILE="$fixture" "$SCRIPT_DIR/render-deployment-config.sh" --output-dir "$TEST_DIR/rendered"
 
 mkdir -p "$TEST_DIR/nextcloud-docker" "$TEST_DIR/bin" "$TEST_DIR/libexec"
+cat >"$TEST_DIR/libexec/ops" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == upgrade-startup-guard && $# == 1 && "${LAUNCHER_CUTOVER_BLOCK:-no}" == no ]]
+EOF
+chmod 700 "$TEST_DIR/libexec/ops"
 cp "$TEST_DIR/rendered/docker-compose.yml" "$TEST_DIR/nextcloud-docker/docker-compose.yml"
 cp "$TEST_DIR/rendered/active-images/active-images.env" "$TEST_DIR/active-images.env"
 sed \
@@ -32,6 +37,7 @@ chmod 700 "$TEST_DIR/libexec/validate"
 sed \
   -e "s|RECORD=/etc/nextcloud-pi/active-images.env|RECORD=$TEST_DIR/active-images.env|" \
   -e "s|/usr/local/libexec/nextcloud-pi-validate-active-images|$TEST_DIR/libexec/validate|" \
+  -e "s|/usr/local/libexec/nextcloud-pi-ops|$TEST_DIR/libexec/ops|" \
   -e "s|/run/nextcloud-pi-compose.XXXXXX|$TEST_DIR/snapshot.XXXXXX|" \
   "$TEST_DIR/rendered/launcher/nextcloud-pi-compose-start" >"$TEST_DIR/launcher"
 chmod 700 "$TEST_DIR/launcher"
@@ -101,6 +107,15 @@ export LAUNCHER_SCENARIO=valid
 bash "$TEST_DIR/launcher" >/dev/null
 [[ "$(cat "$LAUNCHER_CALLS")" == up ]]
 [[ -z "$(find "$TEST_DIR" -maxdepth 1 -name 'snapshot.*' -print -quit)" ]]
+
+: >"$LAUNCHER_CALLS"
+export LAUNCHER_CUTOVER_BLOCK=yes
+if bash "$TEST_DIR/launcher" >/dev/null 2>&1; then
+  echo "launcher ignored the database cutover startup guard" >&2
+  exit 1
+fi
+[[ ! -s "$LAUNCHER_CALLS" ]]
+unset LAUNCHER_CUTOVER_BLOCK
 
 # Model both a service restart and the next boot while recovered mappings are
 # authoritative. Each lifecycle invocation resolves and validates afresh.
