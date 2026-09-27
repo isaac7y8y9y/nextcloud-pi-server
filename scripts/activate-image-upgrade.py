@@ -587,6 +587,9 @@ def accept_evidence(target: r.Target, candidate: Path, source: Path, config_back
                 r.reject("database cutover directory identity differs")
         if db.database_query(target, CONTAINERS["DB"], "SELECT 1", r, user=True) != "1":
             r.reject("application database login failed after cutover")
+        target.ssh("docker exec " + r.q(CONTAINERS["DB"]) + " sh -eu -c " +
+                   r.q('export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mariadb-check --protocol=tcp --host=127.0.0.1 -uroot --all-databases --silent'),
+                   timeout=900)
     project = target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"]
     for path, expected_hash in ((project + "/docker-compose.yml", local["candidate_compose"]),
                                 (project + "/caddy/Caddyfile", local["source_caddy"])):
@@ -597,7 +600,7 @@ def accept_evidence(target: r.Target, candidate: Path, source: Path, config_back
     identities = running(target, candidate / "active-images.env")
     target.ssh("! docker port nextcloud-docker-app-1 80/tcp >/dev/null 2>&1")
     status = target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status")
-    if stage.get("target") == "db" and ("needsDbUpgrade: true" in status or "version: 30." not in status):
+    if stage.get("target") == "db" and ("needsDbUpgrade: false" not in status or "version: 30." not in status):
         r.reject("Nextcloud 30 status reports an unexpected database upgrade")
     if "maintenance: false" in status:
         r.run([str(HERE / "health-check.sh"), "--caddyfile", str(candidate / "Caddyfile")], timeout=300)
