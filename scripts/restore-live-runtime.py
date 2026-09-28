@@ -25,10 +25,13 @@ ROOT = Path(__file__).resolve().parent.parent
 OPS = "/usr/local/libexec/nextcloud-pi-ops"
 IDENTIFIER = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9]+\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
-SAFE_NAME = re.compile(r"[A-Za-z0-9._/-]+\Z")
+SAFE_PATH = re.compile(r"/[A-Za-z0-9._/-]+\Z")
 CONFIG_KEYS = {"NEXTCLOUD_PI_HOST", "NEXTCLOUD_PI_SYSTEM_HOSTNAME", "NEXTCLOUD_PI_USER",
                "NEXTCLOUD_REMOTE_PROJECT_DIR", "NEXTCLOUD_STORAGE_MOUNT",
                "NEXTCLOUD_STORAGE_UUID", "NEXTCLOUD_PUBLIC_HOSTNAME"}
+PLACEHOLDERS = {"pi.example.invalid", "pi-example", "pi-user", "/srv/nextcloud-docker",
+                "/mnt/example-nextcloud", "00000000-0000-0000-0000-000000000000",
+                "nextcloud.example.invalid"}
 PATHS = ("nextcloud/nextcloud.tar", "caddy/data.tar", "caddy/config.tar")
 
 
@@ -101,26 +104,33 @@ def deployment_config() -> dict[str, str]:
     path = Path(os.environ.get("NEXTCLOUD_DEPLOYMENT_ENV_FILE", ROOT / "config/deployment.env"))
     if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != 0o600:
         reject("private deployment configuration is missing or unsafe")
-    result: dict[str, str] = {}
+    file_values: dict[str, str] = {}
     for line in path.read_text().splitlines():
         if not line or line.startswith("#"):
             continue
         key, separator, value = line.partition("=")
-        if not separator or key not in CONFIG_KEYS or key in result or not value:
+        if not separator or key not in CONFIG_KEYS or key in file_values or not value or any(character.isspace() for character in value):
             reject("private deployment configuration schema is invalid")
-        if not SAFE_NAME.fullmatch(value) or ".." in value.split("/"):
-            reject("private deployment configuration value is unsafe")
-        result[key] = value
-    if set(result) != CONFIG_KEYS:
+        file_values[key] = value
+    result = {key: os.environ.get(key) or file_values.get(key, "") for key in CONFIG_KEYS}
+    if any(not value for value in result.values()):
         reject("private deployment configuration is incomplete")
+    if any(not os.environ.get(key) and file_values.get(key) in PLACEHOLDERS for key in CONFIG_KEYS):
+        reject("private deployment configuration still contains a placeholder")
+    for key in ("NEXTCLOUD_PI_HOST", "NEXTCLOUD_PI_SYSTEM_HOSTNAME", "NEXTCLOUD_PUBLIC_HOSTNAME"):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", result[key]):
+            reject("private deployment hostname is invalid")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", result["NEXTCLOUD_PI_USER"]):
+        reject("private deployment username is invalid")
     for key in ("NEXTCLOUD_REMOTE_PROJECT_DIR", "NEXTCLOUD_STORAGE_MOUNT"):
-        if not result[key].startswith("/"):
-            reject("private deployment path is not absolute")
+        value = result[key]
+        if not SAFE_PATH.fullmatch(value) or "/../" in value or value.endswith("/.."):
+            reject("private deployment path is invalid")
+    if result["NEXTCLOUD_REMOTE_PROJECT_DIR"].rsplit("/", 1)[-1] != "nextcloud-docker":
+        reject("private deployment project path is invalid")
     if not re.fullmatch(r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}",
                         result["NEXTCLOUD_STORAGE_UUID"]):
         reject("private deployment storage UUID is invalid")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", result["NEXTCLOUD_PUBLIC_HOSTNAME"]):
-        reject("private deployment public hostname is invalid")
     return result
 
 

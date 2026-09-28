@@ -43,7 +43,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 RENDERED_CONFIG_DIR="$TMP_DIR/rendered"
 "$SCRIPT_DIR/render-deployment-config.sh" --output-dir "$RENDERED_CONFIG_DIR"
 if [[ -n "$CANDIDATE_DIR" ]]; then
-  for pair in 'docker-compose.yml:docker-compose.yml' 'caddy/Caddyfile:Caddyfile' 'active-images/active-images.env:active-images.env'; do
+  for pair in 'caddy/Caddyfile:Caddyfile' 'active-images/active-images.env:active-images.env'; do
     [[ -f "$RENDERED_CONFIG_DIR/${pair%%:*}" ]] && cmp -s "$RENDERED_CONFIG_DIR/${pair%%:*}" "$CANDIDATE_DIR/${pair#*:}" || {
       printf 'Error: private candidate differs from rendered deployment configuration\n' >&2
       exit 1
@@ -498,6 +498,9 @@ fi
 
 section "Safe configuration comparison"
 
+if [[ -n "$CANDIDATE_DIR" ]]; then
+  compare_file_to_remote_command "candidate Compose" "$CANDIDATE_DIR/docker-compose.yml" "cat '$NEXTCLOUD_REMOTE_PROJECT_DIR/docker-compose.yml'" "$NEXTCLOUD_REMOTE_PROJECT_DIR/docker-compose.yml"
+fi
 compare_normalized_file_to_remote_command "Caddyfile" "$RENDERED_CONFIG_DIR/caddy/Caddyfile" "cat '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile'" "$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile"
 for protected in compose-launcher active-image-validator; do
   if remote "sudo -n /usr/local/libexec/nextcloud-pi-ops protected-state '$protected'" >/dev/null 2>&1; then

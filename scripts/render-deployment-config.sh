@@ -22,10 +22,11 @@ output_dir="$2"
 load_deployment_config "$REPOSITORY_ROOT" || exit 1
 image_lock_load "$REPOSITORY_ROOT" || exit 1
 image_lock_sha256() {
+  local lock_file="${NEXTCLOUD_IMAGE_LOCK_FILE:-$REPOSITORY_ROOT/config/image-lock.env}"
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$REPOSITORY_ROOT/config/image-lock.env" | awk '{print $1}'
+    sha256sum "$lock_file" | awk '{print $1}'
   else
-    shasum -a 256 "$REPOSITORY_ROOT/config/image-lock.env" | awk '{print $1}'
+    shasum -a 256 "$lock_file" | awk '{print $1}'
   fi
 }
 readonly NEXTCLOUD_IMAGE_LOCK_SHA256="$(image_lock_sha256)"

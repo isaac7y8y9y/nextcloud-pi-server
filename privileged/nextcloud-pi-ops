@@ -632,8 +632,9 @@ cmd_db_cutover_env_install() {
   read_exact "$path.new" "$size"
   [[ "$(hash "$path.new")" == "$expected" ]] || die "database environment hash differs"
   while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ ^(MYSQL_ROOT_PASSWORD|MYSQL_PASSWORD|MYSQL_DATABASE|MYSQL_USER)=([^[:space:]]+)$ ]] || die "restricted database environment schema is invalid"
+    [[ "$line" =~ ^(MYSQL_ROOT_PASSWORD|MYSQL_PASSWORD|MYSQL_DATABASE|MYSQL_USER)=(.+)$ ]] || die "restricted database environment schema is invalid"
     key="${BASH_REMATCH[1]}"; value="${BASH_REMATCH[2]}"
+    [[ "$value" != *$'\r'* && "$value" != *"'"* && "$value" != *"\\"* ]] || die "restricted database environment value is unsafe"
     [[ "$seen" != *"|$key|"* ]] || die "restricted database environment duplicates a key"
     seen+="$key|"; count=$((count + 1))
     if [[ "$key" == MYSQL_DATABASE || "$key" == MYSQL_USER ]]; then [[ "$value" =~ ^[A-Za-z0-9_]+$ ]] || die "database name or user is invalid"; fi

@@ -119,11 +119,33 @@ class ApprovalTests(unittest.TestCase):
         path = self.root / "deployment.env"
         path.write_bytes((restore.ROOT / "config/deployment.env.example").read_bytes())
         path.chmod(0o600)
-        with mock.patch.dict(os.environ, {"NEXTCLOUD_DEPLOYMENT_ENV_FILE": str(path)}):
+        overrides = {"NEXTCLOUD_DEPLOYMENT_ENV_FILE": str(path),
+                     "NEXTCLOUD_PI_HOST": "pi.test.invalid", "NEXTCLOUD_PI_SYSTEM_HOSTNAME": "pi-test",
+                     "NEXTCLOUD_PI_USER": "test-user", "NEXTCLOUD_REMOTE_PROJECT_DIR": "/srv/nextcloud-docker",
+                     "NEXTCLOUD_STORAGE_MOUNT": "/mnt/test-nextcloud",
+                     "NEXTCLOUD_STORAGE_UUID": "11111111-1111-1111-1111-111111111111",
+                     "NEXTCLOUD_PUBLIC_HOSTNAME": "nextcloud.test.invalid"}
+        with mock.patch.dict(os.environ, overrides, clear=True):
             config = restore.deployment_config()
             self.assertEqual(set(config), restore.CONFIG_KEYS)
-            path.write_text(path.read_text().replace("00000000-0000-0000-0000-000000000000", "invalid-uuid"))
+            self.assertEqual(config["NEXTCLOUD_PI_HOST"], "pi.test.invalid")
+            os.environ["NEXTCLOUD_STORAGE_UUID"] = "invalid-uuid"
             with self.assertRaisesRegex(restore.RecoveryError, "storage UUID"):
+                restore.deployment_config()
+
+    def test_deployment_config_uses_partial_override_before_target_validation(self) -> None:
+        path = self.root / "deployment.env"
+        path.write_text("NEXTCLOUD_PI_HOST=old.test.invalid\nNEXTCLOUD_PI_SYSTEM_HOSTNAME=pi-old\n"
+                        "NEXTCLOUD_PI_USER=test-user\nNEXTCLOUD_REMOTE_PROJECT_DIR=/opt/nextcloud-docker\n"
+                        "NEXTCLOUD_STORAGE_MOUNT=/mnt/test-nextcloud\n"
+                        "NEXTCLOUD_STORAGE_UUID=11111111-1111-1111-1111-111111111111\n"
+                        "NEXTCLOUD_PUBLIC_HOSTNAME=nextcloud.test.invalid\n")
+        path.chmod(0o600)
+        with mock.patch.dict(os.environ, {"NEXTCLOUD_DEPLOYMENT_ENV_FILE": str(path),
+                                          "NEXTCLOUD_PI_HOST": "new.test.invalid"}, clear=True):
+            self.assertEqual(restore.deployment_config()["NEXTCLOUD_PI_HOST"], "new.test.invalid")
+            os.environ["NEXTCLOUD_REMOTE_PROJECT_DIR"] = "/unsafe/other"
+            with self.assertRaisesRegex(restore.RecoveryError, "project path"):
                 restore.deployment_config()
 
     def test_approval_is_single_use_and_bound_to_evidence(self) -> None:
@@ -155,7 +177,7 @@ class ApprovalTests(unittest.TestCase):
                      runtime / "caddy/config.tar", runtime / "database/nextcloud.sql",
                      config / "compose/docker-compose.yml", config / "caddy/Caddyfile", images / "images.tar"):
             path.write_bytes(b"fixture\n")
-        (config / "compose/.env").write_text("MYSQL_ROOT_PASSWORD='root-value'\nMYSQL_PASSWORD='app-value'\n"
+        (config / "compose/.env").write_text("MYSQL_ROOT_PASSWORD='root value'\nMYSQL_PASSWORD='app value'\n"
                                              "MYSQL_DATABASE='nextcloud'\nMYSQL_USER='nextcloud'\n")
         (config / "compose/.env").chmod(0o600)
         old_tags = {"APP": "nextcloud:30.0.17-apache", "DB": "mariadb:11.8.6", "CADDY": "caddy:2.10.2"}
@@ -212,7 +234,7 @@ class ApprovalTests(unittest.TestCase):
         target, base, source, config, runtime, images = self.fixture()
         with mock.patch.object(restore, "run", return_value=""):
             restore.apply(target, base, source, config, runtime, images)
-        self.assertEqual(target.inputs, [b"MYSQL_ROOT_PASSWORD=root-value\nMYSQL_PASSWORD=app-value\n"
+        self.assertEqual(target.inputs, [b"MYSQL_ROOT_PASSWORD=root value\nMYSQL_PASSWORD=app value\n"
                                          b"MYSQL_DATABASE=nextcloud\nMYSQL_USER=nextcloud\n"])
         self.assertTrue(any("--env-file /dev/stdin" in call for call in target.calls))
         self.assertFalse(any("--env-file /srv" in call for call in target.calls))

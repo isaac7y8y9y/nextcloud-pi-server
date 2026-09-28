@@ -71,14 +71,14 @@ def source_inventory(target: Any, r: Any) -> dict[str, object]:
 
 def restricted_env_bytes(path: Path, r: Any) -> bytes:
     values: dict[str, str] = {}
-    for line in path.read_text().splitlines():
+    for line in path.read_text().split("\n"):
         if not line or line.startswith("#"):
             continue
         key, separator, value = line.partition("=")
         if not separator or key not in ENV_KEYS or key in values or len(value) < 3 or not value.startswith("'") or not value.endswith("'"):
             r.reject("protected database environment schema differs")
         plain = value[1:-1]
-        if not plain or "'" in plain or "\\" in plain or any(character.isspace() for character in plain):
+        if not plain or any(character in plain for character in ("'", "\\", "\r", "\n")):
             r.reject("protected database environment value is unsafe")
         values[key] = plain
     if set(values) != set(ENV_KEYS):

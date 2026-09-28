@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -147,15 +149,44 @@ class DatabaseCutoverTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / "compose.env"
             output = Path(temporary) / "restricted.env"
-            source.write_text("MYSQL_ROOT_PASSWORD='root-value'\nMYSQL_PASSWORD='app-value'\n"
+            source.write_text("MYSQL_ROOT_PASSWORD='root value'\nMYSQL_PASSWORD='app\tvalue'\n"
                               "MYSQL_DATABASE='nextcloud'\nMYSQL_USER='nextcloud'\n")
             db.restricted_env(source, output, a.r)
-            self.assertEqual(output.read_text(), "MYSQL_ROOT_PASSWORD=root-value\nMYSQL_PASSWORD=app-value\n"
+            self.assertEqual(output.read_text(), "MYSQL_ROOT_PASSWORD=root value\nMYSQL_PASSWORD=app\tvalue\n"
                              "MYSQL_DATABASE=nextcloud\nMYSQL_USER=nextcloud\n")
             self.assertEqual(output.stat().st_mode & 0o777, 0o600)
             source.write_text(source.read_text() + "MARIADB_AUTO_UPGRADE='1'\n")
             with self.assertRaisesRegex(a.r.RecoveryError, "schema differs"):
                 db.restricted_env(source, Path(temporary) / "rejected.env", a.r)
+
+    def test_privileged_env_install_accepts_supported_password_spaces(self) -> None:
+        helper = (HERE.parent / "privileged/nextcloud-pi-ops").read_text()
+        function = "cmd_db_cutover_env_install() {" + helper.split("cmd_db_cutover_env_install() {", 1)[1].split("\n}\n", 1)[0] + "\n}"
+        function = function.replace("/usr/bin/rm -f --", "rm -f --")  # macOS keeps rm outside /usr/bin.
+        content = (b"MYSQL_ROOT_PASSWORD=root value\nMYSQL_PASSWORD=app value\n"
+                   b"MYSQL_DATABASE=nextcloud\nMYSQL_USER=nextcloud\n")
+        expected = hashlib.sha256(content).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            script = """set -euo pipefail
+DB_TEST_ROOT="$1"; DB_TEST_HASH="$2"
+valid_id() { :; }
+valid_hash() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
+lock() { :; }
+validate_host() { :; }
+db_cutover_require() { :; }
+db_cutover_field() { [[ "$2" == phase ]] && printf preparing || printf '%s' "$DB_TEST_HASH"; }
+db_cutover_root() { printf '%s' "$DB_TEST_ROOT"; }
+read_exact() { dd bs=1 count="$2" of="$1" 2>/dev/null; chmod 600 "$1"; }
+hash() { shasum -a 256 "$1" | awk '{print $1}'; }
+protected_file() { :; }
+db_cutover_flush() { mv "$1.new" "$1"; }
+out() { :; }
+die() { printf '%s\\n' "$1" >&2; exit 1; }
+""" + function + "\ncmd_db_cutover_env_install 20260927T000000Z-12 \"$DB_TEST_HASH\" \"$DB_TEST_HASH\" " + str(len(content)) + "\n"
+            result = subprocess.run(["bash", "-c", script, "bash", temporary, expected],
+                                    input=content, capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertEqual((Path(temporary) / "20260927T000000Z-12.env").read_bytes(), content)
 
     def test_inventory_requires_exact_table_prefix_and_rows(self) -> None:
         def answer(_target: object, _name: str, sql: str, _module: object) -> str:
