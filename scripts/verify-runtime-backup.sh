@@ -201,6 +201,12 @@ for field in format state timestamp remote_host remote_user source_nextcloud app
     die "manifest must contain exactly one $field field"
 done
 manifest_format="$(awk -F $'\t' '$1 == "format" {print $2}' "$manifest")"
+prefix_count="$(awk -F $'\t' '$1 == "dbtableprefix" {n++} END {print n+0}' "$manifest")"
+[[ "$prefix_count" == 0 || "$prefix_count" == 1 ]] || die "manifest has duplicate database table prefixes"
+if [[ "$prefix_count" == 1 ]]; then
+  manifest_prefix="$(awk -F $'\t' '$1 == "dbtableprefix" {print $2}' "$manifest")"
+  [[ "$manifest_prefix" =~ ^[A-Za-z0-9_]+$ ]] || die "manifest database table prefix is invalid"
+fi
 case "$manifest_format" in
   runtime-backup-v1)
     [[ "$(awk -F $'\t' '$1 == "freeze_id" || $1 == "freeze_table_sha256" {n++} END {print n+0}' "$manifest")" == 0 ]] || die "ordinary backup includes a freeze binding"
@@ -229,7 +235,7 @@ nextcloud_archive_prefix="$(basename -- "$manifest_source_nextcloud")"
 seen_payloads=""
 while IFS=$'\t' read -r record first second third extra; do
   case "$record" in
-    format|state|timestamp|remote_host|remote_user|source_nextcloud|app_container|database_container|database_image|caddy_data_volume|caddy_config_volume|backup_path|freeze_id|freeze_table_sha256)
+    format|state|timestamp|remote_host|remote_user|source_nextcloud|app_container|database_container|database_image|dbtableprefix|caddy_data_volume|caddy_config_volume|backup_path|freeze_id|freeze_table_sha256)
       [[ -n "$first" && -z "$second" && -z "$third" && -z "$extra" ]] || die "invalid $record entry"
       ;;
     payload)

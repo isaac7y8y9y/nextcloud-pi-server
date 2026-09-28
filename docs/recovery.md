@@ -113,6 +113,11 @@ verified one-image candidate. The source configuration backup must include a
 protected `.env` matching the unchanged live project file. Planning is
 read-only on the Pi and creates a private, 15-minute approval artifact outside
 Git; applying consumes it before the first mutation.
+The held runtime backup must carry a validated `dbtableprefix` captured from
+Nextcloud during the quiesced snapshot. Restore uses this bound prefix for the
+staged file-cache check; older backups without it remain verifiable as archives
+but are not eligible for this live-restore driver. Capture a fresh held backup
+before a stage rather than assuming the default `oc_` prefix.
 If an interrupted restore is still in the protected `prepared` phase,
 `--resume` checks the consumed approval and current stage/freeze, removes only
 the identity-bound temporary import container, resets the isolated staged

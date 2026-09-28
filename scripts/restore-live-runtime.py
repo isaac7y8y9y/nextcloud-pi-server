@@ -208,6 +208,9 @@ def verify_local(candidate: Path, source: Path, config_backup: Path,
     backup = manifest_fields(runtime / "manifest.tsv")
     configuration = manifest_fields(config_backup / "manifest.tsv")
     recovery = manifest_fields(images / "manifest.tsv")
+    prefix = backup.get("dbtableprefix", "")
+    if not db.TABLE.fullmatch(prefix):
+        reject("held backup lacks a valid Nextcloud database table prefix; capture a fresh recovery point")
     expected = config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"]
     if (backup.get("format") != "runtime-backup-v2" or
             backup.get("remote_host") != expected or
@@ -247,6 +250,7 @@ def verify_local(candidate: Path, source: Path, config_backup: Path,
             "candidate_record": digest(candidate / "active-images.env"),
             "candidate_compose": digest(candidate / "docker-compose.yml"),
             "sql_sha256": digest(runtime / "database/nextcloud.sql"),
+            "dbtableprefix": prefix,
             "env_sha256": digest(env),
             "old_tags": old_tags, "old_ids": old_ids}
 
@@ -605,7 +609,10 @@ def apply(target: Target, base: dict[str, object], source: Path,
                 input_file=sql, timeout=3600)
         count = target.ssh(query + q("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()"))
         columns = target.ssh(query + q("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE()"))
-        files = target.ssh(query + q("SELECT COUNT(*) FROM oc_filecache"))
+        prefix = str(local["dbtableprefix"])
+        if not db.TABLE.fullmatch(prefix):
+            reject("bound Nextcloud database table prefix is invalid")
+        files = target.ssh(query + q("SELECT COUNT(*) FROM `" + prefix + "filecache`"))
         if any(not value.isdecimal() or int(value) < 1 for value in (count, columns, files)):
             reject("staged MariaDB schema or file cache is incomplete")
         checked(target, "docker exec " + q(database_container) + " sh -eu -c " +

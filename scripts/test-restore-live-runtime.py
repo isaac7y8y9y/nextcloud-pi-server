@@ -46,7 +46,7 @@ class FakeTarget:
         if "SELECT COUNT(*)" in command:
             if "information_schema.columns" in command:
                 return "1291"
-            if "oc_filecache" in command:
+            if "filecache`" in command:
                 return "15"
             return "169"
         if "SELECT 1" in command:
@@ -184,6 +184,7 @@ class ApprovalTests(unittest.TestCase):
         old_ids = {key: "sha256:" + str(index) * 64 for index, key in enumerate(old_tags, 1)}
         base = {"stage_id": self.stage_id, "stage_fingerprint": "f" * 64,
                 "evidence": {"old_tags": old_tags, "old_ids": old_ids,
+                             "dbtableprefix": "oc_",
                              "sql_sha256": restore.digest(runtime / "database/nextcloud.sql"),
                              "source_compose": restore.digest(config / "compose/docker-compose.yml"),
                              "candidate_compose": restore.digest(config / "compose/docker-compose.yml"),
@@ -238,6 +239,14 @@ class ApprovalTests(unittest.TestCase):
                                          b"MYSQL_DATABASE=nextcloud\nMYSQL_USER=nextcloud\n"])
         self.assertTrue(any("--env-file /dev/stdin" in call for call in target.calls))
         self.assertFalse(any("--env-file /srv" in call for call in target.calls))
+
+    def test_restore_uses_bound_nondefault_table_prefix(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        base["evidence"]["dbtableprefix"] = "cloud_"
+        with mock.patch.object(restore, "run", return_value=""):
+            restore.apply(target, base, source, config, runtime, images)
+        self.assertTrue(any("cloud_filecache`" in call for call in target.calls))
+        self.assertFalse(any("oc_filecache" in call for call in target.calls))
 
     def test_database_restore_detaches_candidate_before_promotion_and_start(self) -> None:
         target, base, source, config, runtime, images = self.fixture()

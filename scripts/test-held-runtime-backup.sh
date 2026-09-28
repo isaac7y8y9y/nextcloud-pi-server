@@ -31,6 +31,7 @@ write_manifest() {
     printf 'app_container\ttest-app\n'
     printf 'database_container\ttest-db\n'
     printf 'database_image\tmariadb:test\n'
+    printf 'dbtableprefix\tcloud_\n'
     printf 'caddy_data_volume\ttest-caddy-data\n'
     printf 'caddy_config_volume\ttest-caddy-config\n'
     printf 'backup_path\t%s\n' "$backup"
@@ -48,8 +49,20 @@ write_manifest() {
 
 write_manifest runtime-backup-v1
 "$SCRIPT_DIR/verify-runtime-backup.sh" "$backup" >/dev/null
+awk -F $'\t' '$1 != "dbtableprefix"' "$backup/manifest.tsv" >"$fixture_root/legacy-manifest"
+cp "$fixture_root/legacy-manifest" "$backup/manifest.tsv"
+chmod 600 "$backup/manifest.tsv"
+"$SCRIPT_DIR/verify-runtime-backup.sh" "$backup" >/dev/null
 write_manifest runtime-backup-v2
 "$SCRIPT_DIR/verify-runtime-backup.sh" "$backup" >/dev/null
+sed -e 's/^dbtableprefix\t.*/dbtableprefix\tbad-prefix!/' "$backup/manifest.tsv" >"$fixture_root/bad-prefix-manifest"
+cp "$fixture_root/bad-prefix-manifest" "$backup/manifest.tsv"
+chmod 600 "$backup/manifest.tsv"
+if "$SCRIPT_DIR/verify-runtime-backup.sh" "$backup" >/dev/null 2>&1; then
+  printf 'invalid database table prefix was accepted\n' >&2
+  exit 1
+fi
+write_manifest runtime-backup-v2
 sed -e 's/^freeze_id\t.*/freeze_id\tbad/' "$backup/manifest.tsv" >"$fixture_root/bad-manifest"
 cp "$fixture_root/bad-manifest" "$backup/manifest.tsv"
 chmod 600 "$backup/manifest.tsv"

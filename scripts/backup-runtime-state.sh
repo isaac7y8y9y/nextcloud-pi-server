@@ -496,10 +496,14 @@ else
   maintenance_is_off && die "Nextcloud did not enter maintenance mode"
 fi
 
+table_prefix="$(remote "docker exec --user www-data '$NEXTCLOUD_APP_CONTAINER' php /var/www/html/occ config:system:get dbtableprefix")"
+[[ "$table_prefix" =~ ^[A-Za-z0-9_]+$ ]] || die "Nextcloud database table prefix is invalid"
+
 printf 'Capturing Nextcloud files without listing private paths...\n'
 remote "sudo -n /usr/local/libexec/nextcloud-pi-ops runtime-backup stream nextcloud" >"$STAGING_DIR/nextcloud/nextcloud.tar"
 chmod 600 "$STAGING_DIR/nextcloud/nextcloud.tar"
 [[ -s "$STAGING_DIR/nextcloud/nextcloud.tar" ]] || die "Nextcloud archive is empty"
+[[ "$(remote "docker exec --user www-data '$NEXTCLOUD_APP_CONTAINER' php /var/www/html/occ config:system:get dbtableprefix")" == "$table_prefix" ]] || die "Nextcloud database table prefix changed during capture"
 
 printf 'Capturing a transaction-consistent MariaDB dump without printing it...\n'
 remote "docker exec '$NEXTCLOUD_DB_CONTAINER' sh -eu -c '
@@ -541,6 +545,7 @@ append_manifest_value source_nextcloud "$NEXTCLOUD_DATA_ROOT"
 append_manifest_value app_container "$NEXTCLOUD_APP_CONTAINER"
 append_manifest_value database_container "$NEXTCLOUD_DB_CONTAINER"
 append_manifest_value database_image "$database_image"
+append_manifest_value dbtableprefix "$table_prefix"
 append_manifest_value caddy_data_volume "$NEXTCLOUD_CADDY_DATA_VOLUME"
 append_manifest_value caddy_config_volume "$NEXTCLOUD_CADDY_CONFIG_VOLUME"
 append_manifest_value backup_path "$final_dir"

@@ -146,7 +146,9 @@ procedure until those gates pass.
 `scripts/rehearse-mariadb-upgrade.py` is a **local, database-only** rehearsal.
 Its `--plan` verifies an existing private runtime backup, checks current
 registry metadata for exact `mariadb:11.4.13` and `mariadb:11.8.9` ARM64
-images, and writes a private, 15-minute approval record outside Git. Its
+images, and binds the backup's validated `dbtableprefix` for file-cache
+checks. Backups without that captured prefix need a fresh backup before this
+rehearsal. The plan writes a private, 15-minute approval record outside Git. Its
 `--apply` consumes that record once, pulls only the bound digest references
 into the local ARM64 Docker daemon, and uses a new bind directory and
 unpublished containers with `--network none`. It imports the backup's SQL

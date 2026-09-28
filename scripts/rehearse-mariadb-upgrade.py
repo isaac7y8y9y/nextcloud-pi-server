@@ -121,6 +121,9 @@ def prerequisites(backup: Path, metadata: tuple[Path, Path], root: Path) -> dict
     raw = private_file(backup / "manifest.tsv")
     if manifest_value(raw, "format") not in {"runtime-backup-v1", "runtime-backup-v2"}:
         raise RehearsalError("runtime backup format is unsupported")
+    prefix = manifest_value(raw, "dbtableprefix")
+    if not re.fullmatch(r"[A-Za-z0-9_]+", prefix):
+        raise RehearsalError("backup database table prefix is invalid")
     sql = backup / "database" / "nextcloud.sql"
     if not sql.is_file() or sql.is_symlink() or sql.stat().st_size == 0:
         raise RehearsalError("database dump is unavailable")
@@ -131,6 +134,7 @@ def prerequisites(backup: Path, metadata: tuple[Path, Path], root: Path) -> dict
     return {
         "backup_manifest_sha256": digest(backup / "manifest.tsv"),
         "sql_sha256": digest(sql),
+        "dbtableprefix": prefix,
         "mariadb_114_metadata_sha256": first_hash,
         "mariadb_118_metadata_sha256": second_hash,
         "mariadb_114_index": first["index_digest"],
@@ -223,12 +227,14 @@ def wait_ready(name: str) -> None:
     raise RehearsalError("isolated MariaDB server did not become ready")
 
 
-def check_database(name: str) -> tuple[int, int, int, int]:
+def check_database(name: str, prefix: str) -> tuple[int, int, int, int]:
+    if not re.fullmatch(r"[A-Za-z0-9_]+", prefix):
+        raise RehearsalError("bound database table prefix is invalid")
     queries = (
         "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()",
         "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE()",
         "SELECT COUNT(DISTINCT TABLE_COLLATION) FROM information_schema.tables WHERE table_schema = DATABASE() AND TABLE_COLLATION IS NOT NULL",
-        "SELECT COUNT(*) FROM oc_filecache",
+        "SELECT COUNT(*) FROM `" + prefix + "filecache`",
     )
     result = tuple(container_query(name, statement) for statement in queries)
     if any(not value.isdecimal() for value in result) or any(int(value) < 1 for value in result[:3]):
@@ -274,7 +280,7 @@ def rehearse(identifier: str, sql: Path, evidence: dict[str, str], root: Path) -
         docker("exec", "-i", first, "sh", "-eu", "-c",
                'export MYSQL_PWD="$MARIADB_ROOT_PASSWORD"; exec mariadb --protocol=tcp --host=127.0.0.1 -uroot "$MARIADB_DATABASE"',
                input_file=sql, timeout=1800)
-        before = check_database(first)
+        before = check_database(first, evidence["dbtableprefix"])
         docker("stop", "--time", "60", first, timeout=90)
         docker("run", "-d", "--pull", "never", "--platform", "linux/arm64/v8", "--network", "none",
                "--name", second, "--label", label, "--env-file", str(env),
@@ -284,7 +290,7 @@ def rehearse(identifier: str, sql: Path, evidence: dict[str, str], root: Path) -
         docker("exec", second, "sh", "-eu", "-c",
                'export MYSQL_PWD="$MARIADB_ROOT_PASSWORD"; exec mariadb-upgrade --protocol=tcp --host=127.0.0.1 -uroot --force',
                timeout=1800)
-        after = check_database(second)
+        after = check_database(second, evidence["dbtableprefix"])
         if before != after:
             raise RehearsalError("application schema or file-cache count changed during forward upgrade")
         docker("stop", "--time", "60", second, timeout=90)

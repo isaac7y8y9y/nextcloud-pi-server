@@ -94,6 +94,20 @@ class RehearsalTests(unittest.TestCase):
             with self.assertRaises(rehearsal.RehearsalError):
                 rehearsal.verify_loaded_image(ref, evidence, "114")
 
+    def test_database_check_uses_bound_nondefault_table_prefix(self) -> None:
+        queries: list[str] = []
+
+        def query(_name: str, statement: str) -> str:
+            queries.append(statement)
+            return "7"
+
+        with mock.patch.object(rehearsal, "container_query", side_effect=query), \
+             mock.patch.object(rehearsal, "docker"):
+            self.assertEqual(rehearsal.check_database("db", "cloud_"), (7, 7, 7, 7))
+            with self.assertRaisesRegex(rehearsal.RehearsalError, "prefix"):
+                rehearsal.check_database("db", "cloud_` DROP TABLE")
+        self.assertIn("SELECT COUNT(*) FROM `cloud_filecache`", queries)
+
 
 if __name__ == "__main__":
     unittest.main()
