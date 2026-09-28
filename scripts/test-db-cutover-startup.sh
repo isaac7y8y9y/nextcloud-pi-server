@@ -79,4 +79,37 @@ permit
 write_journal recovered
 permit
 
+function_text="$(sed -n '/^cmd_db_cutover_begin() {/,/^}/p' "$root/privileged/nextcloud-pi-ops")"
+[[ -n "$function_text" ]] || exit 1
+eval "$function_text"
+P[NEXTCLOUD_PI_PROJECT_DIR]="$fixture/project"
+mkdir -p "$fixture/project"
+printf 'synthetic\n' >"$fixture/project/.env"
+low_id=20260927T000000Z-13
+a_hash="$(printf 'a%.0s' {1..64})"
+b_hash="$(printf 'b%.0s' {1..64})"
+c_hash="$(printf 'c%.0s' {1..64})"
+d_hash="$(printf 'd%.0s' {1..64})"
+e_hash="$(printf 'e%.0s' {1..64})"
+f_hash="$(printf 'f%.0s' {1..64})"
+active_hash="$a_hash"
+compose_hash="$b_hash"
+valid_hash() { [[ "$1" =~ ^[0-9a-f]{64}$ ]]; }
+reject_stdin() { :; }
+lock() { :; }
+validate_host() { :; }
+freeze_require_current() { :; }
+freeze_field() { [[ "$1" == phase ]] && printf active || printf '%s' "$c_hash"; }
+freeze_table_hash() { printf '%s' "$c_hash"; }
+hash() { printf '%s' "$d_hash"; }
+no_nested_mounts() { :; }
+available() { printf '1'; }
+db_cutover_space_required() { printf '1024'; }
+if (cmd_db_cutover_begin "$low_id" "$e_hash" "$stage_id" "$c_hash" "$a_hash" "$b_hash" "$f_hash" "$a_hash" "sha256:$b_hash" "$d_hash" "$c_hash" "$e_hash" "$f_hash") >/dev/null 2>&1; then
+  printf 'database preparation accepted insufficient recovery space\n' >&2
+  exit 1
+fi
+[[ ! -e "$fixture/state/db-cutover/$low_id.tsv" ]]
+[[ "$(<"$fixture/storage/nextcloud_db/identity")" == source ]]
+
 printf 'database startup-journal phase fixture passed\n'
