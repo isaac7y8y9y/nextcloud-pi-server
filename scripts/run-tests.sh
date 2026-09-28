@@ -25,6 +25,7 @@ readonly -a PR_COMMANDS=(
   'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-restore-live-runtime.py'
   'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-activate-image-upgrade.py'
   'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-db-cutover.py'
+  'bash scripts/test-db-cutover-detach.sh'
   'bash scripts/test-db-cutover-switch.sh'
   'bash scripts/test-db-cutover-startup.sh'
   'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-release-upgrade-freeze.py'

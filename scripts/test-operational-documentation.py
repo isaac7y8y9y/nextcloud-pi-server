@@ -31,6 +31,7 @@ EXPECTED_PR_COMMANDS = (
     "PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-restore-live-runtime.py",
     "PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-activate-image-upgrade.py",
     "PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-db-cutover.py",
+    "bash scripts/test-db-cutover-detach.sh",
     "bash scripts/test-db-cutover-switch.sh",
     "bash scripts/test-db-cutover-startup.sh",
     "PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-release-upgrade-freeze.py",
@@ -168,8 +169,8 @@ def verify_testing_governance() -> None:
         raise AssertionError(f"runner exposes PR-transitive scripts: {sorted(transitive & set(counts))}")
     if operator_only & set(counts):
         raise AssertionError(f"runner exposes operator-only scripts: {sorted(operator_only & set(counts))}")
-    if len(direct) != 42 or len(transitive) != 1 or len(operator_only) != 4:
-        raise AssertionError("inventory tier counts differ from the approved 42/1/4 split")
+    if len(direct) != 43 or len(transitive) != 1 or len(operator_only) != 4:
+        raise AssertionError("inventory tier counts differ from the approved 43/1/4 split")
 
     for value in (
         "scripts/run-tests.sh pr",
