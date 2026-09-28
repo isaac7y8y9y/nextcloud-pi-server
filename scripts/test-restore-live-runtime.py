@@ -28,6 +28,8 @@ class FakeTarget:
         self.fail_promote = fail_promote
         self.fail_import = fail_import
         self.recovery_phase = recovery_phase
+        self.cutover_phase = ""
+        self.fail_recovery_detach = False
         self.calls: list[str] = []
 
     def ssh(self, command: str, **_kwargs: object) -> str:
@@ -59,6 +61,20 @@ class FakeTarget:
 
     def ops(self, *args: str, **_kwargs: object) -> dict[str, str]:
         self.calls.append("ops " + " ".join(args))
+        if args[:2] == ("db-cutover", "status"):
+            return {"phase": self.cutover_phase}
+        if args[:2] == ("db-cutover", "switch"):
+            self.cutover_phase = "switching"
+        if args[:2] == ("db-cutover", "recovery-detach"):
+            if self.fail_recovery_detach:
+                raise restore.RecoveryError("injected candidate-detach failure")
+            self.cutover_phase = "recovering"
+        if args[:2] == ("db-cutover", "source-ready"):
+            self.cutover_phase = "source-ready"
+            return {"phase": "source-ready", "id": args[2]}
+        if args[:2] == ("db-cutover", "recovered"):
+            self.cutover_phase = "recovered"
+            return {"phase": "recovered", "id": args[2]}
         if args[:2] == ("runtime-recovery", "prepare"):
             return {"state": "prepared", "root": self.config["NEXTCLOUD_STORAGE_MOUNT"] + "/.recovery-" + args[2]}
         if args[:2] == ("runtime-recovery", "promote") and self.fail_promote:
@@ -172,6 +188,32 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(lifecycle[-1], "ops upgrade-stage recovered " + self.stage_id + " " + "f" * 64)
         self.assertFalse(any("upgrade-freeze release" in call or "runtime-recovery cleanup" in call
                              for call in target.calls))
+
+    def test_database_restore_detaches_candidate_before_promotion_and_start(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        target.cutover_phase = "switching"
+        base["db_prepare_fingerprint"] = "b" * 64
+        with mock.patch.object(restore, "run", return_value=""):
+            restore.apply(target, base, source, config, runtime, images)
+        lifecycle = [call for call in target.calls if call.startswith("ops ")]
+        ordered = ("ops db-cutover switch", "ops db-cutover recovery-detach",
+                   "ops runtime-recovery promote", "ops db-cutover source-ready",
+                   "ops service start", "ops upgrade-stage recovered", "ops db-cutover recovered")
+        indexes = [next(index for index, call in enumerate(lifecycle) if call.startswith(action)) for action in ordered]
+        self.assertEqual(indexes, sorted(indexes))
+        self.assertEqual(target.cutover_phase, "recovered")
+        self.assertFalse(any("upgrade-freeze release" in call for call in target.calls))
+
+    def test_database_candidate_detach_failure_blocks_runtime_promotion(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        target.cutover_phase = "candidate-ready"
+        target.fail_recovery_detach = True
+        base["db_prepare_fingerprint"] = "b" * 64
+        with mock.patch.object(restore, "run", return_value=""):
+            with self.assertRaisesRegex(restore.RecoveryError, "candidate-detach failure"):
+                restore.apply(target, base, source, config, runtime, images)
+        self.assertFalse(any(call.startswith("ops runtime-recovery promote") for call in target.calls))
+        self.assertFalse(any("upgrade-freeze release" in call for call in target.calls))
 
     def test_consumed_approval_can_resume_partial_promotion(self) -> None:
         target, base, source, config, runtime, images = self.fixture()

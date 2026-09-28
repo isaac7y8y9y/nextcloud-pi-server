@@ -20,6 +20,49 @@ SPEC.loader.exec_module(a)
 
 
 class DatabaseCutoverTests(unittest.TestCase):
+    def test_stage_approval_marker_survives_lost_artifact_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            stage_id = "20260927T000000Z-12"
+            base = {"format": "image-activation-stage-v1", "stage_id": stage_id,
+                    "target": "db", "db_prepare_fingerprint": "a" * 64}
+            approval = a.approval_plan(root, base, 1000, "stage")
+            with mock.patch.object(a.os, "replace", side_effect=OSError("injected lost replacement")):
+                with self.assertRaisesRegex(OSError, "injected lost replacement"):
+                    a.approval_consume(approval, root, base, 1001, "stage")
+            self.assertEqual(a.consumed_stage(approval, root)["fingerprint"],
+                             a.r.fingerprint(dict(base, state="unused", created=1000, expires=1900)))
+            self.assertEqual(a.approval_consume(approval, root, base, 1002, "stage")["state"], "consumed")
+
+    def test_prepare_approval_marker_survives_lost_artifact_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            stage_id = "20260927T000000Z-12"
+            inventory = {"tables": ["oc_filecache"], "rows": {"oc_filecache": 1}}
+            a.store_inventory(root, stage_id, inventory)
+            base = {"format": "image-db-prepare-v1", "stage_id": stage_id,
+                    "inventory_sha256": db.inventory_hash(inventory)}
+            approval = a.approval_plan(root, base, 1000, "prepare-db")
+            with mock.patch.object(a.os, "replace", side_effect=OSError("injected lost replacement")):
+                with self.assertRaisesRegex(OSError, "injected lost replacement"):
+                    a.approval_consume(approval, root, base, 1001, "prepare-db")
+            self.assertEqual(a.consumed_prepare(approval, root, stage_id)["state"], "consumed")
+
+    def test_acceptance_marker_survives_lost_artifact_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            stage_id = "20260927T000000Z-12"
+            base = {"format": "image-activation-accept-v1", "stage_id": stage_id}
+            approval = a.approval_plan(root, base, 1000, "accept")
+            with mock.patch.object(a.os, "replace", side_effect=OSError("injected lost replacement")):
+                with self.assertRaisesRegex(OSError, "injected lost replacement"):
+                    a.approval_consume(approval, root, base, 1001, "accept")
+            a.consumed_acceptance(approval, root, base)
+            self.assertEqual(a.approval_consume(approval, root, base, 1002, "accept")["state"], "consumed")
+
     def test_database_query_uses_literal_root_and_bound_application_account(self) -> None:
         class Target:
             commands: list[str] = []
@@ -83,6 +126,79 @@ class DatabaseCutoverTests(unittest.TestCase):
         target.details = target.details.replace(" no none 0 1 ", " no bridge 0 1 ")
         with self.assertRaisesRegex(a.r.RecoveryError, "identity differs"):
             db.temporary_container(target, a.r, "stage", data, image_id, container_id)
+        target.details = target.details.replace(" no bridge 0 1 ", " always none 0 1 ")
+        with self.assertRaisesRegex(a.r.RecoveryError, "identity differs"):
+            db.temporary_container(target, a.r, "stage", data, image_id, container_id)
+        target.details = target.details.replace(data, "/wrong/mount")
+        with self.assertRaisesRegex(a.r.RecoveryError, "identity differs"):
+            db.temporary_container(target, a.r, "stage", data, image_id, container_id)
+
+    def test_clean_import_failure_does_not_attest_or_detach_source(self) -> None:
+        stage_id = "20260927T000000Z-12"
+        image_id = "sha256:" + "b" * 64
+        source_inventory = {"prefix": "oc_", "rows": {"oc_filecache": 1}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / "config"
+            runtime = root / "runtime"
+            (config / "compose").mkdir(parents=True)
+            (runtime / "database").mkdir(parents=True)
+            (config / "compose/.env").write_text("MYSQL_ROOT_PASSWORD='root-value'\nMYSQL_PASSWORD='app-value'\n"
+                                                 "MYSQL_DATABASE='nextcloud'\nMYSQL_USER='nextcloud'\n")
+            (runtime / "database/nextcloud.sql").write_text("SELECT 1;\n")
+            env = root / f"db-env-{stage_id}"
+            db.restricted_env(config / "compose/.env", env, a.r)
+            base = {"stage_id": stage_id, "project": "/srv/project", "expected_id": image_id,
+                    "freeze": {"id": stage_id, "table_sha256": "c" * 64},
+                    "restricted_env_sha256": a.r.digest(env),
+                    "inventory_sha256": db.inventory_hash(source_inventory),
+                    "evidence": {"source_record": "1" * 64, "source_compose": "2" * 64,
+                                 "candidate_record": "3" * 64, "candidate_compose": "4" * 64,
+                                 "env_sha256": "5" * 64, "sql_sha256": a.r.digest(runtime / "database/nextcloud.sql")}}
+
+            class Target:
+                config = {"NEXTCLOUD_STORAGE_MOUNT": "/mnt/storage"}
+                calls: list[str] = []
+                fail_sql = True
+
+                def ops(self, *args: str, **_kwargs: object) -> dict[str, str]:
+                    self.calls.append(" ".join(args[:2]))
+                    if args[:2] == ("db-cutover", "begin"):
+                        return {"phase": "preparing", "id": stage_id,
+                                "data": "/mnt/storage/.db-cutover-" + stage_id + "/data"}
+                    if args[:2] == ("db-cutover", "temp-start"):
+                        return {"container_id": "a" * 64}
+                    return {"state": "ok"}
+
+                def ssh(self, command: str, **_kwargs: object) -> str:
+                    self.calls.append(command)
+                    if command.startswith("docker exec -i") and self.fail_sql:
+                        raise a.r.RecoveryError("injected SQL import failure")
+                    return ""
+
+            target = Target()
+            with mock.patch.object(db, "temporary_container", return_value="temporary"), \
+                 mock.patch.object(db, "database_query", return_value="1"):
+                with self.assertRaisesRegex(a.r.RecoveryError, "SQL import failure"):
+                    db.prepare(target, a.r, stage_id, "a" * 64, base, root / "candidate", config,
+                               runtime, root, source_inventory)
+            self.assertNotIn("db-cutover attest", target.calls)
+            self.assertNotIn("db-cutover detach", target.calls)
+            target.calls.clear()
+            target.fail_sql = False
+            with mock.patch.object(db, "temporary_container", return_value="temporary"), \
+                 mock.patch.object(db, "database_query", return_value="1"), \
+                 mock.patch.object(db, "inventory", return_value={"prefix": "oc_", "rows": {"oc_filecache": 2}}):
+                with self.assertRaisesRegex(a.r.RecoveryError, "inventory differs"):
+                    db.prepare(target, a.r, stage_id, "a" * 64, base, root / "candidate", config,
+                               runtime, root, source_inventory)
+            self.assertNotIn("db-cutover attest", target.calls)
+            target.calls.clear()
+            env.write_text("MYSQL_ROOT_PASSWORD=changed\n")
+            with self.assertRaisesRegex(a.r.RecoveryError, "restricted database environment changed"):
+                db.prepare(target, a.r, stage_id, "a" * 64, base, root / "candidate", config,
+                           runtime, root, source_inventory)
+            self.assertNotIn("db-cutover begin", target.calls)
 
     def test_cutover_records_boundary_before_directory_switch_and_start(self) -> None:
         stage_id = "20260927T000000Z-12"
@@ -112,12 +228,14 @@ class DatabaseCutoverTests(unittest.TestCase):
                 phase = "prepared"
                 stage = "absent"
                 active = "absent"
+                service = "inactive"
+                fault = ""
 
                 def ssh(self, command: str, **_kwargs: object) -> str:
                     if command.startswith("docker image inspect"):
                         return str(base["expected_id"])
                     if command.startswith("systemctl is-active"):
-                        return "inactive"
+                        return self.service
                     return ""
 
                 def ops(self, *args: str, **_kwargs: object) -> dict[str, str]:
@@ -133,40 +251,68 @@ class DatabaseCutoverTests(unittest.TestCase):
                         return {"phase": self.stage, "fingerprint": "f" * 64, "target": "db"}
                     if action == "upgrade-stage consume":
                         self.stage = "prepared"
+                        self.inject(action)
                         return {"phase": "prepared", "id": stage_id}
                     if action == "upgrade-stage boundary":
                         self.stage = "runtime-may-have-changed"
+                        self.inject(action)
                     if action == "active-record presence":
                         return {"state": "absent" if self.active == "absent" else "present"}
                     if action == "active-record prepare":
                         self.active = "prepared"
+                        self.inject(action)
                     if action == "active-record status":
                         return {"state": self.active, "pre_sha256": "7" * 64,
                                 "candidate_sha256": "9" * 64}
                     if action == "active-record apply":
                         self.active = "applied"
+                        self.inject(action)
+                    if action == "service start":
+                        self.service = "active"
+                        self.inject(action)
                     if action.startswith("db-cutover "):
                         self.phase = {"db-cutover detach": "detached", "db-cutover switch": "switching",
                                       "db-cutover candidate-ready": "candidate-ready",
                                       "db-cutover running": "running"}[action]
+                        self.inject(action)
                     return {"state": "ok"}
 
-            target = Target()
-            with (mock.patch.object(a.db, "source_inventory", return_value={}),
-                  mock.patch.object(a.r, "run", return_value=""),
-                  mock.patch.object(a.r, "remote_hash", return_value="a" * 64),
-                  mock.patch.object(a, "install_compose"),
-                  mock.patch.object(a, "running", return_value={})):
-                with mock.patch.object(a.r, "remote_hash", side_effect=lambda _target, path: (
-                    a.r.digest(candidate / "docker-compose.yml") if path.endswith("candidate.yml") else
-                    a.r.digest(source / "docker-compose.yml") if path.endswith("source.yml") else
-                    a.r.digest(HERE / "lib/atomic-transaction.sh") if path.endswith("atomic-transaction.sh") else
-                    "a" * 64)):
+                def inject(self, action: str) -> None:
+                    if action == self.fault:
+                        self.fault = ""
+                        raise a.r.RecoveryError("injected lost response after " + action)
+
+            def perform(target: Target) -> None:
+                with (mock.patch.object(a.db, "source_inventory", return_value={}),
+                      mock.patch.object(a.r, "run", return_value=""),
+                      mock.patch.object(a.r, "remote_hash", side_effect=lambda _target, path: (
+                          a.r.digest(candidate / "docker-compose.yml") if path.endswith("candidate.yml") else
+                          a.r.digest(source / "docker-compose.yml") if path.endswith("source.yml") else
+                          a.r.digest(HERE / "lib/atomic-transaction.sh") if path.endswith("atomic-transaction.sh") else
+                          "a" * 64)),
+                      mock.patch.object(a, "install_compose"),
+                      mock.patch.object(a, "running", return_value={})):
                     a.db_stage_apply(target, base, {"fingerprint": "f" * 64, "expires": 1}, candidate, source)
+
+            target = Target()
+            perform(target)
             ordered = ("db-cutover detach", "upgrade-stage boundary", "db-cutover switch",
                        "active-record apply", "db-cutover candidate-ready", "service start", "db-cutover running")
             indices = [calls.index(action) for action in ordered]
             self.assertEqual(indices, sorted(indices))
+            for fault in ("upgrade-stage consume", "active-record prepare", "db-cutover detach",
+                          "upgrade-stage boundary", "db-cutover switch", "active-record apply",
+                          "db-cutover candidate-ready", "service start", "db-cutover running"):
+                with self.subTest(fault=fault):
+                    calls.clear()
+                    interrupted = Target()
+                    interrupted.fault = fault
+                    with self.assertRaisesRegex(a.r.RecoveryError, "injected lost response"):
+                        perform(interrupted)
+                    self.assertNotEqual(interrupted.phase, "running" if fault != "db-cutover running" else "prepared")
+                    perform(interrupted)
+                    self.assertEqual(interrupted.phase, "running")
+                    self.assertEqual(interrupted.service, "active")
 
 
 if __name__ == "__main__":

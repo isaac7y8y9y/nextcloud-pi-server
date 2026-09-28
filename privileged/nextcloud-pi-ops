@@ -827,7 +827,7 @@ cmd_db_cutover_recovered() {
   out phase recovered; out id "$id"
 }
 db_cutover_scan() {
-  local root="$(db_cutover_root)" file id phase source candidate preserved
+  local root="$(db_cutover_root)" file id phase source candidate preserved active_db
   [[ ! -e "$root" && ! -L "$root" ]] && return
   safe_dir "$root"
   for file in "$root"/*.tsv; do
@@ -837,7 +837,16 @@ db_cutover_scan() {
     valid_id "$id" && [[ "$(metadata "$file" format)" == db-cutover-v1 && "$(metadata "$file" id)" == "$id" ]] || die "database cutover journal is invalid"
     phase="$(metadata "$file" phase)"
     case "$phase" in
-      aborted|accepted|recovered) continue ;;
+      aborted|recovered) continue ;;
+      accepted)
+        protected_file "$ACTIVE_RECORD" 0600
+        active_db="$(/usr/bin/awk -F= '$1 == "NEXTCLOUD_ACTIVE_IMAGES_DB_ID" {n++; value=$2} END {if (n == 1) print value; else exit 1}' "$ACTIVE_RECORD")" || die "active database image identity is invalid"
+        if [[ "$active_db" == "$(metadata "$file" expected_id)" ]]; then
+          candidate="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"
+          preserved="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/.nextcloud-db-before-$id"
+          [[ -d "$candidate" && ! -L "$candidate" && "$(db_cutover_inode "$candidate")" == "$(metadata "$file" candidate_inode)" && -d "$preserved" && ! -L "$preserved" && "$(db_cutover_inode "$preserved")" == "$(metadata "$file" source_inode)" ]] || die "accepted database directory identity differs"
+        fi
+        ;;
       preparing|prepared|detaching)
         source="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"
         [[ -d "$source" && ! -L "$source" && "$(/usr/bin/stat -c '%d:%i' "$source")" == "$(metadata "$file" source_inode)" ]] || die "source database directory differs during cutover"
@@ -868,7 +877,7 @@ db_cutover_startup_guard() {
   for file in "$root"/*.tsv; do
     [[ -e "$file" || -L "$file" ]] || continue
     phase="$(metadata "$file" phase)"
-    case "$phase" in aborted|accepted|recovered|candidate-ready|starting|running|source-ready) ;; *) die "database cutover has not reached a safe startup phase" ;; esac
+    case "$phase" in aborted|accepted|recovered|preparing|prepared|candidate-ready|starting|running|source-ready) ;; *) die "database cutover has not reached a safe startup phase" ;; esac
   done
 }
 cmd_upgrade_startup_guard() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; db_cutover_startup_guard; out state permitted; }

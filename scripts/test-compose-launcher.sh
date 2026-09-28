@@ -117,6 +117,25 @@ fi
 [[ ! -s "$LAUNCHER_CALLS" ]]
 unset LAUNCHER_CUTOVER_BLOCK
 
+if [[ "${GITHUB_ACTIONS:-}" == true && "$(uname -s)" == Linux ]]; then
+  sudo -n true
+  for blocked in yes no; do
+    : >"$LAUNCHER_CALLS"
+    unit="nextcloud-db-startup-fixture-$$-$blocked"
+    sudo systemd-run --quiet --wait --collect --unit="$unit" --service-type=oneshot \
+      -p "User=$(id -un)" -p "Environment=PATH=$PATH" \
+      -p "Environment=LAUNCHER_CALLS=$LAUNCHER_CALLS" \
+      -p "Environment=LAUNCHER_SCENARIO=valid" \
+      -p "Environment=LAUNCHER_CUTOVER_BLOCK=$blocked" \
+      /bin/bash "$TEST_DIR/launcher" >/dev/null 2>&1 || [[ "$blocked" == yes ]]
+    if [[ "$blocked" == yes ]]; then
+      [[ ! -s "$LAUNCHER_CALLS" ]] || { echo "systemd started Compose during cutover" >&2; exit 1; }
+    else
+      [[ "$(<"$LAUNCHER_CALLS")" == up ]] || { echo "systemd did not run the validated launcher" >&2; exit 1; }
+    fi
+  done
+fi
+
 # Model both a service restart and the next boot while recovered mappings are
 # authoritative. Each lifecycle invocation resolves and validates afresh.
 sed -i.bak 's/NEXTCLOUD_ACTIVE_IMAGES_MODE=source/NEXTCLOUD_ACTIVE_IMAGES_MODE=recovered/' "$TEST_DIR/active-images.env"

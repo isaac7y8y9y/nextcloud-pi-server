@@ -227,7 +227,7 @@ def consumed_prepare(path: Path, root: Path, stage_id: str) -> dict[str, object]
     if path.parent != root or not path.name.startswith(f"prepare-db-{stage_id}-"):
         r.reject("database preparation approval path differs")
     record = json.loads(r.private_file(path))
-    if not isinstance(record, dict) or record.get("format") != "image-db-prepare-v1" or record.get("state") != "consumed" or record.get("stage_id") != stage_id:
+    if not isinstance(record, dict) or record.get("format") != "image-db-prepare-v1" or record.get("state") not in ("consumed", "unused") or record.get("stage_id") != stage_id:
         r.reject("database preparation approval was not consumed")
     created = record.get("created")
     if not isinstance(created, int) or record.get("expires") != created + 900:
@@ -243,12 +243,12 @@ def consumed_prepare(path: Path, root: Path, stage_id: str) -> dict[str, object]
     inventory_path = private_inventory(root, stage_id)
     if r.digest(inventory_path) != record.get("inventory_sha256"):
         r.reject("frozen database inventory sidecar differs")
-    return record
+    return dict(record, state="consumed")
 
 
 def consumed_stage(path: Path, root: Path) -> dict[str, object]:
     record = json.loads(r.private_file(path))
-    if not isinstance(record, dict) or record.get("format") != "image-activation-stage-v1" or record.get("state") != "consumed":
+    if not isinstance(record, dict) or record.get("format") != "image-activation-stage-v1" or record.get("state") not in ("consumed", "unused"):
         r.reject("activation approval was not consumed")
     stage_id = record.get("stage_id", "")
     created = record.get("created")
@@ -264,7 +264,7 @@ def consumed_stage(path: Path, root: Path) -> dict[str, object]:
     marker = root / f"used-stage-{stage_id}-{created}"
     if r.private_file(marker) != (expected + "\n").encode():
         r.reject("consumed activation marker differs")
-    return record
+    return dict(record, state="consumed")
 
 
 def db_stage_evidence(target: r.Target, base: dict[str, object], preparation: Path,
@@ -324,6 +324,10 @@ def approval_consume(path: Path, root: Path, base: dict[str, object], now: int, 
     if record != expected:
         r.reject("activation approval or bound evidence changed")
     marker = root / f"used-{kind}-{base['stage_id']}-{record['created']}"
+    if marker.exists():
+        if r.private_file(marker) != (record["fingerprint"] + "\n").encode():
+            r.reject("activation approval consumption marker differs")
+        return dict(record, state="consumed")
     fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as stream:
         stream.write((record["fingerprint"] + "\n").encode())
@@ -340,14 +344,14 @@ def consumed_acceptance(path: Path, root: Path, base: dict[str, object]) -> None
     if path.parent != root or not path.name.startswith(f"accept-{base['stage_id']}-"):
         r.reject("consumed acceptance path differs")
     record = json.loads(r.private_file(path))
-    if not isinstance(record, dict) or record.get("state") != "consumed":
+    if not isinstance(record, dict) or record.get("state") not in ("consumed", "unused"):
         r.reject("acceptance approval is not consumed")
     created = record.get("created")
     if not isinstance(created, int):
         r.reject("acceptance approval clock is invalid")
     original = dict(base, state="unused", created=created, expires=created + 900)
     original["fingerprint"] = r.fingerprint(original)
-    if record != dict(original, state="consumed"):
+    if record not in (original, dict(original, state="consumed")):
         r.reject("consumed acceptance evidence changed")
     marker = root / f"used-accept-{base['stage_id']}-{created}"
     if r.private_file(marker) != (original["fingerprint"] + "\n").encode():
