@@ -15,6 +15,10 @@ import stat
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
+
+sys.dont_write_bytecode = True
+from lib import db_cutover as db
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +27,8 @@ IDENTIFIER = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9]+\Z")
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 SAFE_NAME = re.compile(r"[A-Za-z0-9._/-]+\Z")
 CONFIG_KEYS = {"NEXTCLOUD_PI_HOST", "NEXTCLOUD_PI_SYSTEM_HOSTNAME", "NEXTCLOUD_PI_USER",
-               "NEXTCLOUD_REMOTE_PROJECT_DIR", "NEXTCLOUD_STORAGE_MOUNT"}
+               "NEXTCLOUD_REMOTE_PROJECT_DIR", "NEXTCLOUD_STORAGE_MOUNT",
+               "NEXTCLOUD_STORAGE_UUID", "NEXTCLOUD_PUBLIC_HOSTNAME"}
 PATHS = ("nextcloud/nextcloud.tar", "caddy/data.tar", "caddy/config.tar")
 
 
@@ -43,10 +48,16 @@ def digest(path: Path) -> str:
     return sha.hexdigest()
 
 
-def run(args: list[str], *, input_file: Path | None = None, timeout: int = 120) -> str:
+def run(args: list[str], *, input_file: Path | None = None,
+        input_bytes: bytes | None = None, timeout: int = 120) -> str:
+    if input_file is not None and input_bytes is not None:
+        reject("command input is ambiguous")
     try:
-        with input_file.open("rb") if input_file is not None else open(os.devnull, "rb") as source:
-            result = subprocess.run(args, stdin=source, capture_output=True, timeout=timeout, check=False)
+        if input_bytes is not None:
+            result = subprocess.run(args, input=input_bytes, capture_output=True, timeout=timeout, check=False)
+        else:
+            with input_file.open("rb") if input_file is not None else open(os.devnull, "rb") as source:
+                result = subprocess.run(args, stdin=source, capture_output=True, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RecoveryError("required local or remote command did not complete") from exc
     if result.returncode:
@@ -105,6 +116,11 @@ def deployment_config() -> dict[str, str]:
     for key in ("NEXTCLOUD_REMOTE_PROJECT_DIR", "NEXTCLOUD_STORAGE_MOUNT"):
         if not result[key].startswith("/"):
             reject("private deployment path is not absolute")
+    if not re.fullmatch(r"[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}",
+                        result["NEXTCLOUD_STORAGE_UUID"]):
+        reject("private deployment storage UUID is invalid")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", result["NEXTCLOUD_PUBLIC_HOSTNAME"]):
+        reject("private deployment public hostname is invalid")
     return result
 
 
@@ -124,10 +140,11 @@ class Target:
         self.config = config
         self.login = f"{config['NEXTCLOUD_PI_USER']}@{config['NEXTCLOUD_PI_HOST']}"
 
-    def ssh(self, command: str, *, input_file: Path | None = None, timeout: int = 120) -> str:
+    def ssh(self, command: str, *, input_file: Path | None = None,
+            input_bytes: bytes | None = None, timeout: int = 120) -> str:
         return run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
                     "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=12",
-                    self.login, command], input_file=input_file, timeout=timeout)
+                    self.login, command], input_file=input_file, input_bytes=input_bytes, timeout=timeout)
 
     def ops(self, *args: str, input_file: Path | None = None, timeout: int = 120) -> dict[str, str]:
         command = "sudo -n " + q(OPS) + " " + " ".join(q(arg) for arg in args)
@@ -418,7 +435,8 @@ def resume(target: Target, base: dict[str, object], candidate: Path, source: Pat
         target.ops("service", "stop")
     elif service not in ("inactive", "failed"):
         reject("Nextcloud service state is unknown during restore resume")
-    target.ops("runtime-recovery", "promote", stage_id, str(base["stage_fingerprint"]), timeout=3600)
+    if recovery["state"] == "promoting":
+        target.ops("runtime-recovery", "promote", stage_id, str(base["stage_fingerprint"]), timeout=3600)
     finish_promoted(target, base, config_backup)
 
 
@@ -476,10 +494,14 @@ def finish_promoted(target: Target, base: dict[str, object], config_backup: Path
     if target.ops("active-images-state").get("sha256") != local["source_record"]:
         reject("prior active record was not restored")
     if base.get("db_prepare_fingerprint"):
-        result = target.ops("db-cutover", "source-ready", stage_id,
-                            str(base["db_prepare_fingerprint"]), str(base["stage_fingerprint"]))
-        if result != {"phase": "source-ready", "id": stage_id}:
-            reject("protected database recovery startup gate differs")
+        phase = target.ops("db-cutover", "status", stage_id).get("phase")
+        if phase == "recovering":
+            result = target.ops("db-cutover", "source-ready", stage_id,
+                                str(base["db_prepare_fingerprint"]), str(base["stage_fingerprint"]))
+            if result != {"phase": "source-ready", "id": stage_id}:
+                reject("protected database recovery startup gate differs")
+        elif phase != "source-ready":
+            reject("protected database recovery startup phase differs")
     target.ops("service", "start", timeout=600)
     maintenance_off = False
     for _ in range(12):
@@ -548,11 +570,12 @@ def apply(target: Target, base: dict[str, object], source: Path,
     database_dir = restore_root + "/mariadb-data"
     database_container = "nextcloud-restore-db-" + stage_id
     db_tag = str(old_tags["DB"])
+    restricted_env = db.restricted_env_bytes(config_backup / "compose/.env", SimpleNamespace(reject=reject))
     db_command = ("docker run --pull=never --network none -d --name " + q(database_container) +
                   " --label " + q("nextcloud-pi-restore-stage=" + stage_id) +
-                  " --env-file " + q(project + "/.env") + " --mount " +
+                  " --env-file /dev/stdin --mount " +
                   q("type=bind,source=" + database_dir + ",target=/var/lib/mysql") + " " + q(db_tag) + " >/dev/null")
-    checked(target, db_command)
+    target.ssh(db_command, input_bytes=restricted_env)
     try:
         ready = False
         query = ("docker exec " + q(database_container) + " sh -eu -c " +

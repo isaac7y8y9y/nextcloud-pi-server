@@ -87,6 +87,13 @@ when its matching protected single-use marker was already written; an unused
 expired approval remains invalid. For app and Caddy stages, a distinct `--maintenance-off`
 action bound to the consumed stage approval checks the running candidate and
 drain before the acceptance plan can be made.
+For the database stage, acceptance now runs `scripts/preflight.sh --conformance
+--candidate <private-directory>` while ingress remains frozen. This mode
+checks the verified candidate lock, rendered Compose/Caddy/active record,
+protected live record, running image tags, storage, service integration, and
+paused background-job timer against the private candidate. Ordinary
+source-lock conformance remains the post-merge baseline check; it is not a
+substitute for this candidate-bound gate.
 
 ## In-progress protected backup boundary
 

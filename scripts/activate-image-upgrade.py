@@ -422,13 +422,17 @@ def db_stage_apply(target: r.Target, base: dict[str, object], approval: dict[str
     phase = root_db["phase"]
     if phase == "prepared" and db.inventory_hash(db.source_inventory(target, r)) != base["db_inventory_sha256"]:
         r.reject("source database changed immediately before cutover")
-    if phase in ("prepared", "detaching", "detached"):
-        target.ops("db-cutover", "detach", stage_id, prep_fingerprint, stage_fingerprint, timeout=900)
-        phase = "detached"
     stage = target.ops("upgrade-stage", "status", stage_id)
     if stage.get("phase") == "prepared":
+        if phase not in ("prepared", "detaching", "detached"):
+            r.reject("database cutover phase differs before the recovery boundary")
+        target.ops("db-cutover", "detach", stage_id, prep_fingerprint, stage_fingerprint, timeout=900)
+        phase = "detached"
         target.ops("upgrade-stage", "boundary", stage_id, stage_fingerprint)
-    elif stage.get("phase") != "runtime-may-have-changed":
+    elif stage.get("phase") == "runtime-may-have-changed":
+        if phase in ("prepared", "detaching"):
+            r.reject("database detach did not finish before the recovery boundary")
+    else:
         r.reject("database cutover recovery boundary differs")
     if phase in ("detached", "switching"):
         target.ops("db-cutover", "switch", stage_id, prep_fingerprint, stage_fingerprint, timeout=900)
@@ -612,6 +616,8 @@ def accept_evidence(target: r.Target, candidate: Path, source: Path, config_back
         r.run([str(HERE / "health-check.sh"), "--caddyfile", str(candidate / "Caddyfile")], timeout=300)
     elif not allow_maintenance_on or "maintenance: true" not in status:
         r.reject("Nextcloud maintenance mode remains on or is unknown")
+    if stage.get("target") == "db" and "maintenance: false" in status:
+        r.run(["bash", str(HERE / "preflight.sh"), "--conformance", "--candidate", str(candidate)], timeout=600)
     result = {"format": "image-activation-accept-v1", "stage_id": stage_id,
             "stage_fingerprint": stage["fingerprint"], "stage_artifact_sha256": r.digest(stage_approval),
             "host": target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"], "freeze_id": metadata["freeze_id"],

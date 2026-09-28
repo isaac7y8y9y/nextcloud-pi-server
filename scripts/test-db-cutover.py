@@ -20,6 +20,71 @@ SPEC.loader.exec_module(a)
 
 
 class DatabaseCutoverTests(unittest.TestCase):
+    def test_db_acceptance_requires_candidate_conformance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.chmod(0o700)
+            stage_id = "20260927T000000Z-12"
+            local = {"source_record": "1" * 64, "source_compose": "2" * 64,
+                     "candidate_record": "3" * 64, "candidate_compose": "4" * 64,
+                     "source_caddy": "5" * 64}
+            metadata = {"freeze_id": stage_id, "freeze_table_sha256": "6" * 64,
+                        "tag": "mariadb:11.4.13", "config_digest": "sha256:" + "7" * 64}
+            base = {"format": "image-activation-stage-v1", "stage_id": stage_id,
+                    "host": "pi.example.invalid", "target": "db", "fetch_id": stage_id,
+                    "tag": metadata["tag"], "freeze": {"id": stage_id, "table_sha256": "6" * 64},
+                    "evidence": local, "db_prepare_fingerprint": "8" * 64,
+                    "db_candidate_digest": "9" * 64, "db_inventory_sha256": "a" * 64,
+                    "actions": "detach-source-containers,promote-attested-database,install-candidate,start,stage-maintenance-off"}
+            artifact = a.approval_plan(root, base, 1000, "stage")
+            stage = a.approval_consume(artifact, root, base, 1001, "stage")
+
+            class Target:
+                config = {"NEXTCLOUD_PI_SYSTEM_HOSTNAME": "pi.example.invalid",
+                          "NEXTCLOUD_REMOTE_PROJECT_DIR": "/srv/project",
+                          "NEXTCLOUD_STORAGE_MOUNT": "/mnt/storage"}
+
+                def ops(self, *args: str, **_kwargs: object) -> dict[str, str]:
+                    if args[:2] == ("upgrade-stage", "status"):
+                        return {"phase": "runtime-may-have-changed", "id": stage_id,
+                                "fingerprint": stage["fingerprint"], "freeze_id": stage_id,
+                                "freeze_table_sha256": "6" * 64, "fetch_id": stage_id,
+                                "target": "db", "tag": metadata["tag"], "expected_id": metadata["config_digest"],
+                                "pre_record_sha256": local["source_record"],
+                                "pre_compose_sha256": local["source_compose"],
+                                "candidate_record_sha256": local["candidate_record"],
+                                "candidate_compose_sha256": local["candidate_compose"]}
+                    if args[:2] == ("active-record", "status"):
+                        return {"id": stage_id, "state": "applied", "pre_sha256": local["source_record"],
+                                "candidate_sha256": local["candidate_record"]}
+                    if args[:2] == ("db-cutover", "status"):
+                        return {"phase": "running", "prepare_fingerprint": "8" * 64,
+                                "candidate_digest": "9" * 64, "inventory_sha256": "a" * 64,
+                                "candidate_inode": "1:2", "source_inode": "1:3"}
+                    return {"sha256": local["candidate_record"]}
+
+                def ssh(self, command: str, **_kwargs: object) -> str:
+                    if "/.nextcloud-db-before-" in command:
+                        return "1:3"
+                    if "stat -c" in command:
+                        return "1:2"
+                    if "occ status" in command:
+                        return "version: 30.0.17\nneedsDbUpgrade: false\nmaintenance: false"
+                    return ""
+
+            candidate = root / "candidate"
+            with mock.patch.object(a, "common", return_value=(local, metadata)), \
+                 mock.patch.object(a, "approval_root", return_value=root), \
+                 mock.patch.object(a.r, "remote_hash", side_effect=lambda _target, path: (
+                     local["source_caddy"] if path.endswith("Caddyfile") else local["candidate_compose"])), \
+                 mock.patch.object(a.db, "database_query", return_value="1"), \
+                 mock.patch.object(a, "running", return_value={}), \
+                 mock.patch.object(a.r, "run", side_effect=["", a.r.RecoveryError("candidate conformance failed")]) as checked:
+                with self.assertRaisesRegex(a.r.RecoveryError, "candidate conformance failed"):
+                    a.accept_evidence(Target(), candidate, root, root, root, root, artifact, 1002)
+            self.assertEqual(checked.call_args.args[0],
+                             ["bash", str(HERE / "preflight.sh"), "--conformance", "--candidate", str(candidate)])
+
     def test_stage_approval_marker_survives_lost_artifact_replace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -271,6 +336,8 @@ class DatabaseCutoverTests(unittest.TestCase):
                         self.service = "active"
                         self.inject(action)
                     if action.startswith("db-cutover "):
+                        if action == "db-cutover detach" and self.stage != "prepared":
+                            raise a.r.RecoveryError("root refuses detach after recovery boundary")
                         self.phase = {"db-cutover detach": "detached", "db-cutover switch": "switching",
                                       "db-cutover candidate-ready": "candidate-ready",
                                       "db-cutover running": "running"}[action]
@@ -313,6 +380,8 @@ class DatabaseCutoverTests(unittest.TestCase):
                     perform(interrupted)
                     self.assertEqual(interrupted.phase, "running")
                     self.assertEqual(interrupted.service, "active")
+                    if fault == "upgrade-stage boundary":
+                        self.assertEqual(calls.count("db-cutover detach"), 1)
 
 
 if __name__ == "__main__":

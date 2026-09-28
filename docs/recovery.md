@@ -118,7 +118,10 @@ If an interrupted restore is still in the protected `prepared` phase,
 the identity-bound temporary import container, resets the isolated staged
 datasets, and restarts the restore. It never discards the live or preserved
 failed runtime. Promotion-phase resumes continue from the guarded directory
-moves. Both paths retain the ingress freeze until verified recovery.
+moves. If promotion already completed and the database journal reached
+`source-ready`, resume verifies the restored configuration and retries service
+start and health without repeating promotion or that startup gate. Both paths
+retain the ingress freeze until verified recovery.
 For a database cutover, restoration first finishes any interrupted directory
 placement under the closed startup gate, removes candidate container objects,
 and then promotes all four datasets. The protected journal permits Docker to
@@ -149,7 +152,8 @@ command alone is not approval.
 
 The approved apply restores three archives into the protected staging root,
 loads and verifies prior image IDs if needed, imports the held SQL into an
-isolated MariaDB bind directory, checks application tables and all databases,
+isolated MariaDB bind directory using only the quote-decoded protected backup
+credentials streamed to Docker, checks application tables and all databases,
 and stops that temporary container. It then stops the stack, preserves failed
 Nextcloud/MariaDB/Caddy state under transaction-specific names, promotes the
 staged state, restores prior Compose/Caddy and the protected active record,

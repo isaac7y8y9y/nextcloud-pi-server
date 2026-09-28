@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import os
 import stat
 import tempfile
 import unittest
@@ -29,11 +30,15 @@ class FakeTarget:
         self.fail_import = fail_import
         self.recovery_phase = recovery_phase
         self.cutover_phase = ""
+        self.cutover_prepare_fingerprint = ""
         self.fail_recovery_detach = False
         self.calls: list[str] = []
+        self.inputs: list[bytes] = []
 
-    def ssh(self, command: str, **_kwargs: object) -> str:
+    def ssh(self, command: str, **kwargs: object) -> str:
         self.calls.append(command)
+        if kwargs.get("input_bytes") is not None:
+            self.inputs.append(kwargs["input_bytes"])
         if command.startswith("docker image inspect"):
             return next(value for tag, value in self.old.items() if tag in command)
         if command.startswith("docker exec -i") and self.fail_import:
@@ -62,7 +67,7 @@ class FakeTarget:
     def ops(self, *args: str, **_kwargs: object) -> dict[str, str]:
         self.calls.append("ops " + " ".join(args))
         if args[:2] == ("db-cutover", "status"):
-            return {"phase": self.cutover_phase}
+            return {"phase": self.cutover_phase, "prepare_fingerprint": self.cutover_prepare_fingerprint}
         if args[:2] == ("db-cutover", "switch"):
             self.cutover_phase = "switching"
         if args[:2] == ("db-cutover", "recovery-detach"):
@@ -110,6 +115,17 @@ class ApprovalTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_documented_deployment_config_is_accepted(self) -> None:
+        path = self.root / "deployment.env"
+        path.write_bytes((restore.ROOT / "config/deployment.env.example").read_bytes())
+        path.chmod(0o600)
+        with mock.patch.dict(os.environ, {"NEXTCLOUD_DEPLOYMENT_ENV_FILE": str(path)}):
+            config = restore.deployment_config()
+            self.assertEqual(set(config), restore.CONFIG_KEYS)
+            path.write_text(path.read_text().replace("00000000-0000-0000-0000-000000000000", "invalid-uuid"))
+            with self.assertRaisesRegex(restore.RecoveryError, "storage UUID"):
+                restore.deployment_config()
+
     def test_approval_is_single_use_and_bound_to_evidence(self) -> None:
         artifact = restore.plan(self.root, self.base, 1000)
         self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o600)
@@ -139,6 +155,9 @@ class ApprovalTests(unittest.TestCase):
                      runtime / "caddy/config.tar", runtime / "database/nextcloud.sql",
                      config / "compose/docker-compose.yml", config / "caddy/Caddyfile", images / "images.tar"):
             path.write_bytes(b"fixture\n")
+        (config / "compose/.env").write_text("MYSQL_ROOT_PASSWORD='root-value'\nMYSQL_PASSWORD='app-value'\n"
+                                             "MYSQL_DATABASE='nextcloud'\nMYSQL_USER='nextcloud'\n")
+        (config / "compose/.env").chmod(0o600)
         old_tags = {"APP": "nextcloud:30.0.17-apache", "DB": "mariadb:11.8.6", "CADDY": "caddy:2.10.2"}
         old_ids = {key: "sha256:" + str(index) * 64 for index, key in enumerate(old_tags, 1)}
         base = {"stage_id": self.stage_id, "stage_fingerprint": "f" * 64,
@@ -189,6 +208,15 @@ class ApprovalTests(unittest.TestCase):
         self.assertFalse(any("upgrade-freeze release" in call or "runtime-recovery cleanup" in call
                              for call in target.calls))
 
+    def test_restore_database_receives_unquoted_restricted_environment(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        with mock.patch.object(restore, "run", return_value=""):
+            restore.apply(target, base, source, config, runtime, images)
+        self.assertEqual(target.inputs, [b"MYSQL_ROOT_PASSWORD=root-value\nMYSQL_PASSWORD=app-value\n"
+                                         b"MYSQL_DATABASE=nextcloud\nMYSQL_USER=nextcloud\n"])
+        self.assertTrue(any("--env-file /dev/stdin" in call for call in target.calls))
+        self.assertFalse(any("--env-file /srv" in call for call in target.calls))
+
     def test_database_restore_detaches_candidate_before_promotion_and_start(self) -> None:
         target, base, source, config, runtime, images = self.fixture()
         target.cutover_phase = "switching"
@@ -235,6 +263,30 @@ class ApprovalTests(unittest.TestCase):
             restore.resume(target, consumed, self.root / "candidate", source, config, runtime, images)
         self.assertTrue(any(call.startswith("ops runtime-recovery promote") for call in target.calls))
         self.assertFalse(any("upgrade-freeze release" in call for call in target.calls))
+
+    def test_promoted_source_ready_resume_skips_promotion_and_startup_gate(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        target.recovery_phase = "promoted"
+        target.cutover_phase = "source-ready"
+        target.cutover_prepare_fingerprint = "b" * 64
+        base.update(host="pi.example.invalid", freeze_id="20260926T000000Z-999",
+                    freeze_table_sha256="b" * 64, project=target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"],
+                    mount=target.config["NEXTCLOUD_STORAGE_MOUNT"], db_prepare_fingerprint="b" * 64,
+                    db_cutover_identity={})
+        base["evidence"]["env_sha256"] = "e" * 64
+        artifact = restore.plan(self.root, base, 1000)
+        consumed = restore.consume(artifact, self.root, base, 1001)
+        def remote_hash(_target, path):
+            name = path.rsplit("/", 1)[-1]
+            return "e" * 64 if name == ".env" else restore.digest(target.files[name])
+        with mock.patch.object(restore, "verify_local", return_value=base["evidence"]), \
+             mock.patch.object(restore, "remote_hash", side_effect=remote_hash), \
+             mock.patch.object(restore, "run", return_value=""):
+            restore.resume(target, consumed, self.root / "candidate", source, config, runtime, images)
+        self.assertFalse(any(call.startswith("ops runtime-recovery promote") or
+                             call.startswith("ops db-cutover source-ready") for call in target.calls))
+        self.assertIn("ops service start", target.calls)
+        self.assertEqual(target.cutover_phase, "recovered")
 
     def test_consumed_approval_resets_prepared_restore_before_retry(self) -> None:
         target, base, source, config, runtime, images = self.fixture()
