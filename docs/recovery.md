@@ -80,8 +80,10 @@ under a separate approval, removes the old containers, records the full
 recovery boundary, and promotes that directory before candidate startup.
 The original 11.8 directory is preserved. The root startup guard rejects
 partial switches, and `--resume-db` continues a consumed cutover approval.
-This path still requires the fault and disposable Linux tests specified in
-the [cutover design](issue-26-mariadb-cutover-design.md) before live use.
+Synthetic fault, Linux directory, and isolated Docker-daemon tests now cover
+the core cutover and recovery boundaries. The remaining CI, engineering/PR
+reviews, and measured Pi proof in the
+[cutover design](issue-26-mariadb-cutover-design.md) still gate live use.
 
 After separate application/migration, use `--maintenance-off` with the consumed
 `--stage-approval` and the same five directories. This stage-bound action

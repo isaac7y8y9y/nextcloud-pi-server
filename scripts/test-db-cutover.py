@@ -33,7 +33,7 @@ class DatabaseCutoverTests(unittest.TestCase):
                     a.approval_consume(approval, root, base, 1001, "stage")
             self.assertEqual(a.consumed_stage(approval, root)["fingerprint"],
                              a.r.fingerprint(dict(base, state="unused", created=1000, expires=1900)))
-            self.assertEqual(a.approval_consume(approval, root, base, 1002, "stage")["state"], "consumed")
+            self.assertEqual(a.approval_consume(approval, root, base, 5000, "stage")["state"], "consumed")
 
     def test_prepare_approval_marker_survives_lost_artifact_replace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -61,7 +61,7 @@ class DatabaseCutoverTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "injected lost replacement"):
                     a.approval_consume(approval, root, base, 1001, "accept")
             a.consumed_acceptance(approval, root, base)
-            self.assertEqual(a.approval_consume(approval, root, base, 1002, "accept")["state"], "consumed")
+            self.assertEqual(a.approval_consume(approval, root, base, 5000, "accept")["state"], "consumed")
 
     def test_database_query_uses_literal_root_and_bound_application_account(self) -> None:
         class Target:

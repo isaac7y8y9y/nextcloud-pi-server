@@ -317,7 +317,7 @@ def approval_consume(path: Path, root: Path, base: dict[str, object], now: int, 
         r.reject("activation approval is not unused")
     if not isinstance(record.get("created"), int) or not isinstance(record.get("expires"), int):
         r.reject("activation approval clock is invalid")
-    if record["expires"] - record["created"] != 900 or not record["created"] <= now <= record["expires"]:
+    if record["expires"] - record["created"] != 900 or now < record["created"]:
         r.reject("activation approval expired")
     expected = dict(base, state="unused", created=record["created"], expires=record["expires"])
     expected["fingerprint"] = r.fingerprint(expected)
@@ -328,6 +328,8 @@ def approval_consume(path: Path, root: Path, base: dict[str, object], now: int, 
         if r.private_file(marker) != (record["fingerprint"] + "\n").encode():
             r.reject("activation approval consumption marker differs")
         return dict(record, state="consumed")
+    if now > record["expires"]:
+        r.reject("activation approval expired")
     fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as stream:
         stream.write((record["fingerprint"] + "\n").encode())
