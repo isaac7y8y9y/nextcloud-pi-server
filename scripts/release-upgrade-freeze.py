@@ -111,7 +111,7 @@ def authorize(path: Path, root: Path, base: dict[str, object], now: int, phase: 
     expected = artifact_record(base, record["created"])
     consumed = dict(expected, state="consumed")
     marker = root / f"used-release-{base['freeze_id']}-{record['created']}"
-    if phase == "releasing":
+    if phase == "releasing" or record == consumed:
         if record != consumed or r.private_file(marker) != (expected["fingerprint"] + "\n").encode():
             r.reject("interrupted release approval differs")
         return True
@@ -153,16 +153,19 @@ def main() -> int:
             path = plan(root, base, now)
             print(f"Redacted release plan: freeze={base['freeze_id']}\nApproval artifact: {path}")
             return 0
-        retry = authorize(args.approval, root, base, now, phase)
+        authorize(args.approval, root, base, now, phase)
         status = target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status")
-        if not retry and "maintenance: true" in status:
+        if phase == "active" and "maintenance: true" in status:
             if target.ops("upgrade-freeze", "maintenance-off", str(base["freeze_id"])) != {"state": "maintenance-off", "id": base["freeze_id"]}:
                 r.reject("protected maintenance-off result differs")
         elif "maintenance: false" not in status:
             r.reject("Nextcloud maintenance state is unknown")
-        if not retry:
+        if phase == "active":
             r.run([str(HERE / "health-check.sh"), "--caddyfile", str(args.caddyfile)], timeout=300)
-        if target.ops("upgrade-freeze", "release", str(base["freeze_id"])) != {"state": "released", "id": base["freeze_id"]}:
+        approval_bytes = r.private_file(args.approval)
+        approval_hash = r.digest(args.approval)
+        if target.ops("upgrade-freeze", "release", str(base["freeze_id"]), approval_hash,
+                      str(len(approval_bytes)), input_file=args.approval) != {"state": "released", "id": base["freeze_id"]}:
             r.reject("protected freeze release result differs")
         if target.ops("upgrade-freeze", "status") != {"state": "absent"}:
             r.reject("protected freeze remains after release")

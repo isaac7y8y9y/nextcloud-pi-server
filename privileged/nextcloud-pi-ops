@@ -133,7 +133,7 @@ install_record() { local temp; temp="$(/usr/bin/mktemp /etc/nextcloud-pi/.active
 active_prepare_abort() { local status="$1" tx="$ACTIVE_PREPARE_ABORT_TX"; trap - EXIT HUP INT TERM; [[ -z "$tx" ]] || /usr/bin/rm -rf --one-file-system -- "$tx"; exit "$status"; }
 
 cmd_version() { [[ $# == 0 ]] || invalid; reject_stdin; out version "${P[NEXTCLOUD_PI_BUNDLE_VERSION]}"; out manifest_sha256 "$(hash "$MANIFEST")"; }
-cmd_check() { local program resolved; [[ $# == 0 ]] || invalid; reject_stdin; validate_host; for program in /bin/bash /usr/bin/awk /usr/bin/basename /usr/bin/cp /usr/bin/dd /usr/bin/df /usr/bin/dirname /usr/bin/docker /usr/bin/dockerd /usr/bin/du /usr/bin/find /usr/bin/findmnt /usr/bin/flock /usr/bin/id /usr/bin/install /usr/bin/kill /usr/bin/mktemp /usr/bin/nohup /usr/bin/python3 /usr/bin/readlink /usr/bin/rm /usr/bin/sha256sum /usr/bin/sleep /usr/bin/stat /usr/bin/systemctl /usr/bin/tail /usr/bin/tar /usr/bin/tr; do [[ -x "$program" ]] || die "required program is unavailable"; resolved="$(/usr/bin/readlink -f "$program")"; [[ -f "$resolved" && ! -L "$resolved" && "$(uid "$resolved")" == 0 && "$(gid "$resolved")" == 0 ]] || die "required program is unsafe"; done; out status ok; }
+cmd_check() { local program resolved; [[ $# == 0 ]] || invalid; reject_stdin; validate_host; for program in /bin/bash /usr/bin/awk /usr/bin/basename /usr/bin/cp /usr/bin/curl /usr/bin/dd /usr/bin/df /usr/bin/dirname /usr/bin/docker /usr/bin/dockerd /usr/bin/du /usr/bin/find /usr/bin/findmnt /usr/bin/flock /usr/bin/id /usr/bin/install /usr/bin/kill /usr/bin/mktemp /usr/bin/nohup /usr/bin/python3 /usr/bin/readlink /usr/bin/rm /usr/bin/sha256sum /usr/bin/sleep /usr/bin/stat /usr/bin/systemctl /usr/bin/tail /usr/bin/tar /usr/bin/tr; do [[ -x "$program" ]] || die "required program is unavailable"; resolved="$(/usr/bin/readlink -f "$program")"; [[ -f "$resolved" && ! -L "$resolved" && "$(uid "$resolved")" == 0 && "$(gid "$resolved")" == 0 ]] || die "required program is unsafe"; done; out status ok; }
 cmd_protected_state() { [[ $# == 1 && "$1" != -* ]] || invalid; reject_stdin; local path expected; path="$(resource_path "$1")"; expected="$(resource_mode "$1")"; if [[ ! -e "$path" && ! -L "$path" ]]; then out state missing; out name "$1"; return; fi; protected_file "$path" "$expected"; protected_parents "$path"; out state present; out name "$1"; out sha256 "$(hash "$path")"; out uid 0; out gid 0; out mode "$expected"; }
 cmd_active_images_state() {
   [[ $# == 0 ]] || invalid; reject_stdin; "$VALIDATOR"
@@ -162,6 +162,7 @@ freeze_root() { state_dir upgrade-freeze; }
 freeze_current() { printf '%s/current.tsv' "$(freeze_root)"; }
 freeze_hold() { printf '%s/timer-held' "$(freeze_root)"; }
 freeze_used() { printf '%s/used-%s' "$(freeze_root)" "$1"; }
+freeze_release_approval() { printf '%s/release-approval-%s' "$(freeze_root)" "$1"; }
 freeze_field() { metadata "$(freeze_current)" "$1"; }
 freeze_write() {
   local file="$(freeze_current)" temporary
@@ -330,16 +331,93 @@ cmd_upgrade_freeze_activate() {
   out state active; out id "$id"; out table_sha256 "$table"
 }
 cmd_upgrade_freeze_release() {
-  [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" phase timer table current used
-  valid_id "$id" || invalid; lock; validate_host; freeze_require_current "$id"
+  [[ $# == 3 ]] || invalid
+  local id="$1" approval_hash="$2" approval_size="$3" phase timer table current used approval temp fields key name expected actual site
+  valid_id "$id" && valid_hash "$approval_hash" && [[ "$approval_size" =~ ^[1-9][0-9]{0,4}$ ]] && (( 10#$approval_size <= 16384 )) || invalid
+  lock; validate_host; freeze_require_current "$id"
   phase="$(freeze_field phase)"; timer="$(freeze_field timer_active)"; table="$(freeze_field table_sha256)"
   [[ "$phase" == active || "$phase" == releasing ]] || die "freeze activation is unresolved; manual recovery is required"
+  temp="$(/usr/bin/mktemp "$(freeze_root)/.release-approval.XXXXXX")"
+  fields="$temp.fields"
+  trap '/usr/bin/rm -f -- "$temp" "$temp.extra" "$fields"' EXIT
+  read_exact "$temp" "$approval_size"
+  [[ "$(hash "$temp")" == "$approval_hash" ]] || die "release approval content differs"
+  /usr/bin/python3 -I - "$temp" >"$fields" <<'PY' || die "release approval schema is invalid"
+import hashlib
+import json
+import re
+import sys
+
+with open(sys.argv[1], "rb") as stream:
+    raw = stream.read()
+record = json.loads(raw)
+keys = {"format", "host", "freeze_id", "freeze_table_sha256", "timer_was_active",
+        "compose_sha256", "caddy_sha256", "active_record_sha256", "source_lock_sha256",
+        "running", "actions", "exclusions", "state", "created", "expires", "fingerprint"}
+assert isinstance(record, dict) and set(record) == keys and record["state"] == "consumed"
+assert record["format"] == "upgrade-freeze-release-v1"
+assert record["actions"] == "maintenance-off,loopback-health,freeze-release,timer-restore"
+assert record["exclusions"] == "image-change,restore,prune,backup-deletion"
+assert type(record["created"]) is int and type(record["expires"]) is int
+assert record["expires"] == record["created"] + 900
+assert isinstance(record["running"], dict) and set(record["running"]) == {
+    "nextcloud-docker-app-1", "nextcloud-docker-db-1", "nextcloud-docker-caddy-1"}
+unused = dict(record, state="unused")
+fingerprint = unused.pop("fingerprint")
+assert re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+assert hashlib.sha256(json.dumps(unused, sort_keys=True, separators=(",", ":")).encode()).hexdigest() == fingerprint
+for key in ("freeze_table_sha256", "compose_sha256", "caddy_sha256",
+            "active_record_sha256", "source_lock_sha256"):
+    assert isinstance(record[key], str) and re.fullmatch(r"[0-9a-f]{64}", record[key])
+for name, identity in record["running"].items():
+    assert isinstance(identity, list) and len(identity) == 2
+    assert re.fullmatch(r"[0-9a-f]{64}", identity[0])
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", identity[1])
+for key in ("host", "freeze_id", "timer_was_active"):
+    assert isinstance(record[key], str) and re.fullmatch(r"[A-Za-z0-9_.-]+", record[key])
+for key in ("host", "freeze_id", "freeze_table_sha256", "timer_was_active",
+            "compose_sha256", "caddy_sha256", "active_record_sha256", "source_lock_sha256",
+            "created", "expires"):
+    print(f"{key}\t{record[key]}")
+for label, name in (("app", "nextcloud-docker-app-1"), ("db", "nextcloud-docker-db-1"),
+                    ("caddy", "nextcloud-docker-caddy-1")):
+    print(f"{label}_container_id\t{record['running'][name][0]}")
+    print(f"{label}_image_id\t{record['running'][name][1]}")
+PY
+  [[ "$(metadata "$fields" host)" == "${P[NEXTCLOUD_PI_SYSTEM_HOSTNAME]}" && "$(metadata "$fields" freeze_id)" == "$id" && "$(metadata "$fields" freeze_table_sha256)" == "$table" && "$(metadata "$fields" timer_was_active)" == "$timer" ]] || die "release approval freeze identity differs"
+  approval="$(freeze_release_approval "$id")"
+  if [[ -e "$approval" || -L "$approval" ]]; then
+    protected_file "$approval" 0600
+    [[ "$(<"$approval")" == "$approval_hash" ]] || die "another release approval was consumed"
+  else
+    [[ "$phase" == active && "$(metadata "$fields" created)" -le "$(/usr/bin/date -u +%s)" && "$(/usr/bin/date -u +%s)" -le "$(metadata "$fields" expires)" ]] || die "release approval expired or was not consumed before release"
+  fi
+  [[ "$(metadata "$fields" compose_sha256)" == "$(hash "${P[NEXTCLOUD_PI_PROJECT_DIR]}/docker-compose.yml")" && "$(metadata "$fields" caddy_sha256)" == "$(hash "${P[NEXTCLOUD_PI_PROJECT_DIR]}/caddy/Caddyfile")" ]] || die "release configuration differs"
+  "$VALIDATOR"; protected_file "$ACTIVE_RECORD" 0600
+  [[ "$(metadata "$fields" active_record_sha256)" == "$(hash "$ACTIVE_RECORD")" ]] || die "release active-image record differs"
+  [[ "$(metadata "$fields" source_lock_sha256)" == "$(/usr/bin/awk -F= '$1 == "NEXTCLOUD_ACTIVE_IMAGES_PROVENANCE_SHA256" {print $2}' "$ACTIVE_RECORD")" ]] || die "release source lock differs from active images"
+  for key in app db caddy; do
+    case "$key" in app) name="${P[NEXTCLOUD_PI_APP_CONTAINER]}"; expected=APP;; db) name="${P[NEXTCLOUD_PI_DB_CONTAINER]}"; expected=DB;; caddy) name="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}"; expected=CADDY;; esac
+    actual="$(/usr/bin/docker inspect "$name" --format '{{.Id}} {{.Image}} {{.State.Running}}')" || die "release container is missing"
+    [[ "$actual" == "$(metadata "$fields" "${key}_container_id") $(metadata "$fields" "${key}_image_id") true" ]] || die "release running container differs"
+    [[ "$(metadata "$fields" "${key}_image_id")" == "$(/usr/bin/awk -F= -v wanted="NEXTCLOUD_ACTIVE_IMAGES_${expected}_ID" '$1 == wanted {print $2}' "$ACTIVE_RECORD")" ]] || die "release running image differs from active record"
+  done
+  ! /usr/bin/docker port "${P[NEXTCLOUD_PI_APP_CONTAINER]}" 80/tcp >/dev/null 2>&1 || die "application port is published"
+  /usr/bin/docker exec "${P[NEXTCLOUD_PI_DB_CONTAINER]}" sh -eu -c 'test -n "${MYSQL_ROOT_PASSWORD:-}" && test -n "${MYSQL_DATABASE:-}"; export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mariadb --protocol=tcp --host=127.0.0.1 -uroot -N --batch "$MYSQL_DATABASE" -e "SELECT 1"' | /usr/bin/grep -Fxq 1 || die "database health failed; retain ingress freeze"
+  actual="$(/usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status)" || die "Nextcloud status failed; retain ingress freeze"
+  /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*installed:[[:space:]]*(true|yes)$' <<<"$actual" || die "Nextcloud is not installed"
+  /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*(false|no)$' <<<"$actual" || die "Nextcloud maintenance mode is still on"
+  /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*needsDbUpgrade:[[:space:]]*(false|no)$' <<<"$actual" || die "Nextcloud database upgrade remains"
+  site="$(/usr/bin/awk '$0 !~ /^[[:space:]]*(#|$)/ && $2 == "{" { count++; value=$1 } END { if (count == 1) print value; else exit 1 }' "${P[NEXTCLOUD_PI_PROJECT_DIR]}/caddy/Caddyfile")" || die "release Caddy site is invalid"
+  [[ "$site" =~ ^[A-Za-z0-9.-]+$ ]] || die "release Caddy site is unsafe"
+  /usr/bin/curl --fail --silent --show-error --max-time 10 --noproxy '*' --insecure --resolve "$site:443:127.0.0.1" "https://$site/" >/dev/null || die "loopback HTTPS health failed; retain ingress freeze"
   if [[ "$phase" == active ]]; then
     [[ "$(freeze_table_hash)" == "$table" ]] || die "upgrade firewall differs from its protected state"
     upgrade_fetch_release_allowed
     upgrade_stage_release_allowed
     [[ ! -e "$(active_marker)" && ! -L "$(active_marker)" ]] || die "an active-image transaction is unresolved; retain the ingress freeze"
     /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is still on"
+    if [[ ! -e "$approval" && ! -L "$approval" ]]; then printf '%s\n' "$approval_hash" >"$approval"; /usr/bin/chmod 0600 "$approval"; fi
     freeze_write "$id" releasing "$timer" "$table"
     /usr/sbin/nft delete table inet "$freeze_table" || die "could not release upgrade firewall"
   else
@@ -368,6 +446,8 @@ cmd_upgrade_freeze_release() {
     /usr/bin/install -m 0600 -o root -g root /dev/null "$used"
   fi
   /usr/bin/rm -f -- "$current"
+  /usr/bin/rm -f -- "$temp" "$fields"
+  trap - EXIT
   out state released; out id "$id"
 }
 upgrade_fetch_root() { state_dir upgrade-fetch; }

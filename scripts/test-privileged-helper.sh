@@ -159,7 +159,7 @@ if [[ "${GITHUB_ACTIONS:-}" == true && "$(uname -s)" == Linux ]]; then
   SOURCE_DIR="$(mktemp -d)"
   cleanup_fixture() { local status=$?; trap - EXIT HUP INT TERM; sudo rm -rf -- "$FIXTURE"; rm -rf -- "$SOURCE_DIR"; exit "$status"; }
   trap cleanup_fixture EXIT HUP INT TERM
-  sed -e "s|/etc/nextcloud-pi/privileged-policy.conf|$FIXTURE/policy|g" -e "s|/etc/nextcloud-pi/bundle-manifest.tsv|$FIXTURE/manifest|g" -e "s|/usr/local/libexec/nextcloud-pi-ops|$FIXTURE/ops|g" -e "s|/usr/local/libexec/nextcloud-pi-validate-active-images|$FIXTURE/validator|g" -e "s|/etc/nextcloud-pi/active-images.env|$FIXTURE/active-images.env|g" -e "s|/etc/nextcloud-pi/.active-images|$FIXTURE/.active-images|g" -e "s|/run/nextcloud-pi-locks|$FIXTURE/lock-root|g" -e "s|/var/lib/nextcloud-pi-ops|$FIXTURE/state|g" -e "s|/run/nextcloud-pi-ops|$FIXTURE/socket|g" -e "s|/etc/systemd/system|$FIXTURE/systemd|g" -e "s|/usr/bin/hostname|$FIXTURE/bin/hostname|g" -e "s|/usr/bin/findmnt|$FIXTURE/bin/findmnt|g" -e "s|/usr/bin/dockerd|$FIXTURE/bin/dockerd|g" -e "s|/usr/bin/docker|$FIXTURE/bin/docker|g" -e "s|/usr/bin/systemctl|$FIXTURE/bin/systemctl|g" -e "s|/usr/sbin/nft|$FIXTURE/bin/nft|g" -e "s|/usr/bin/df|$FIXTURE/bin/df|g" "$HELPER" >"$SOURCE_DIR/ops"
+  sed -e "s|/etc/nextcloud-pi/privileged-policy.conf|$FIXTURE/policy|g" -e "s|/etc/nextcloud-pi/bundle-manifest.tsv|$FIXTURE/manifest|g" -e "s|/usr/local/libexec/nextcloud-pi-ops|$FIXTURE/ops|g" -e "s|/usr/local/libexec/nextcloud-pi-validate-active-images|$FIXTURE/validator|g" -e "s|/etc/nextcloud-pi/active-images.env|$FIXTURE/active-images.env|g" -e "s|/etc/nextcloud-pi/.active-images|$FIXTURE/.active-images|g" -e "s|/run/nextcloud-pi-locks|$FIXTURE/lock-root|g" -e "s|/var/lib/nextcloud-pi-ops|$FIXTURE/state|g" -e "s|/run/nextcloud-pi-ops|$FIXTURE/socket|g" -e "s|/etc/systemd/system|$FIXTURE/systemd|g" -e "s|/usr/bin/hostname|$FIXTURE/bin/hostname|g" -e "s|/usr/bin/findmnt|$FIXTURE/bin/findmnt|g" -e "s|/usr/bin/dockerd|$FIXTURE/bin/dockerd|g" -e "s|/usr/bin/docker|$FIXTURE/bin/docker|g" -e "s|/usr/bin/curl|$FIXTURE/bin/curl|g" -e "s|/usr/bin/systemctl|$FIXTURE/bin/systemctl|g" -e "s|/usr/sbin/nft|$FIXTURE/bin/nft|g" -e "s|/usr/bin/df|$FIXTURE/bin/df|g" "$HELPER" >"$SOURCE_DIR/ops"
   cat >"$SOURCE_DIR/validator" <<EOF
 #!/bin/sh
 test ! -e '$FIXTURE/validator-fail'
@@ -204,23 +204,31 @@ elif [[ "\${1:-}:\${2:-}" == image:inspect ]]; then
 elif [[ "\${1:-}" == inspect ]]; then
   if [[ "\${*: -1}" == '{{.State.Running}}' ]]; then
     [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf 'true\n' || printf 'false\n'
+  elif [[ "\${*: -1}" == '{{.Id}} {{.Image}} {{.State.Running}}' ]]; then
+    printf '%064d sha256:%064d %s\n' 2 2 "\$( [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf true || printf false )"
   else
     printf 'sha256:%064d %s\n' 2 "\$( [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf true || printf false )"
   fi
 elif [[ "\${1:-}" == exec && "\${2:-}" == nextcloud-docker-* ]]; then
-  if [[ "\${2:-}" == nextcloud-docker-db-1 && -e '$FIXTURE/database-busy' ]]; then printf '1\n'
+  if [[ " \$* " == *'SELECT 1'* ]]; then printf '1\n'
+  elif [[ "\${2:-}" == nextcloud-docker-db-1 && -e '$FIXTURE/database-busy' ]]; then printf '1\n'
   elif [[ "\${2:-}" != nextcloud-docker-db-1 && -e '$FIXTURE/quiescence-busy' ]]; then printf '1\n'
   else printf '0\n'; fi
 elif [[ "\${1:-}:\${2:-}" == exec:--user ]]; then
   case "\${*: -1}" in
     --on) printf 'true\n' >'$FIXTURE/maintenance-state' ;;
     --off) printf 'false\n' >'$FIXTURE/maintenance-state' ;;
-    status) printf '  - maintenance: %s\n' "\$(cat '$FIXTURE/maintenance-state')" ;;
+    status) printf '  - installed: true\n  - maintenance: %s\n  - needsDbUpgrade: false\n' "\$(cat '$FIXTURE/maintenance-state')" ;;
     *) exit 2 ;;
   esac
 else
   exit 2
 fi
+EOF
+  cat >"$SOURCE_DIR/curl" <<EOF
+#!/bin/bash
+[[ ! -e '$FIXTURE/loopback-fail' ]] || exit 1
+[[ " \$* " == *' --resolve cloud.example.invalid:443:127.0.0.1 '* ]]
 EOF
   cat >"$SOURCE_DIR/systemctl" <<EOF
 #!/bin/bash
@@ -311,7 +319,7 @@ EOF
   sudo install -m 0700 -o root -g root "$SOURCE_DIR/ops" "$FIXTURE/ops"
   sudo install -m 0700 -o root -g root "$SOURCE_DIR/validator" "$FIXTURE/validator"
   sudo install -m 0700 -o root -g root "$SOURCE_DIR/launcher" "$FIXTURE/launcher"
-  for fake in hostname findmnt docker systemctl nft df dockerd; do sudo install -m 0700 -o root -g root "$SOURCE_DIR/$fake" "$FIXTURE/bin/$fake"; done
+  for fake in hostname findmnt docker curl systemctl nft df dockerd; do sudo install -m 0700 -o root -g root "$SOURCE_DIR/$fake" "$FIXTURE/bin/$fake"; done
   sudo install -m 0644 -o root -g root "$SOURCE_DIR/unit" "$FIXTURE/unit"
   sudo install -m 0644 -o root -g root "$SOURCE_DIR/dropin" "$FIXTURE/dropin"
   printf 'active\n' | sudo tee "$FIXTURE/service-state" >/dev/null
@@ -320,6 +328,8 @@ EOF
   printf 'nextcloud-data\n' | sudo tee "$FIXTURE/mount/nextcloud/data.txt" >/dev/null
   printf 'database-data\n' | sudo tee "$FIXTURE/mount/nextcloud_db/data.txt" >/dev/null
   printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null
+  sudo install -d -m 0700 -o root -g root "$FIXTURE/mount/nextcloud-docker/caddy"
+  printf 'cloud.example.invalid {\n}\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/caddy/Caddyfile" >/dev/null
   printf 'caddy-data\n' | sudo tee "$FIXTURE/volumes/caddy-data/data.txt" >/dev/null
   printf 'caddy-config\n' | sudo tee "$FIXTURE/volumes/caddy-config/config.txt" >/dev/null
   cat >"$SOURCE_DIR/policy" <<EOF
@@ -355,11 +365,55 @@ EOF
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/manifest" "$FIXTURE/manifest"
   sudo "$FIXTURE/ops" version | grep -Fx $'version\t1' >/dev/null
   sudo "$FIXTURE/ops" protected-state privileged-helper | grep -Fx $'state\tpresent' >/dev/null
-  printf 'NEXTCLOUD_ACTIVE_IMAGES_MODE=source\nNEXTCLOUD_ACTIVE_IMAGES_APP_TAG=nextcloud:30\nNEXTCLOUD_ACTIVE_IMAGES_APP_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_DB_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_CADDY_ID=sha256:%064d\n' 2 2 2 >"$SOURCE_DIR/active-images.env"
+  printf 'NEXTCLOUD_ACTIVE_IMAGES_MODE=source\nNEXTCLOUD_ACTIVE_IMAGES_PROVENANCE_SHA256=%064d\nNEXTCLOUD_ACTIVE_IMAGES_APP_TAG=nextcloud:30\nNEXTCLOUD_ACTIVE_IMAGES_APP_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_DB_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_CADDY_ID=sha256:%064d\n' 1 2 2 2 >"$SOURCE_DIR/active-images.env"
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/active-images.env" "$FIXTURE/active-images.env"
   sudo "$FIXTURE/ops" active-images-state | grep -Fx $'mode\tsource' >/dev/null
 
   sudo "$FIXTURE/ops" check | grep -Fx $'status\tok' >/dev/null
+  make_release_approval() {
+    local source_lock_override="${1:-}" path="$SOURCE_DIR/release-approval.json"
+    sudo python3 - "$FIXTURE" "$freeze_id" "$path" "$source_lock_override" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import socket
+import sys
+import time
+
+fixture, freeze_id, destination, override = sys.argv[1:]
+root = Path(fixture)
+freeze = dict(line.split("\t", 1) for line in (root / "state/upgrade-freeze/current.tsv").read_text().splitlines())
+active = root / "active-images.env"
+images = dict(line.split("=", 1) for line in active.read_text().splitlines())
+digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+container_id = f"{2:064d}"
+now = int(time.time())
+record = {
+    "format": "upgrade-freeze-release-v1", "host": socket.gethostname(),
+    "freeze_id": freeze_id, "freeze_table_sha256": freeze["table_sha256"],
+    "timer_was_active": freeze["timer_active"],
+    "compose_sha256": digest(root / "mount/nextcloud-docker/docker-compose.yml"),
+    "caddy_sha256": digest(root / "mount/nextcloud-docker/caddy/Caddyfile"),
+    "active_record_sha256": digest(active),
+    "source_lock_sha256": override or images["NEXTCLOUD_ACTIVE_IMAGES_PROVENANCE_SHA256"],
+    "running": {f"nextcloud-docker-{key}-1": [container_id, images[f"NEXTCLOUD_ACTIVE_IMAGES_{key.upper()}_ID"]]
+                for key in ("app", "db", "caddy")},
+    "actions": "maintenance-off,loopback-health,freeze-release,timer-restore",
+    "exclusions": "image-change,restore,prune,backup-deletion",
+    "state": "unused", "created": now, "expires": now + 900,
+}
+canonical = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+record["fingerprint"] = hashlib.sha256(canonical(record)).hexdigest()
+record["state"] = "consumed"
+Path(destination).write_bytes(canonical(record) + b"\n")
+PY
+    release_approval="$path"
+    release_hash="$(sudo sha256sum "$path" | awk '{print $1}')"
+    release_size="$(sudo stat -c %s "$path")"
+  }
+  release_with_approval() {
+    sudo cat "$release_approval" | sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" "$release_hash" "$release_size"
+  }
   freeze_id=20260910T000000Z-109
   sudo "$FIXTURE/ops" upgrade-freeze check "$freeze_id" | grep -Fx $'state\tavailable' >/dev/null
   sudo "$FIXTURE/ops" upgrade-freeze activate "$freeze_id" | grep -Fx $'state\tactive' >/dev/null
@@ -407,7 +461,7 @@ EOF
   sudo "$FIXTURE/ops" upgrade-fetch status "$fetch_id" | grep -Fx "$(printf 'fingerprint\t%s' "$fetch_fingerprint")" >/dev/null
   pre_record="$(sudo sha256sum "$FIXTURE/active-images.env" | awk '{print $1}')"
   pre_compose="$(sudo sha256sum "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" | awk '{print $1}')"
-  printf 'NEXTCLOUD_ACTIVE_IMAGES_MODE=source\nNEXTCLOUD_ACTIVE_IMAGES_APP_TAG=nextcloud:31.0.14-apache\nNEXTCLOUD_ACTIVE_IMAGES_APP_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_DB_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_CADDY_ID=sha256:%064d\n' 2 2 2 >"$SOURCE_DIR/candidate-active.env"
+  printf 'NEXTCLOUD_ACTIVE_IMAGES_MODE=source\nNEXTCLOUD_ACTIVE_IMAGES_PROVENANCE_SHA256=%064d\nNEXTCLOUD_ACTIVE_IMAGES_APP_TAG=nextcloud:31.0.14-apache\nNEXTCLOUD_ACTIVE_IMAGES_APP_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_DB_ID=sha256:%064d\nNEXTCLOUD_ACTIVE_IMAGES_CADDY_ID=sha256:%064d\n' 1 2 2 2 >"$SOURCE_DIR/candidate-active.env"
   printf 'candidate compose\n' >"$SOURCE_DIR/candidate-compose.yml"
   candidate_record="$(sha256sum "$SOURCE_DIR/candidate-active.env" | awk '{print $1}')"
   candidate_compose="$(sha256sum "$SOURCE_DIR/candidate-compose.yml" | awk '{print $1}')"
@@ -534,8 +588,20 @@ EOF
     exit 1
   fi
   sudo "$FIXTURE/ops" upgrade-freeze maintenance-off "$freeze_id" | grep -Fx $'state\tmaintenance-off' >/dev/null
+  make_release_approval "$(printf '%064d' 9)"
+  if release_with_approval >/dev/null 2>&1; then
+    printf 'upgrade freeze accepted an approval with the wrong source lock\n' >&2
+    exit 1
+  fi
+  make_release_approval
+  sudo touch "$FIXTURE/loopback-fail"
+  if release_with_approval >/dev/null 2>&1; then
+    printf 'upgrade freeze released without loopback HTTPS health\n' >&2
+    exit 1
+  fi
+  sudo rm -- "$FIXTURE/loopback-fail"
   sudo touch "$FIXTURE/nft-delete-fail"
-  if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then
+  if release_with_approval >/dev/null 2>&1; then
     printf 'upgrade freeze ignored firewall deletion failure\n' >&2
     exit 1
   fi
@@ -543,7 +609,7 @@ EOF
   sudo rm -- "$FIXTURE/nft-table"
   sudo env -u SUDO_USER "$FIXTURE/ops" upgrade-freeze-boot-guard
   sudo test -f "$FIXTURE/nft-table" || { printf 'boot guard did not restore interrupted release firewall\n' >&2; exit 1; }
-  sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" | grep -Fx $'state\treleased' >/dev/null
+  release_with_approval | grep -Fx $'state\treleased' >/dev/null
   sudo test ! -e "$FIXTURE/state/upgrade-freeze/timer-held"
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/active-images.env" "$FIXTURE/active-images.env"
   printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null

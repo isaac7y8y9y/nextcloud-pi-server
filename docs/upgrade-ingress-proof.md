@@ -89,9 +89,13 @@ container identities, and the tracked source image lock to a private,
 single-use 15-minute approval. A newly accepted candidate cannot release
 until its candidate lock has become the reviewed local source lock; do not
 silently edit that lock during activation. The driver turns
-maintenance off only if still on, checks Pi loopback health, then asks the
-protected dispatcher to release and verifies the rule is absent and the
-timer has its prior state. It does **not** create the LAN denial proof or
+maintenance off only if still on, checks Pi loopback health, then streams the
+consumed approval to the protected dispatcher. The dispatcher independently
+checks the bound freeze, configuration, active record, running containers,
+source-lock provenance, and loopback HTTPS before recording the single-use
+approval and removing the rule. The driver verifies the rule is absent and
+the timer has its prior state. A direct `upgrade-freeze release <id>` call
+without the approval is denied. This does **not** create the LAN denial proof or
 authorize release without the separate measured test and reviewed approval.
 If it fails after maintenance-off, keep the freeze and form a new approval
 from the changed state; if release has begun, inspect the protected phase

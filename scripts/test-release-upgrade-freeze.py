@@ -18,13 +18,15 @@ with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     path = release.plan(root, base, 1000)
     assert release.authorize(path, root, base, 1001, "active") is False
+    assert release.authorize(path, root, base, 1002, "active") is True
     assert release.authorize(path, root, base, 1002, "releasing") is True
+    (root / f"used-release-{base['freeze_id']}-1000").unlink()
     try:
         release.authorize(path, root, base, 1002, "active")
     except release.r.RecoveryError:
         pass
     else:
-        raise AssertionError("consumed approval replayed")
+        raise AssertionError("consumed approval without its marker was accepted")
     tampered = release.plan(root, base, 2000)
     try:
         release.authorize(tampered, root, dict(base, timer_was_active="no"), 2001, "active")
@@ -109,4 +111,5 @@ source = Path(__file__).with_name("release-upgrade-freeze.py").read_text()
 assert source.index('authorize(args.approval, root, base, now, phase)') < source.index('target.ops("upgrade-freeze", "maintenance-off"')
 assert source.index('r.run([str(HERE / "health-check.sh")') < source.index('target.ops("upgrade-freeze", "release"')
 assert source.index('target.ops("upgrade-freeze", "release"') < source.index('target.ops("upgrade-freeze", "status") != {"state": "absent"}')
+assert 'str(len(approval_bytes)), input_file=args.approval' in source
 print("freeze release approval tests passed")
