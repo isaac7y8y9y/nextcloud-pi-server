@@ -146,7 +146,7 @@ cmd_active_images_state() {
     out "${key,,}_id" "$(/usr/bin/awk -F= -v wanted="NEXTCLOUD_ACTIVE_IMAGES_${key}_ID" '$1 == wanted { print $2 }' "$ACTIVE_RECORD")"
   done
 }
-cmd_service() { [[ $# == 1 ]] || invalid; reject_stdin; lock; validate_host; case "$1" in start|restart) db_cutover_startup_guard; runtime_recovery_startup_guard; /usr/bin/systemctl "$1" "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "service is not active";; stop) /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "service did not stop";; *) invalid;; esac; out state "$1"; }
+cmd_service() { [[ $# == 1 ]] || invalid; reject_stdin; lock; validate_host; case "$1" in start|restart) db_cutover_startup_guard; runtime_recovery_startup_guard; upgrade_stage_startup_guard; /usr/bin/systemctl "$1" "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "service is not active";; stop) /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "service did not stop";; *) invalid;; esac; out state "$1"; }
 background_jobs_timer=nextcloud-background-jobs.timer
 background_jobs_service=nextcloud-background-jobs.service
 cmd_background_jobs_state() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; if /usr/bin/systemctl is-enabled --quiet "$background_jobs_timer"; then out timer_enabled yes; else out timer_enabled no; fi; if /usr/bin/systemctl is-active --quiet "$background_jobs_timer"; then out timer_active yes; else out timer_active no; fi; }
@@ -992,7 +992,24 @@ db_cutover_startup_guard() {
     case "$phase" in aborted|accepted|recovered|preparing|prepared|candidate-ready|starting|running|source-ready) ;; *) die "database cutover has not reached a safe startup phase" ;; esac
   done
 }
-cmd_upgrade_startup_guard() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; db_cutover_startup_guard; runtime_recovery_startup_guard; out state permitted; }
+upgrade_stage_startup_guard() {
+  local root="$(upgrade_stage_root)" file id phase target
+  [[ ! -e "$root" && ! -L "$root" ]] && return
+  safe_dir "$root"
+  for file in "$root"/*.tsv; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    protected_file "$file" 0600
+    id="${file##*/}"; id="${id%.tsv}"
+    valid_id "$id" && [[ "$(metadata "$file" format)" == upgrade-stage-v1 && "$(metadata "$file" id)" == "$id" ]] || die "upgrade stage journal is invalid"
+    phase="$(metadata "$file" phase)"; target="$(metadata "$file" target)"
+    [[ "$target" == app || "$target" == caddy || "$target" == db ]] || die "upgrade stage target is invalid"
+    case "$phase" in prepared|runtime-may-have-changed|accepted|aborted|recovered) ;; *) die "upgrade stage phase is invalid" ;; esac
+    if [[ "$phase" == prepared && "$target" != db ]]; then
+      die "prepared upgrade stage blocks runtime startup until boundary or abort"
+    fi
+  done
+}
+cmd_upgrade_startup_guard() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; db_cutover_startup_guard; runtime_recovery_startup_guard; upgrade_stage_startup_guard; out state permitted; }
 upgrade_stage_file() { printf '%s/%s.tsv' "$(upgrade_stage_root)" "$1"; }
 upgrade_stage_compose_hash() {
   local file="${P[NEXTCLOUD_PI_PROJECT_DIR]}/docker-compose.yml"
@@ -1239,8 +1256,8 @@ recovery_non_db_write() {
 }
 cmd_recovery_detach() {
   [[ $# == 2 ]] || invalid; reject_stdin
-  local id="$1" fingerprint="$2" state file phase key name details actual image running project restart expected
-  local ids=() data config
+  local id="$1" fingerprint="$2" state file phase key name details actual image running project expected prior
+  local ids=() data config transaction source_record missing_id
   valid_id "$id" && valid_hash "$fingerprint" || invalid
   lock; validate_host; upgrade_stage_require "$id"
   [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not recoverable"
@@ -1253,12 +1270,24 @@ cmd_recovery_detach() {
   data="$(metadata "$file" caddy_data_path)"; config="$(metadata "$file" caddy_config_path)"
   [[ "$data" == /* && "$config" == /* ]] || die "runtime Caddy paths are unsafe"
   if [[ "$phase" == prepared ]]; then
+    require_active_tx "$id"; transaction="$(active_tx "$id")"
+    protected_file "$transaction/snapshot" 0600; protected_file "$transaction/metadata.tsv" 0600
+    [[ "$(hash "$transaction/snapshot")" == "$(upgrade_stage_field "$id" pre_record_sha256)" &&
+       "$(metadata "$transaction/metadata.tsv" pre_sha256)" == "$(upgrade_stage_field "$id" pre_record_sha256)" &&
+       "$(metadata "$transaction/metadata.tsv" candidate_sha256)" == "$(upgrade_stage_field "$id" candidate_record_sha256)" &&
+       "$(metadata "$transaction/metadata.tsv" state)" == applied &&
+       "$(live_hash)" == "$(upgrade_stage_field "$id" candidate_record_sha256)" ]] || die "source and candidate active records differ from recovery stage"
+    source_record="$transaction/snapshot"
+    missing_id="$(printf '0%.0s' {1..64})"
+    /usr/bin/docker info >/dev/null || die "Docker is unavailable during runtime recovery"
     for key in APP DB CADDY; do
       case "$key" in APP) name="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; DB) name="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; CADDY) name="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
-      details="$(/usr/bin/docker inspect --format '{{.Id}} {{.Image}} {{.State.Running}} {{index .Config.Labels "com.docker.compose.project"}}' "$name")" || die "candidate runtime container is missing"
+      details="$(/usr/bin/docker inspect --format '{{.Id}} {{.Image}} {{.State.Running}} {{index .Config.Labels "com.docker.compose.project"}}' "$name" 2>/dev/null || true)"
+      if [[ -z "$details" ]]; then ids+=("$missing_id"); continue; fi
       read -r actual image running project <<<"$details"
       expected="$(/usr/bin/awk -F= -v wanted="NEXTCLOUD_ACTIVE_IMAGES_${key}_ID" '$1 == wanted {print $2}' "$ACTIVE_RECORD")"
-      [[ "$actual" =~ ^[0-9a-f]{64}$ && "$image" == "$expected" && "$project" == "${P[NEXTCLOUD_PI_PROJECT_DIR]##*/}" && ( "$running" == true || "$running" == false ) ]] || die "candidate runtime container identity differs"
+      prior="$(/usr/bin/awk -F= -v wanted="NEXTCLOUD_ACTIVE_IMAGES_${key}_ID" '$1 == wanted {print $2}' "$source_record")"
+      [[ "$actual" =~ ^[0-9a-f]{64}$ && ( "$image" == "$expected" || ( "${key,,}" == "$(upgrade_stage_field "$id" target)" && "$image" == "$prior" ) ) && "$project" == "${P[NEXTCLOUD_PI_PROJECT_DIR]##*/}" && ( "$running" == true || "$running" == false ) ]] || die "runtime container image differs from both stage-bound identities"
       ids+=("$actual")
       /usr/bin/docker update --restart=no "$name" >/dev/null
     done
@@ -1266,8 +1295,12 @@ cmd_recovery_detach() {
     [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "candidate service remains active"
     for key in APP DB CADDY; do
       case "$key" in APP) name="${P[NEXTCLOUD_PI_APP_CONTAINER]}"; expected="${ids[0]}";; DB) name="${P[NEXTCLOUD_PI_DB_CONTAINER]}"; expected="${ids[1]}";; CADDY) name="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}"; expected="${ids[2]}";; esac
-      details="$(/usr/bin/docker inspect --format '{{.Id}} {{.State.Running}} {{.HostConfig.RestartPolicy.Name}}' "$name")" || die "candidate runtime container disappeared before checkpoint"
-      [[ "$details" == "$expected false no" ]] || die "candidate runtime container did not stop safely"
+      details="$(/usr/bin/docker inspect --format '{{.Id}} {{.State.Running}} {{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || true)"
+      if [[ "$expected" == "$missing_id" ]]; then
+        [[ -z "$details" ]] || die "runtime container appeared after its absent checkpoint"
+      else
+        [[ "$details" == "$expected false no" ]] || die "runtime container did not stop safely"
+      fi
     done
     recovery_non_db_write "$file" detaching "$id" "${ids[0]}" "${ids[1]}" "${ids[2]}" "$data" "$config"
   else

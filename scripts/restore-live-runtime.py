@@ -407,7 +407,7 @@ def resume(target: Target, base: dict[str, object], candidate: Path, source: Pat
     stage = target.ops("upgrade-stage", "status", stage_id)
     if (freeze.get("state") != "active" or freeze.get("id") != base.get("freeze_id") or
             freeze.get("table_sha256") != base.get("freeze_table_sha256") or
-            stage.get("phase") != "runtime-may-have-changed" or
+            stage.get("phase") not in ("runtime-may-have-changed", "recovered") or
             stage.get("fingerprint") != base.get("stage_fingerprint")):
         reject("restore resume stage or ingress freeze differs")
     if target.ops("background-jobs", "state").get("timer_active") != "no":
@@ -422,6 +422,30 @@ def resume(target: Target, base: dict[str, object], candidate: Path, source: Pat
     recovery = target.ops("runtime-recovery", "status", stage_id)
     if recovery.get("id") != stage_id:
         reject("runtime recovery identity differs")
+    if stage["phase"] == "recovered":
+        if (not base.get("db_prepare_fingerprint") or cutover.get("phase") != "source-ready" or
+                recovery.get("state") != "promoted"):
+            reject("final database recovery checkpoint differs")
+        if (remote_hash(target, target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] + "/docker-compose.yml") != local["source_compose"] or
+                remote_hash(target, target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] + "/caddy/Caddyfile") != local["source_caddy"] or
+                target.ops("active-images-state").get("sha256") != local["source_record"]):
+            reject("restored runtime configuration differs at final checkpoint")
+        if target.ssh("systemctl is-active nextcloud.service 2>/dev/null || true") != "active":
+            reject("restored Nextcloud service is not active")
+        old_ids = local["old_ids"]
+        assert isinstance(old_ids, dict)
+        for key, name in (("APP", "nextcloud-docker-app-1"), ("DB", "nextcloud-docker-db-1"),
+                          ("CADDY", "nextcloud-docker-caddy-1")):
+            if target.ssh("docker inspect --format '{{.Image}} {{.State.Running}}' " + q(name)) != old_ids[key] + " true":
+                reject("restored running image identity differs")
+        if "maintenance: false" not in target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status"):
+            reject("restored Nextcloud remains in maintenance mode")
+        checked(target, "! docker port nextcloud-docker-app-1 80/tcp >/dev/null 2>&1")
+        run([str(ROOT / "scripts/health-check.sh"), "--caddyfile", str(config_backup / "caddy/Caddyfile")], timeout=300)
+        if target.ops("db-cutover", "recovered", stage_id,
+                      str(base["db_prepare_fingerprint"]), str(base["stage_fingerprint"])) != {"phase": "recovered", "id": stage_id}:
+            reject("protected database recovery completion differs")
+        return
     if recovery.get("state") == "prepared":
         database_stage = bool(base.get("db_prepare_fingerprint"))
         compose_allowed = (local["source_compose"], local["candidate_compose"]) if database_stage else (local["candidate_compose"],)

@@ -122,8 +122,12 @@ If an interrupted restore is still in the protected `prepared` phase,
 `--resume` checks the consumed approval and current stage/freeze, removes only
 the identity-bound temporary import container, resets the isolated staged
 datasets, and restarts the restore. It never discards the live or preserved
-failed runtime. For app/Caddy stages, the root dispatcher disables container
-restart policies, stops the service, and removes the identity-checked stack
+failed runtime. A prepared app/Caddy activation stage blocks service startup;
+an interrupted configuration switch must reach its protected boundary or be
+aborted before Compose can restart. For app/Caddy recovery, the root dispatcher
+accepts only stage-bound prior or candidate image identity for the target
+container, tolerates an already absent container, disables restart policies on
+existing objects, stops the service, and removes the identity-checked stack
 objects before recording a detached checkpoint. Docker may restart during a
 detached, Caddy-copying, or promoting phase so recovery can resume, but the Compose launcher
 remains blocked until all four runtime datasets and prior configuration are
@@ -134,6 +138,10 @@ If promotion already completed and the database journal reached
 start and health without repeating promotion or that startup gate. App/Caddy
 recovery has its own `source-ready` checkpoint before service start. Both paths
 retain the ingress freeze until verified recovery.
+If the upgrade stage was marked recovered but the database cutover journal is
+still `source-ready`, the same consumed approval can resume the final journal
+transition after rechecking the prior configuration, running image IDs,
+maintenance state, and loopback health; it does not restart the stack.
 For a database cutover, restoration first finishes any interrupted directory
 placement under the closed startup gate, removes candidate container objects,
 and then promotes all four datasets. The protected journal permits Docker to

@@ -31,6 +31,8 @@ class FakeTarget:
         self.recovery_phase = recovery_phase
         self.cutover_phase = ""
         self.cutover_prepare_fingerprint = ""
+        self.stage_phase = "runtime-may-have-changed"
+        self.service_status = "inactive"
         self.fail_recovery_detach = False
         self.calls: list[str] = []
         self.inputs: list[bytes] = []
@@ -56,12 +58,15 @@ class FakeTarget:
             return restore.digest(self.files[name]) + "  staged-file"
         if "occ status" in command:
             return "  - maintenance: false"
+        if command.startswith("docker inspect --format '{{.Image}} {{.State.Running}}'"):
+            key = "APP" if "-app-1" in command else "DB" if "-db-1" in command else "CADDY"
+            return list(self.old.values())[("APP", "DB", "CADDY").index(key)] + " true"
         if command == "hostname":
             return "pi.example.invalid"
         if command == "id -un":
             return "test"
         if command.startswith("systemctl is-active nextcloud.service"):
-            return "inactive"
+            return self.service_status
         return ""
 
     def ops(self, *args: str, **_kwargs: object) -> dict[str, str]:
@@ -91,7 +96,9 @@ class FakeTarget:
         if args[:1] == ("active-images-state",):
             return {"sha256": self.source_record}
         if args[:2] == ("upgrade-stage", "status"):
-            return {"phase": "runtime-may-have-changed", "fingerprint": "f" * 64}
+            return {"phase": self.stage_phase, "fingerprint": "f" * 64}
+        if args[:2] == ("upgrade-stage", "recovered"):
+            self.stage_phase = "recovered"
         if args[:2] == ("upgrade-freeze", "status"):
             return {"state": "active", "id": "20260926T000000Z-999", "table_sha256": "b" * 64}
         if args[:2] == ("background-jobs", "state"):
@@ -352,6 +359,56 @@ class ApprovalTests(unittest.TestCase):
                              call.startswith("ops db-cutover source-ready") for call in target.calls))
         self.assertIn("ops service start", target.calls)
         self.assertEqual(target.cutover_phase, "recovered")
+
+    def test_interrupted_final_database_journal_transition_resumes_without_restart(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        target.recovery_phase = "promoted"
+        target.cutover_phase = "source-ready"
+        target.cutover_prepare_fingerprint = "b" * 64
+        target.stage_phase = "recovered"
+        target.service_status = "active"
+        base.update(host="pi.example.invalid", freeze_id="20260926T000000Z-999",
+                    freeze_table_sha256="b" * 64, project=target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"],
+                    mount=target.config["NEXTCLOUD_STORAGE_MOUNT"], db_prepare_fingerprint="b" * 64,
+                    db_cutover_identity={})
+        base["evidence"]["env_sha256"] = "e" * 64
+        artifact = restore.plan(self.root, base, 1000)
+        consumed = restore.consume(artifact, self.root, base, 1001)
+        def remote_hash(_target, path):
+            name = path.rsplit("/", 1)[-1]
+            return "e" * 64 if name == ".env" else restore.digest(target.files[name])
+        with mock.patch.object(restore, "verify_local", return_value=base["evidence"]), \
+             mock.patch.object(restore, "remote_hash", side_effect=remote_hash), \
+             mock.patch.object(restore, "run", return_value=""):
+            restore.resume(target, consumed, self.root / "candidate", source, config, runtime, images)
+        self.assertEqual(target.cutover_phase, "recovered")
+        self.assertFalse(any(call.startswith("ops service ") or call.startswith("ops runtime-recovery promote")
+                             for call in target.calls))
+        self.assertFalse(any("upgrade-freeze release" in call for call in target.calls))
+
+    def test_final_database_journal_resume_requires_health(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        target.recovery_phase = "promoted"
+        target.cutover_phase = "source-ready"
+        target.cutover_prepare_fingerprint = "b" * 64
+        target.stage_phase = "recovered"
+        target.service_status = "active"
+        base.update(host="pi.example.invalid", freeze_id="20260926T000000Z-999",
+                    freeze_table_sha256="b" * 64, project=target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"],
+                    mount=target.config["NEXTCLOUD_STORAGE_MOUNT"], db_prepare_fingerprint="b" * 64,
+                    db_cutover_identity={})
+        base["evidence"]["env_sha256"] = "e" * 64
+        artifact = restore.plan(self.root, base, 1000)
+        consumed = restore.consume(artifact, self.root, base, 1001)
+        def remote_hash(_target, path):
+            name = path.rsplit("/", 1)[-1]
+            return "e" * 64 if name == ".env" else restore.digest(target.files[name])
+        with mock.patch.object(restore, "verify_local", return_value=base["evidence"]), \
+             mock.patch.object(restore, "remote_hash", side_effect=remote_hash), \
+             mock.patch.object(restore, "run", side_effect=restore.RecoveryError("injected health failure")):
+            with self.assertRaisesRegex(restore.RecoveryError, "health failure"):
+                restore.resume(target, consumed, self.root / "candidate", source, config, runtime, images)
+        self.assertEqual(target.cutover_phase, "source-ready")
 
     def test_consumed_approval_resets_prepared_restore_before_retry(self) -> None:
         target, base, source, config, runtime, images = self.fixture()

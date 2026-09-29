@@ -14,7 +14,7 @@ fingerprint="$(printf 'a%.0s' {1..64})"
 export RECOVERY_FINGERPRINT="$fingerprint"
 
 for name in recovery_non_db_objects_absent recovery_non_db_write cmd_recovery_detach \
-            runtime_recovery_startup_guard cmd_upgrade_freeze_boot_guard cmd_recovery_source_ready \
+            runtime_recovery_startup_guard upgrade_stage_startup_guard cmd_upgrade_freeze_boot_guard cmd_recovery_source_ready \
             cmd_recovery_promote; do
   definition="$(sed -n "/^${name}() {/,/^}/p" "$root/privileged/nextcloud-pi-ops")"
   [[ -n "$definition" ]] || exit 1
@@ -43,6 +43,7 @@ container_key() {
 }
 container_id() { case "$1" in app) printf '%.0s1' {1..64};; db) printf '%.0s2' {1..64};; caddy) printf '%.0s3' {1..64};; esac; }
 image_id() { case "$1" in app) printf 'sha256:%.0s4' {1..64};; db) printf 'sha256:%.0s5' {1..64};; caddy) printf 'sha256:%.0s6' {1..64};; esac; }
+prior_app_id() { printf 'sha256:%.0s7' {1..64}; }
 docker_fake() {
   local operation="$1" key name format
   shift
@@ -53,7 +54,7 @@ docker_fake() {
       key="$(container_key "$name")" || return 1
       [[ -f "$RECOVERY_FIXTURE/$key.present" ]] || return 1
       if [[ "$format" == *'.Image'* ]]; then
-        printf '%s %s %s nextcloud-docker\n' "$(container_id "$key")" "$(image_id "$key")" "$(<"$RECOVERY_FIXTURE/$key.running")"
+        printf '%s %s %s nextcloud-docker\n' "$(container_id "$key")" "$(if [[ -f "$RECOVERY_FIXTURE/$key.image" ]]; then printf '%s' "$(<"$RECOVERY_FIXTURE/$key.image")"; else image_id "$key"; fi)" "$(<"$RECOVERY_FIXTURE/$key.running")"
       elif [[ "$format" == *'RestartPolicy.Name'* ]]; then
         printf '%s %s %s\n' "$(container_id "$key")" "$(<"$RECOVERY_FIXTURE/$key.running")" "$(<"$RECOVERY_FIXTURE/$key.restart")"
       fi
@@ -95,9 +96,13 @@ install_fake() {
   /usr/bin/install "${arguments[@]}"
 }
 metadata() { awk -F $'\t' -v wanted="$2" '$1 == wanted {print $2; found=1; exit} END {if (!found) exit 1}' "$1"; }
-upgrade_stage_file() { printf '%s/stage.tsv' "$RECOVERY_FIXTURE"; }
-upgrade_stage_field() { metadata "$(upgrade_stage_file)" "$2"; }
-upgrade_stage_require() { protected_file "$(upgrade_stage_file)" 0600; }
+upgrade_stage_root() { printf '%s/upgrade-stage' "$RECOVERY_FIXTURE"; }
+upgrade_stage_file() { printf '%s/%s.tsv' "$(upgrade_stage_root)" "$1"; }
+upgrade_stage_field() { metadata "$(upgrade_stage_file "$1")" "$2"; }
+upgrade_stage_require() { protected_file "$(upgrade_stage_file "$1")" 0600; }
+active_tx() { printf '%s/active-record/%s' "$RECOVERY_FIXTURE" "$1"; }
+require_active_tx() { safe_dir "$(active_tx "$1")"; }
+hash() { printf 'b%.0s' {1..64}; }
 recovery_state() { printf '%s/runtime-recovery/%s' "$RECOVERY_FIXTURE" "$1"; }
 recovery_root() { printf '%s/storage/.recovery-%s' "$RECOVERY_FIXTURE" "$1"; }
 safe_recovery_root() { safe_dir "$1"; }
@@ -112,37 +117,44 @@ safe_dir() { [[ -d "$1" && ! -L "$1" ]]; }
 lock() { :; }
 validate_host() { :; }
 reject_stdin() { :; }
-live_hash() { printf '%s' "$(printf 'b%.0s' {1..64})"; }
+live_hash() { printf '%s' "$(<"$RECOVERY_FIXTURE/live-record-hash")"; }
 upgrade_stage_compose_hash() { printf '%s' "$(printf 'c%.0s' {1..64})"; }
 out() { :; }
 invalid() { return 2; }
 die() { printf '%s\n' "$1" >&2; return 1; }
 
-mkdir -p "$fixture/runtime-recovery/$RECOVERY_STAGE" "$fixture/storage/nextcloud" \
+mkdir -p "$fixture/runtime-recovery/$RECOVERY_STAGE" "$fixture/upgrade-stage" \
+  "$fixture/active-record/$RECOVERY_STAGE" "$fixture/storage/nextcloud" \
   "$fixture/storage/nextcloud_db" "$fixture/caddy-data" "$fixture/caddy-config"
-printf 'format\tupgrade-stage-v1\nid\t%s\nphase\truntime-may-have-changed\ntarget\tapp\nfingerprint\t%s\npre_record_sha256\t%s\npre_compose_sha256\t%s\n' \
-  "$RECOVERY_STAGE" "$fingerprint" "$(printf 'b%.0s' {1..64})" "$(printf 'c%.0s' {1..64})" >"$fixture/stage.tsv"
+printf 'format\tupgrade-stage-v1\nid\t%s\nphase\truntime-may-have-changed\ntarget\tapp\nfingerprint\t%s\npre_record_sha256\t%s\npre_compose_sha256\t%s\ncandidate_record_sha256\t%s\n' \
+  "$RECOVERY_STAGE" "$fingerprint" "$(printf 'b%.0s' {1..64})" "$(printf 'c%.0s' {1..64})" "$(printf 'd%.0s' {1..64})" >"$(upgrade_stage_file "$RECOVERY_STAGE")"
+printf 'format\tactive-record-v1\nstate\tapplied\npre_sha256\t%s\ncandidate_sha256\t%s\n' \
+  "$(printf 'b%.0s' {1..64})" "$(printf 'd%.0s' {1..64})" >"$(active_tx "$RECOVERY_STAGE")/metadata.tsv"
+printf '%s\n' "$(printf 'd%.0s' {1..64})" >"$fixture/live-record-hash"
 printf 'format\truntime-recovery-v1\nstate\tprepared\nstage_id\t%s\ncaddy_data_path\t%s\ncaddy_config_path\t%s\n' \
   "$RECOVERY_STAGE" "$fixture/caddy-data" "$fixture/caddy-config" >"$fixture/runtime-recovery/$RECOVERY_STAGE/metadata.tsv"
 for item in nextcloud caddy-data caddy-config database; do printf 'complete\n' >"$fixture/runtime-recovery/$RECOVERY_STAGE/$item.complete"; done
 for key in app db caddy; do
-  printf 'yes\n' >"$fixture/$key.present"
+  if [[ "$key" != caddy ]]; then printf 'yes\n' >"$fixture/$key.present"; fi
   printf 'false\n' >"$fixture/$key.running"
   printf 'always\n' >"$fixture/$key.restart"
 done
+printf '%s\n' "$(prior_app_id)" >"$fixture/app.image"
 printf 'NEXTCLOUD_ACTIVE_IMAGES_APP_ID=%s\nNEXTCLOUD_ACTIVE_IMAGES_DB_ID=%s\nNEXTCLOUD_ACTIVE_IMAGES_CADDY_ID=%s\n' \
   "$(image_id app)" "$(image_id db)" "$(image_id caddy)" >"$fixture/active-images.env"
-chmod 600 "$fixture/stage.tsv" "$fixture/runtime-recovery/$RECOVERY_STAGE/metadata.tsv" "$fixture/runtime-recovery/$RECOVERY_STAGE/"*.complete
+printf 'NEXTCLOUD_ACTIVE_IMAGES_APP_ID=%s\nNEXTCLOUD_ACTIVE_IMAGES_DB_ID=%s\nNEXTCLOUD_ACTIVE_IMAGES_CADDY_ID=%s\n' \
+  "$(prior_app_id)" "$(image_id db)" "$(image_id caddy)" >"$(active_tx "$RECOVERY_STAGE")/snapshot"
+chmod 600 "$(upgrade_stage_file "$RECOVERY_STAGE")" "$(active_tx "$RECOVERY_STAGE")/metadata.tsv" "$(active_tx "$RECOVERY_STAGE")/snapshot" "$fixture/runtime-recovery/$RECOVERY_STAGE/metadata.tsv" "$fixture/runtime-recovery/$RECOVERY_STAGE/"*.complete
 export ACTIVE_RECORD="$fixture/active-images.env"
 freeze_table=nextcloud_pi_upgrade
 
 for function_name in recovery_non_db_objects_absent recovery_non_db_write cmd_recovery_detach \
-  runtime_recovery_startup_guard cmd_upgrade_freeze_boot_guard cmd_recovery_source_ready \
+  runtime_recovery_startup_guard upgrade_stage_startup_guard cmd_upgrade_freeze_boot_guard cmd_recovery_source_ready \
   cmd_recovery_promote recovery_promote_pair recovery_promote_pair_original \
-  container_key container_id image_id docker_fake systemctl_fake cp_fake install_fake metadata upgrade_stage_file \
+  container_key container_id image_id prior_app_id docker_fake systemctl_fake cp_fake install_fake metadata upgrade_stage_root upgrade_stage_file \
   upgrade_stage_field upgrade_stage_require recovery_state recovery_root safe_recovery_root no_nested_mounts freeze_root freeze_current \
   db_cutover_boot_guard valid_id valid_hash protected_file safe_dir lock validate_host \
-  reject_stdin live_hash upgrade_stage_compose_hash out invalid die; do export -f "$function_name"; done
+  reject_stdin live_hash hash active_tx require_active_tx upgrade_stage_compose_hash out invalid die; do export -f "$function_name"; done
 
 run_detach() {
   bash -e -c 'declare -A P=([NEXTCLOUD_PI_STATE_ROOT]="$RECOVERY_FIXTURE" [NEXTCLOUD_PI_STORAGE_MOUNT]="$RECOVERY_FIXTURE/storage" [NEXTCLOUD_PI_PROJECT_DIR]="$RECOVERY_FIXTURE/nextcloud-docker" [NEXTCLOUD_PI_APP_CONTAINER]=nextcloud-docker-app-1 [NEXTCLOUD_PI_DB_CONTAINER]=nextcloud-docker-db-1 [NEXTCLOUD_PI_CADDY_CONTAINER]=nextcloud-docker-caddy-1 [NEXTCLOUD_PI_SERVICE_NAME]=nextcloud.service); cmd_recovery_detach "$RECOVERY_STAGE" "$RECOVERY_FINGERPRINT"' >/dev/null
@@ -151,14 +163,17 @@ run_boot_guard() {
   bash -e -c 'declare -A P=([NEXTCLOUD_PI_STATE_ROOT]="$RECOVERY_FIXTURE" [NEXTCLOUD_PI_STORAGE_MOUNT]="$RECOVERY_FIXTURE/storage" [NEXTCLOUD_PI_PROJECT_DIR]="$RECOVERY_FIXTURE/nextcloud-docker" [NEXTCLOUD_PI_APP_CONTAINER]=nextcloud-docker-app-1 [NEXTCLOUD_PI_DB_CONTAINER]=nextcloud-docker-db-1 [NEXTCLOUD_PI_CADDY_CONTAINER]=nextcloud-docker-caddy-1); cmd_upgrade_freeze_boot_guard' >/dev/null
 }
 run_startup_guard() {
-  bash -e -c 'declare -A P=([NEXTCLOUD_PI_STATE_ROOT]="$RECOVERY_FIXTURE" [NEXTCLOUD_PI_STORAGE_MOUNT]="$RECOVERY_FIXTURE/storage" [NEXTCLOUD_PI_PROJECT_DIR]="$RECOVERY_FIXTURE/nextcloud-docker" [NEXTCLOUD_PI_APP_CONTAINER]=nextcloud-docker-app-1 [NEXTCLOUD_PI_DB_CONTAINER]=nextcloud-docker-db-1 [NEXTCLOUD_PI_CADDY_CONTAINER]=nextcloud-docker-caddy-1); runtime_recovery_startup_guard' >/dev/null
+  bash -e -c 'declare -A P=([NEXTCLOUD_PI_STATE_ROOT]="$RECOVERY_FIXTURE" [NEXTCLOUD_PI_STORAGE_MOUNT]="$RECOVERY_FIXTURE/storage" [NEXTCLOUD_PI_PROJECT_DIR]="$RECOVERY_FIXTURE/nextcloud-docker" [NEXTCLOUD_PI_APP_CONTAINER]=nextcloud-docker-app-1 [NEXTCLOUD_PI_DB_CONTAINER]=nextcloud-docker-db-1 [NEXTCLOUD_PI_CADDY_CONTAINER]=nextcloud-docker-caddy-1); upgrade_stage_startup_guard; runtime_recovery_startup_guard' >/dev/null
 }
 
+sed -i 's/phase\truntime-may-have-changed/phase\tprepared/' "$(upgrade_stage_file "$RECOVERY_STAGE")"
+if run_startup_guard 2>/dev/null; then printf 'prepared app stage permitted Compose startup\n' >&2; exit 1; fi
+sed -i 's/phase\tprepared/phase\truntime-may-have-changed/' "$(upgrade_stage_file "$RECOVERY_STAGE")"
 printf 'yes\n' >"$fixture/fail-once"
-if run_detach 2>/dev/null; then printf 'injected detach interruption passed unexpectedly\n' >&2; exit 1; fi
+if run_detach; then printf 'injected detach interruption passed unexpectedly\n' >&2; exit 1; fi
 [[ "$(metadata "$fixture/runtime-recovery/$RECOVERY_STAGE/metadata.tsv" state)" == detaching ]]
 [[ ! -f "$fixture/app.present" && -f "$fixture/db.present" ]]
-for key in db caddy; do [[ "$(<"$fixture/$key.restart")" == no ]]; done
+[[ "$(<"$fixture/db.restart")" == no ]]
 run_boot_guard
 if run_startup_guard 2>/dev/null; then printf 'unsafe Compose startup was permitted\n' >&2; exit 1; fi
 run_detach
@@ -199,6 +214,7 @@ run_promote
 for path in "$fixture/storage/nextcloud" "$fixture/storage/nextcloud_db" "$fixture/caddy-data" "$fixture/caddy-config"; do
   [[ "$(<"$path/identity")" == restored ]]
 done
+printf '%s\n' "$(printf 'b%.0s' {1..64})" >"$fixture/live-record-hash"
 run_boot_guard
 if run_startup_guard 2>/dev/null; then printf 'unverified promotion permitted Compose startup\n' >&2; exit 1; fi
 bash -e -c 'declare -A P=([NEXTCLOUD_PI_STATE_ROOT]="$RECOVERY_FIXTURE" [NEXTCLOUD_PI_STORAGE_MOUNT]="$RECOVERY_FIXTURE/storage" [NEXTCLOUD_PI_PROJECT_DIR]="$RECOVERY_FIXTURE/nextcloud-docker" [NEXTCLOUD_PI_APP_CONTAINER]=nextcloud-docker-app-1 [NEXTCLOUD_PI_DB_CONTAINER]=nextcloud-docker-db-1 [NEXTCLOUD_PI_CADDY_CONTAINER]=nextcloud-docker-caddy-1); cmd_recovery_source_ready "$RECOVERY_STAGE" "$RECOVERY_FINGERPRINT"' >/dev/null
