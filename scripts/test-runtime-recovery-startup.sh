@@ -21,6 +21,7 @@ for name in recovery_non_db_objects_absent recovery_non_db_write cmd_recovery_de
   definition="${definition//\/usr\/bin\/docker/docker_fake}"
   definition="${definition//\/usr\/bin\/systemctl/systemctl_fake}"
   definition="${definition//\/usr\/bin\/cp/cp_fake}"
+  definition="${definition//\/usr\/bin\/install/install_fake}"
   eval "$definition"
 done
 definition="$(sed -n '/^recovery_promote_pair() {/,/^}/p' "$root/privileged/nextcloud-pi-ops")"
@@ -83,6 +84,16 @@ cp_fake() {
     return 1
   fi
 }
+install_fake() {
+  local arguments=()
+  while (( $# )); do
+    case "$1" in
+      -o|-g) shift 2 ;;
+      *) arguments+=("$1"); shift ;;
+    esac
+  done
+  /usr/bin/install "${arguments[@]}"
+}
 metadata() { awk -F $'\t' -v wanted="$2" '$1 == wanted {print $2; found=1; exit} END {if (!found) exit 1}' "$1"; }
 upgrade_stage_file() { printf '%s/stage.tsv' "$RECOVERY_FIXTURE"; }
 upgrade_stage_field() { metadata "$(upgrade_stage_file)" "$2"; }
@@ -128,7 +139,7 @@ freeze_table=nextcloud_pi_upgrade
 for function_name in recovery_non_db_objects_absent recovery_non_db_write cmd_recovery_detach \
   runtime_recovery_startup_guard cmd_upgrade_freeze_boot_guard cmd_recovery_source_ready \
   cmd_recovery_promote recovery_promote_pair recovery_promote_pair_original \
-  container_key container_id image_id docker_fake systemctl_fake cp_fake metadata upgrade_stage_file \
+  container_key container_id image_id docker_fake systemctl_fake cp_fake install_fake metadata upgrade_stage_file \
   upgrade_stage_field upgrade_stage_require recovery_state recovery_root safe_recovery_root no_nested_mounts freeze_root freeze_current \
   db_cutover_boot_guard valid_id valid_hash protected_file safe_dir lock validate_host \
   reject_stdin live_hash upgrade_stage_compose_hash out invalid die; do export -f "$function_name"; done
