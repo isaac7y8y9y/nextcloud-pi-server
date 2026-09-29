@@ -210,15 +210,16 @@ elif [[ "\${1:-}" == rm ]]; then
   [[ -f '$FIXTURE/'"\$key"'.present' ]] || exit 1
   rm -- '$FIXTURE/'"\$key"'.present'
 elif [[ "\${1:-}" == inspect ]]; then
-  name="\${*: -1}"; key="\${name#nextcloud-docker-}"; key="\${key%-1}"
+  if [[ "\${2:-}" == --format ]]; then name="\${4:-}"; format="\${3:-}"; else name="\${2:-}"; format="\${4:-}"; fi
+  key="\${name#nextcloud-docker-}"; key="\${key%-1}"
   [[ -f '$FIXTURE/'"\$key"'.present' ]] || exit 1
-  if [[ "\${3:-}" == *'RestartPolicy.Name'* ]]; then
+  if [[ "\$format" == *'RestartPolicy.Name'* ]]; then
     printf '%064d %s %s\n' 2 "\$( [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf true || printf false )" "\$(cat '$FIXTURE/'"\$key"'.restart')"
-  elif [[ "\${3:-}" == *'com.docker.compose.project'* ]]; then
+  elif [[ "\$format" == *'com.docker.compose.project'* ]]; then
     printf '%064d sha256:%064d %s nextcloud-docker\n' 2 2 "\$( [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf true || printf false )"
-  elif [[ "\${*: -1}" == '{{.State.Running}}' ]]; then
+  elif [[ "\$format" == '{{.State.Running}}' ]]; then
     [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf 'true\n' || printf 'false\n'
-  elif [[ "\${*: -1}" == '{{.Id}} {{.Image}} {{.State.Running}}' ]]; then
+  elif [[ "\$format" == '{{.Id}} {{.Image}} {{.State.Running}}' ]]; then
     printf '%064d sha256:%064d %s\n' 2 2 "\$( [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf true || printf false )"
   else
     printf 'sha256:%064d %s\n' 2 "\$( [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf true || printf false )"
