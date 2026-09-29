@@ -201,8 +201,22 @@ elif [[ "\${1:-}:\${2:-}" == port:nextcloud-docker-caddy-1 ]]; then
   printf 'published:%s\n' "\${3%/tcp}"
 elif [[ "\${1:-}:\${2:-}" == image:inspect ]]; then
   printf 'sha256:%064d\n' 2
+elif [[ "\${1:-}:\${2:-}" == update:--restart=no ]]; then
+  name="\${3:-}"; key="\${name#nextcloud-docker-}"; key="\${key%-1}"
+  [[ -f '$FIXTURE/'"\$key"'.present' ]] || exit 1
+  printf 'no\n' >'$FIXTURE/'"\$key"'.restart'
+elif [[ "\${1:-}" == rm ]]; then
+  name="\${2:-}"; key="\${name#nextcloud-docker-}"; key="\${key%-1}"
+  [[ -f '$FIXTURE/'"\$key"'.present' ]] || exit 1
+  rm -- '$FIXTURE/'"\$key"'.present'
 elif [[ "\${1:-}" == inspect ]]; then
-  if [[ "\${*: -1}" == '{{.State.Running}}' ]]; then
+  name="\${*: -1}"; key="\${name#nextcloud-docker-}"; key="\${key%-1}"
+  [[ -f '$FIXTURE/'"\$key"'.present' ]] || exit 1
+  if [[ "\${3:-}" == *'RestartPolicy.Name'* ]]; then
+    printf '%064d %s %s\n' 2 "\$( [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf true || printf false )" "\$(cat '$FIXTURE/'"\$key"'.restart')"
+  elif [[ "\${3:-}" == *'com.docker.compose.project'* ]]; then
+    printf '%064d sha256:%064d %s nextcloud-docker\n' 2 2 "\$( [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf true || printf false )"
+  elif [[ "\${*: -1}" == '{{.State.Running}}' ]]; then
     [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf 'true\n' || printf 'false\n'
   elif [[ "\${*: -1}" == '{{.Id}} {{.Image}} {{.State.Running}}' ]]; then
     printf '%064d sha256:%064d %s\n' 2 2 "\$( [[ "\$(cat '$FIXTURE/service-state')" == active ]] && printf true || printf false )"
@@ -241,7 +255,10 @@ case "\${1:-}" in
     if [[ "\${2:-}" == nextcloud-background-jobs.timer ]]; then
       [[ ! -e '$FIXTURE/state/upgrade-freeze/timer-held' ]] || exit 1
       printf 'active\n' >'$FIXTURE/timer-state'
-    else printf 'active\n' >"\$state"; fi
+    else
+      printf 'active\n' >"\$state"
+      for key in app db caddy; do printf 'yes\n' >'$FIXTURE/'"\$key"'.present'; printf 'always\n' >'$FIXTURE/'"\$key"'.restart'; done
+    fi
     ;;
   stop) if [[ "\${2:-}" == nextcloud-background-jobs.timer ]]; then printf 'inactive\n' >'$FIXTURE/timer-state'; else printf 'inactive\n' >"\$state"; fi ;;
   is-active)
@@ -323,6 +340,7 @@ EOF
   sudo install -m 0644 -o root -g root "$SOURCE_DIR/unit" "$FIXTURE/unit"
   sudo install -m 0644 -o root -g root "$SOURCE_DIR/dropin" "$FIXTURE/dropin"
   printf 'active\n' | sudo tee "$FIXTURE/service-state" >/dev/null
+  for key in app db caddy; do printf 'yes\n' | sudo tee "$FIXTURE/$key.present" >/dev/null; printf 'always\n' | sudo tee "$FIXTURE/$key.restart" >/dev/null; done
   printf 'active\n' | sudo tee "$FIXTURE/timer-state" >/dev/null
   printf 'false\n' | sudo tee "$FIXTURE/maintenance-state" >/dev/null
   printf 'nextcloud-data\n' | sudo tee "$FIXTURE/mount/nextcloud/data.txt" >/dev/null
@@ -538,6 +556,7 @@ PY
     printf 'runtime recovery accepted wrong stage fingerprint\n' >&2
     exit 1
   fi
+  sudo "$FIXTURE/ops" runtime-recovery detach "$stage_id" "$stage_fingerprint" | grep -Fx $'state\tdetached' >/dev/null
   sudo "$FIXTURE/ops" runtime-recovery promote "$stage_id" "$stage_fingerprint" | grep -Fx $'state\tpromoted' >/dev/null
   if sudo "$FIXTURE/ops" runtime-recovery cleanup "$stage_id" >/dev/null 2>&1; then
     printf 'cleanup discarded unaccepted promoted recovery evidence\n' >&2
@@ -553,6 +572,7 @@ PY
   sudo grep -Fxq caddy-config "$FIXTURE/volumes/caddy-config.failed-$stage_id/config.txt"
   sudo install -m 0600 -o root -g root "$SOURCE_DIR/active-images.env" "$FIXTURE/active-images.env"
   printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null
+  sudo "$FIXTURE/ops" runtime-recovery source-ready "$stage_id" "$stage_fingerprint" | grep -Fx $'state\tsource-ready' >/dev/null
   sudo "$FIXTURE/ops" service start >/dev/null
   sudo "$FIXTURE/ops" upgrade-stage recovered "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\trecovered' >/dev/null
   stage_id=20260910T000000Z-113

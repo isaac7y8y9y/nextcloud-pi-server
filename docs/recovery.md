@@ -122,10 +122,17 @@ If an interrupted restore is still in the protected `prepared` phase,
 `--resume` checks the consumed approval and current stage/freeze, removes only
 the identity-bound temporary import container, resets the isolated staged
 datasets, and restarts the restore. It never discards the live or preserved
-failed runtime. Promotion-phase resumes continue from the guarded directory
-moves. If promotion already completed and the database journal reached
+failed runtime. For app/Caddy stages, the root dispatcher disables container
+restart policies, stops the service, and removes the identity-checked stack
+objects before recording a detached checkpoint. Docker may restart during a
+detached, Caddy-copying, or promoting phase so recovery can resume, but the Compose launcher
+remains blocked until all four runtime datasets and prior configuration are
+restored. Interrupted Caddy staging is discarded and recopied from the held
+snapshot; promotion-phase resumes continue from the guarded directory moves.
+If promotion already completed and the database journal reached
 `source-ready`, resume verifies the restored configuration and retries service
-start and health without repeating promotion or that startup gate. Both paths
+start and health without repeating promotion or that startup gate. App/Caddy
+recovery has its own `source-ready` checkpoint before service start. Both paths
 retain the ingress freeze until verified recovery.
 For a database cutover, restoration first finishes any interrupted directory
 placement under the closed startup gate, removes candidate container objects,

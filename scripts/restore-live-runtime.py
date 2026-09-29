@@ -442,14 +442,19 @@ def resume(target: Target, base: dict[str, object], candidate: Path, source: Pat
             reject("prepared recovery reset result differs")
         apply(target, base, source, config_backup, runtime, images, prepared=True)
         return
-    if recovery.get("state") not in ("promoting", "promoted"):
+    if recovery.get("state") not in ("detaching", "detached", "copying", "promoting", "promoted", "source-ready"):
         reject("runtime recovery phase is not resumable")
     service = target.ssh("systemctl is-active nextcloud.service 2>/dev/null || true")
     if service == "active":
         target.ops("service", "stop")
     elif service not in ("inactive", "failed"):
         reject("Nextcloud service state is unknown during restore resume")
-    if recovery["state"] == "promoting":
+    if recovery["state"] in ("detaching", "detached"):
+        if base.get("db_prepare_fingerprint"):
+            reject("database recovery cannot use non-database detach")
+        target.ops("runtime-recovery", "detach", stage_id, str(base["stage_fingerprint"]))
+        target.ops("runtime-recovery", "promote", stage_id, str(base["stage_fingerprint"]), timeout=3600)
+    elif recovery["state"] in ("copying", "promoting"):
         target.ops("runtime-recovery", "promote", stage_id, str(base["stage_fingerprint"]), timeout=3600)
     finish_promoted(target, base, config_backup)
 
@@ -516,6 +521,10 @@ def finish_promoted(target: Target, base: dict[str, object], config_backup: Path
                 reject("protected database recovery startup gate differs")
         elif phase != "source-ready":
             reject("protected database recovery startup phase differs")
+    else:
+        result = target.ops("runtime-recovery", "source-ready", stage_id, str(base["stage_fingerprint"]))
+        if result != {"state": "source-ready", "id": stage_id}:
+            reject("protected runtime recovery startup phase differs")
     target.ops("service", "start", timeout=600)
     maintenance_off = False
     for _ in range(12):
@@ -647,6 +656,8 @@ def apply(target: Target, base: dict[str, object], source: Path,
                        str(base["stage_fingerprint"]), timeout=900)
         target.ops("db-cutover", "recovery-detach", stage_id,
                    str(base["db_prepare_fingerprint"]), str(base["stage_fingerprint"]), timeout=900)
+    else:
+        target.ops("runtime-recovery", "detach", stage_id, str(base["stage_fingerprint"]), timeout=900)
     target.ops("runtime-recovery", "promote", stage_id, str(base["stage_fingerprint"]), timeout=3600)
     finish_promoted(target, base, config_backup)
 

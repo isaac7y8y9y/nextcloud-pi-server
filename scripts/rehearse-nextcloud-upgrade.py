@@ -79,6 +79,9 @@ def inputs(backup: Path, metadata: tuple[Path, Path, Path], root: Path) -> dict[
     manifest = base.private_file(backup / "manifest.tsv")
     if base.manifest_value(manifest, "format") not in {"runtime-backup-v1", "runtime-backup-v2"}:
         raise base.RehearsalError("runtime backup format is unsupported")
+    prefix = base.manifest_value(manifest, "dbtableprefix")
+    if not re.fullmatch(r"[A-Za-z0-9_]+", prefix):
+        raise base.RehearsalError("backup database table prefix is invalid")
     if base.execute(["docker", "info", "--format", "{{.OSType}}/{{.Architecture}}"], timeout=20) not in {"linux/aarch64", "linux/arm64"}:
         raise base.RehearsalError("local Docker daemon is not ARM64 Linux")
     archive = backup / "nextcloud" / "nextcloud.tar"
@@ -89,7 +92,7 @@ def inputs(backup: Path, metadata: tuple[Path, Path, Path], root: Path) -> dict[
     if not re.search(r"(?m)^\$OC_VersionString\s*=\s*'30\.0\.17';$", old_version):
         raise base.RehearsalError("backup is not the expected Nextcloud 30.0.17 baseline")
     evidence = {"backup_manifest_sha256": base.digest(backup / "manifest.tsv"),
-                "sql_sha256": base.digest(sql)}
+                "sql_sha256": base.digest(sql), "dbtableprefix": prefix}
     for key, path, tag in zip(("db", "app30", "app31"), metadata, TAGS, strict=True):
         record, checksum = base.verify_metadata(path, tag)
         evidence[f"{key}_metadata_sha256"] = checksum
@@ -238,7 +241,7 @@ def rehearse(identifier: str, backup: Path, evidence: dict[str, str], root: Path
         base.docker("exec", "-i", db, "sh", "-eu", "-c",
                     'export MYSQL_PWD="$MARIADB_ROOT_PASSWORD"; exec mariadb --protocol=tcp --host=127.0.0.1 -uroot "$MARIADB_DATABASE"',
                     input_file=backup / "database" / "nextcloud.sql", timeout=1800)
-        base.check_database(db)
+        base.check_database(db, evidence["dbtableprefix"])
         base.docker("run", "-d", "--pull", "never", "--network", network, "--name", app30,
                     "--label", label, "--mount", f"type=volume,source={volume},target=/var/www/html", refs["app30"])
         status(app30, "30.0.17")
@@ -256,7 +259,7 @@ def rehearse(identifier: str, backup: Path, evidence: dict[str, str], root: Path
         install_auth(app31, auth)
         webdav(app31, user, "30", put=False)
         webdav(app31, user, "31", put=True)
-        base.check_database(db)
+        base.check_database(db, evidence["dbtableprefix"])
         for name in (app31, db):
             base.docker("stop", "--time", "60", name, timeout=90)
         for name in names:

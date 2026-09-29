@@ -146,7 +146,7 @@ cmd_active_images_state() {
     out "${key,,}_id" "$(/usr/bin/awk -F= -v wanted="NEXTCLOUD_ACTIVE_IMAGES_${key}_ID" '$1 == wanted { print $2 }' "$ACTIVE_RECORD")"
   done
 }
-cmd_service() { [[ $# == 1 ]] || invalid; reject_stdin; lock; validate_host; case "$1" in start|restart) db_cutover_startup_guard; /usr/bin/systemctl "$1" "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "service is not active";; stop) /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "service did not stop";; *) invalid;; esac; out state "$1"; }
+cmd_service() { [[ $# == 1 ]] || invalid; reject_stdin; lock; validate_host; case "$1" in start|restart) db_cutover_startup_guard; runtime_recovery_startup_guard; /usr/bin/systemctl "$1" "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "service is not active";; stop) /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}"; [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "service did not stop";; *) invalid;; esac; out state "$1"; }
 background_jobs_timer=nextcloud-background-jobs.timer
 background_jobs_service=nextcloud-background-jobs.service
 cmd_background_jobs_state() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; if /usr/bin/systemctl is-enabled --quiet "$background_jobs_timer"; then out timer_enabled yes; else out timer_enabled no; fi; if /usr/bin/systemctl is-active --quiet "$background_jobs_timer"; then out timer_active yes; else out timer_active no; fi; }
@@ -231,12 +231,30 @@ cmd_upgrade_freeze_boot_guard() {
   for metadata_file in "${P[NEXTCLOUD_PI_STATE_ROOT]}"/runtime-recovery/*/metadata.tsv; do
     [[ -e "$metadata_file" || -L "$metadata_file" ]] || continue
     protected_file "$metadata_file" 0600
-    if [[ "$(metadata "$metadata_file" state)" == promoting ]]; then
-      local recovery_id="${metadata_file%/metadata.tsv}" db_file
-      recovery_id="${recovery_id##*/}"; db_file="$(db_cutover_file "$recovery_id")"
+    local recovery_id="${metadata_file%/metadata.tsv}" db_file recovery_phase target
+    recovery_id="${recovery_id##*/}"; valid_id "$recovery_id" || die "runtime recovery ID is invalid"
+    recovery_phase="$(metadata "$metadata_file" state)"
+    case "$recovery_phase" in
+      prepared|source-ready) continue ;;
+      detaching|detached|copying|promoting|promoted) ;;
+      *) die "runtime recovery phase is invalid" ;;
+    esac
+    local stage_file="$(upgrade_stage_file "$recovery_id")"
+    protected_file "$stage_file" 0600
+    if [[ "$recovery_phase" == promoted && "$(metadata "$stage_file" phase)" == recovered && "$(metadata "$stage_file" target)" == db ]]; then continue; fi
+    upgrade_stage_require "$recovery_id"
+    [[ "$(upgrade_stage_field "$recovery_id" phase)" == runtime-may-have-changed ]] || die "runtime recovery stage differs"
+    target="$(upgrade_stage_field "$recovery_id" target)"
+    if [[ "$target" == db ]]; then
+      [[ "$recovery_phase" == copying || "$recovery_phase" == promoting || "$recovery_phase" == promoted ]] || die "database recovery phase differs"
+      db_file="$(db_cutover_file "$recovery_id")"
       [[ -f "$db_file" && ! -L "$db_file" ]] || die "partial runtime promotion blocks Docker start"
       protected_file "$db_file" 0600
-      [[ "$(metadata "$db_file" phase)" == recovering && "$(metadata "$db_file" objects_removed)" == yes ]] || die "partial runtime promotion blocks Docker start"
+      [[ "$(metadata "$db_file" phase)" == recovering || "$(metadata "$db_file" phase)" == source-ready || "$(metadata "$db_file" phase)" == recovered ]] &&
+        [[ "$(metadata "$db_file" objects_removed)" == yes ]] || die "partial runtime promotion blocks Docker start"
+    else
+      [[ "$target" == app || "$target" == caddy ]] || die "runtime recovery target is invalid"
+      [[ "$(metadata "$metadata_file" objects_removed)" == "$(if [[ "$recovery_phase" == detaching ]]; then printf no; else printf yes; fi)" ]] || die "runtime recovery container checkpoint differs"
     fi
   done
   if [[ ! -e "$root" && ! -L "$root" ]]; then
@@ -951,6 +969,19 @@ db_cutover_scan() {
   done
 }
 db_cutover_boot_guard() { db_cutover_scan; }
+runtime_recovery_startup_guard() {
+  local file phase id stage_file
+  for file in "${P[NEXTCLOUD_PI_STATE_ROOT]}"/runtime-recovery/*/metadata.tsv; do
+    [[ -e "$file" || -L "$file" ]] || continue
+    protected_file "$file" 0600
+    phase="$(metadata "$file" state)"
+    [[ "$phase" != prepared && "$phase" != source-ready ]] || continue
+    id="${file%/metadata.tsv}"; id="${id##*/}"
+    stage_file="$(upgrade_stage_file "$id")"; protected_file "$stage_file" 0600
+    [[ "$(metadata "$stage_file" target)" != db ]] || continue
+    case "$phase" in detaching|detached|copying|promoting|promoted) die "runtime recovery has not reached a safe startup phase" ;; *) die "runtime recovery phase is invalid" ;; esac
+  done
+}
 db_cutover_startup_guard() {
   local root="$(db_cutover_root)" file phase
   db_cutover_scan
@@ -961,7 +992,7 @@ db_cutover_startup_guard() {
     case "$phase" in aborted|accepted|recovered|preparing|prepared|candidate-ready|starting|running|source-ready) ;; *) die "database cutover has not reached a safe startup phase" ;; esac
   done
 }
-cmd_upgrade_startup_guard() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; db_cutover_startup_guard; out state permitted; }
+cmd_upgrade_startup_guard() { [[ $# == 0 ]] || invalid; reject_stdin; validate_host; db_cutover_startup_guard; runtime_recovery_startup_guard; out state permitted; }
 upgrade_stage_file() { printf '%s/%s.tsv' "$(upgrade_stage_root)" "$1"; }
 upgrade_stage_compose_hash() {
   local file="${P[NEXTCLOUD_PI_PROJECT_DIR]}/docker-compose.yml"
@@ -1168,7 +1199,12 @@ cmd_upgrade_stage_recovered() {
   lock; validate_host; upgrade_stage_require "$id"
   [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not at the runtime boundary"
   state="$(recovery_state "$id")"; safe_dir "$state"; protected_file "$state/metadata.tsv" 0600
-  [[ "$(metadata "$state/metadata.tsv" format)" == runtime-recovery-v1 && "$(metadata "$state/metadata.tsv" state)" == promoted && "$(metadata "$state/metadata.tsv" stage_id)" == "$id" ]] || die "matching full runtime was not promoted"
+  [[ "$(metadata "$state/metadata.tsv" format)" == runtime-recovery-v1 && "$(metadata "$state/metadata.tsv" stage_id)" == "$id" ]] || die "matching full runtime was not promoted"
+  if [[ "$(upgrade_stage_field "$id" target)" == db ]]; then
+    [[ "$(metadata "$state/metadata.tsv" state)" == promoted ]] || die "database runtime was not promoted"
+  else
+    [[ "$(metadata "$state/metadata.tsv" state)" == source-ready ]] || die "prior runtime startup gate was not accepted"
+  fi
   [[ "$(live_hash)" == "$(upgrade_stage_field "$id" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" pre_compose_sha256)" ]] || die "prior image/configuration state was not restored"
   "$VALIDATOR"; /usr/bin/systemctl is-active --quiet "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "restored service is not active"
   for service in APP DB CADDY; do
@@ -1188,6 +1224,71 @@ cmd_active_commit() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx m
 runtime_sources() { local data caddy; data="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud"; caddy="$(/usr/bin/docker volume inspect "${P[NEXTCLOUD_PI_CADDY_DATA_VOLUME]}" --format '{{.Mountpoint}}')"; printf '%s\n' "$data" "$caddy" "$(/usr/bin/docker volume inspect "${P[NEXTCLOUD_PI_CADDY_CONFIG_VOLUME]}" --format '{{.Mountpoint}}')"; }
 recovery_root() { printf '%s/%s%s' "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}" "${P[NEXTCLOUD_PI_RUNTIME_RECOVERY_PREFIX]}" "$1"; }
 recovery_state() { printf '%s/runtime-recovery/%s' "${P[NEXTCLOUD_PI_STATE_ROOT]}" "$1"; }
+recovery_non_db_objects_absent() {
+  local name
+  /usr/bin/docker info >/dev/null || die "Docker is unavailable during runtime recovery"
+  for name in "${P[NEXTCLOUD_PI_APP_CONTAINER]}" "${P[NEXTCLOUD_PI_DB_CONTAINER]}" "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}"; do
+    ! /usr/bin/docker inspect "$name" >/dev/null 2>&1 || die "runtime container still exists during promotion"
+  done
+}
+recovery_non_db_write() {
+  local file="$1" phase="$2" id="$3" app="$4" database="$5" caddy="$6" data="$7" config="$8"
+  printf 'format\truntime-recovery-v1\nstate\t%s\nstage_id\t%s\nobjects_removed\t%s\napp_container_id\t%s\ndb_container_id\t%s\ncaddy_container_id\t%s\ncaddy_data_path\t%s\ncaddy_config_path\t%s\n' \
+    "$phase" "$id" "$(if [[ "$phase" == detaching ]]; then printf no; else printf yes; fi)" "$app" "$database" "$caddy" "$data" "$config" >"$file.new"
+  /usr/bin/chmod 0600 "$file.new"; /usr/bin/mv -f -- "$file.new" "$file"; /usr/bin/sync -f "$file"
+}
+cmd_recovery_detach() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" state file phase key name details actual image running project restart expected
+  local ids=() data config
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not recoverable"
+  [[ "$(upgrade_stage_field "$id" target)" == app || "$(upgrade_stage_field "$id" target)" == caddy ]] || die "database stages use their own recovery detach"
+  state="$(recovery_state "$id")"; safe_dir "$state"; file="$state/metadata.tsv"; protected_file "$file" 0600
+  [[ "$(metadata "$file" format)" == runtime-recovery-v1 && "$(metadata "$file" stage_id)" == "$id" ]] || die "runtime recovery journal differs"
+  phase="$(metadata "$file" state)"
+  [[ "$phase" == prepared || "$phase" == detaching || "$phase" == detached ]] || die "runtime recovery detach phase differs"
+  for key in nextcloud caddy-data caddy-config database; do protected_file "$state/$key.complete" 0600; done
+  data="$(metadata "$file" caddy_data_path)"; config="$(metadata "$file" caddy_config_path)"
+  [[ "$data" == /* && "$config" == /* ]] || die "runtime Caddy paths are unsafe"
+  if [[ "$phase" == prepared ]]; then
+    for key in APP DB CADDY; do
+      case "$key" in APP) name="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; DB) name="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; CADDY) name="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
+      details="$(/usr/bin/docker inspect --format '{{.Id}} {{.Image}} {{.State.Running}} {{index .Config.Labels "com.docker.compose.project"}}' "$name")" || die "candidate runtime container is missing"
+      read -r actual image running project <<<"$details"
+      expected="$(/usr/bin/awk -F= -v wanted="NEXTCLOUD_ACTIVE_IMAGES_${key}_ID" '$1 == wanted {print $2}' "$ACTIVE_RECORD")"
+      [[ "$actual" =~ ^[0-9a-f]{64}$ && "$image" == "$expected" && "$project" == "${P[NEXTCLOUD_PI_PROJECT_DIR]##*/}" && ( "$running" == true || "$running" == false ) ]] || die "candidate runtime container identity differs"
+      ids+=("$actual")
+      /usr/bin/docker update --restart=no "$name" >/dev/null
+    done
+    /usr/bin/systemctl stop "${P[NEXTCLOUD_PI_SERVICE_NAME]}" || die "candidate service did not stop cleanly"
+    [[ "$(/usr/bin/systemctl is-active "${P[NEXTCLOUD_PI_SERVICE_NAME]}" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "candidate service remains active"
+    for key in APP DB CADDY; do
+      case "$key" in APP) name="${P[NEXTCLOUD_PI_APP_CONTAINER]}"; expected="${ids[0]}";; DB) name="${P[NEXTCLOUD_PI_DB_CONTAINER]}"; expected="${ids[1]}";; CADDY) name="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}"; expected="${ids[2]}";; esac
+      details="$(/usr/bin/docker inspect --format '{{.Id}} {{.State.Running}} {{.HostConfig.RestartPolicy.Name}}' "$name")" || die "candidate runtime container disappeared before checkpoint"
+      [[ "$details" == "$expected false no" ]] || die "candidate runtime container did not stop safely"
+    done
+    recovery_non_db_write "$file" detaching "$id" "${ids[0]}" "${ids[1]}" "${ids[2]}" "$data" "$config"
+  else
+    for key in app db caddy; do valid_hash "$(metadata "$file" "${key}_container_id")" || die "recovery container identity is invalid"; done
+  fi
+  if [[ "$phase" != detached ]]; then
+    for key in app db caddy; do
+      case "$key" in app) name="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; db) name="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; caddy) name="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
+      expected="$(metadata "$file" "${key}_container_id")"
+      details="$(/usr/bin/docker inspect --format '{{.Id}} {{.State.Running}} {{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || true)"
+      [[ -z "$details" ]] && continue
+      [[ "$details" == "$expected false no" ]] || die "detached runtime container identity or restart policy differs"
+      /usr/bin/docker rm "$name" >/dev/null
+    done
+    recovery_non_db_objects_absent
+    recovery_non_db_write "$file" detached "$id" "$(metadata "$file" app_container_id)" "$(metadata "$file" db_container_id)" "$(metadata "$file" caddy_container_id)" "$data" "$config"
+  else
+    recovery_non_db_objects_absent
+  fi
+  out state detached; out id "$id"
+}
 cmd_recovery_status() {
   [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
   local state="$(recovery_state "$1")"
@@ -1315,7 +1416,13 @@ cmd_recovery_promote() {
   fi
   root="$(recovery_root "$id")"; state="$(recovery_state "$id")"; safe_recovery_root "$root"; safe_dir "$state"; protected_file "$state/metadata.tsv" 0600
   phase="$(metadata "$state/metadata.tsv" state)"
-  [[ "$phase" == prepared || "$phase" == promoting || "$phase" == promoted ]] || die "runtime recovery phase is invalid"
+  if [[ "$(upgrade_stage_field "$id" target)" == db ]]; then
+    [[ "$phase" == prepared || "$phase" == copying || "$phase" == promoting || "$phase" == promoted ]] || die "database runtime recovery phase is invalid"
+  else
+    [[ "$phase" == detached || "$phase" == copying || "$phase" == promoting || "$phase" == promoted ]] || die "runtime containers were not detached for recovery"
+    [[ "$(metadata "$state/metadata.tsv" objects_removed)" == yes ]] || die "runtime container checkpoint differs"
+    recovery_non_db_objects_absent
+  fi
   for service in nextcloud caddy-data caddy-config database; do protected_file "$state/$service.complete" 0600; done
   for service in nextcloud caddy-data caddy-config; do valid_hash "$(<"$state/$service.complete")" || die "restored archive attestation is invalid"; done
   valid_hash "$(metadata "$state/database.complete" sql_sha256)" || die "database SQL attestation is invalid"
@@ -1330,21 +1437,38 @@ cmd_recovery_promote() {
   source_db="$root/mariadb-data"; live_db="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db"; failed_db="${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/.nextcloud-db-failed-$id"
   paths=("$live_nc" "$(metadata "$state/metadata.tsv" caddy_data_path)" "$(metadata "$state/metadata.tsv" caddy_config_path)")
   [[ "${paths[1]}" == /* && "${paths[2]}" == /* && "${paths[1]}" != *$'\t'* && "${paths[2]}" != *$'\t'* ]] || die "Caddy volume source set is invalid"
-  if [[ "$phase" == prepared ]]; then
+  if [[ "$phase" == prepared || "$phase" == detached || "$phase" == copying ]]; then
     for service in "$source_nc" "$source_db" "$live_nc" "$live_db" "$root/caddy-data" "$root/caddy-config"; do [[ -d "$service" && ! -L "$service" ]] || die "runtime path is missing or symbolic-linked"; no_nested_mounts "$service" || die "runtime path contains a nested mount"; done
     [[ ! -e "$failed_nc" && ! -L "$failed_nc" && ! -e "$failed_db" && ! -L "$failed_db" ]] || die "failed-state preservation target already exists"
     for index in 1 2; do
       source_caddy="${paths[$index]}"; temp_caddy="$source_caddy.restore-$id"; failed_caddy="$source_caddy.failed-$id"
-      [[ -d "$source_caddy" && ! -L "$source_caddy" && ! -e "$temp_caddy" && ! -L "$temp_caddy" && ! -e "$failed_caddy" && ! -L "$failed_caddy" ]] || die "Caddy restoration target is unsafe"
+      [[ -d "$source_caddy" && ! -L "$source_caddy" && ! -e "$failed_caddy" && ! -L "$failed_caddy" ]] || die "Caddy restoration target is unsafe"
       no_nested_mounts "$source_caddy" || die "Caddy volume contains a nested mount"
+      if [[ -e "$temp_caddy" || -L "$temp_caddy" ]]; then
+        [[ "$phase" == copying && -d "$temp_caddy" && ! -L "$temp_caddy" ]] || die "unexpected Caddy restoration staging path"
+        no_nested_mounts "$temp_caddy" || die "Caddy restoration staging contains a nested mount"
+      fi
     done
+    if [[ "$phase" != copying ]]; then
+      if [[ "$(upgrade_stage_field "$id" target)" == db ]]; then
+        printf 'format\truntime-recovery-v1\nstate\tcopying\nstage_id\t%s\ncaddy_data_path\t%s\ncaddy_config_path\t%s\n' "$id" "${paths[1]}" "${paths[2]}" >"$state/metadata.tsv.new"
+        /usr/bin/chmod 0600 "$state/metadata.tsv.new"; /usr/bin/mv -f -- "$state/metadata.tsv.new" "$state/metadata.tsv"
+      else
+        recovery_non_db_write "$state/metadata.tsv" copying "$id" "$(metadata "$state/metadata.tsv" app_container_id)" "$(metadata "$state/metadata.tsv" db_container_id)" "$(metadata "$state/metadata.tsv" caddy_container_id)" "${paths[1]}" "${paths[2]}"
+      fi
+    fi
     for index in 1 2; do
       source_caddy="${paths[$index]}"; temp_caddy="$source_caddy.restore-$id"
+      if [[ -e "$temp_caddy" || -L "$temp_caddy" ]]; then /usr/bin/rm -rf --one-file-system -- "$temp_caddy"; fi
       /usr/bin/install -d -m 0700 -o root -g root "$temp_caddy"
       if (( index == 1 )); then /usr/bin/cp -a "$root/caddy-data/." "$temp_caddy/"; else /usr/bin/cp -a "$root/caddy-config/." "$temp_caddy/"; fi
     done
-    printf 'format\truntime-recovery-v1\nstate\tpromoting\nstage_id\t%s\ncaddy_data_path\t%s\ncaddy_config_path\t%s\n' "$id" "${paths[1]}" "${paths[2]}" >"$state/metadata.tsv.new"
-    /usr/bin/chmod 0600 "$state/metadata.tsv.new"; /usr/bin/mv -f -- "$state/metadata.tsv.new" "$state/metadata.tsv"
+    if [[ "$(upgrade_stage_field "$id" target)" == db ]]; then
+      printf 'format\truntime-recovery-v1\nstate\tpromoting\nstage_id\t%s\ncaddy_data_path\t%s\ncaddy_config_path\t%s\n' "$id" "${paths[1]}" "${paths[2]}" >"$state/metadata.tsv.new"
+      /usr/bin/chmod 0600 "$state/metadata.tsv.new"; /usr/bin/mv -f -- "$state/metadata.tsv.new" "$state/metadata.tsv"
+    else
+      recovery_non_db_write "$state/metadata.tsv" promoting "$id" "$(metadata "$state/metadata.tsv" app_container_id)" "$(metadata "$state/metadata.tsv" db_container_id)" "$(metadata "$state/metadata.tsv" caddy_container_id)" "${paths[1]}" "${paths[2]}"
+    fi
   fi
   recovery_promote_pair "$source_nc" "$live_nc" "$failed_nc"
   recovery_promote_pair "$source_db" "$live_db" "$failed_db"
@@ -1352,9 +1476,31 @@ cmd_recovery_promote() {
     source_caddy="${paths[$index]}"; temp_caddy="$source_caddy.restore-$id"; failed_caddy="$source_caddy.failed-$id"
     recovery_promote_pair "$temp_caddy" "$source_caddy" "$failed_caddy"
   done
-  printf 'format\truntime-recovery-v1\nstate\tpromoted\nstage_id\t%s\ncaddy_data_path\t%s\ncaddy_config_path\t%s\n' "$id" "${paths[1]}" "${paths[2]}" >"$state/metadata.tsv.new"
-  /usr/bin/chmod 0600 "$state/metadata.tsv.new"; /usr/bin/mv -f -- "$state/metadata.tsv.new" "$state/metadata.tsv"
+  if [[ "$(upgrade_stage_field "$id" target)" == db ]]; then
+    printf 'format\truntime-recovery-v1\nstate\tpromoted\nstage_id\t%s\ncaddy_data_path\t%s\ncaddy_config_path\t%s\n' "$id" "${paths[1]}" "${paths[2]}" >"$state/metadata.tsv.new"
+    /usr/bin/chmod 0600 "$state/metadata.tsv.new"; /usr/bin/mv -f -- "$state/metadata.tsv.new" "$state/metadata.tsv"
+  else
+    recovery_non_db_write "$state/metadata.tsv" promoted "$id" "$(metadata "$state/metadata.tsv" app_container_id)" "$(metadata "$state/metadata.tsv" db_container_id)" "$(metadata "$state/metadata.tsv" caddy_container_id)" "${paths[1]}" "${paths[2]}"
+  fi
   out state promoted; out id "$id"
+}
+cmd_recovery_source_ready() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" state file phase
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == runtime-may-have-changed && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not recoverable"
+  [[ "$(upgrade_stage_field "$id" target)" == app || "$(upgrade_stage_field "$id" target)" == caddy ]] || die "database recovery has a separate startup gate"
+  state="$(recovery_state "$id")"; safe_dir "$state"; file="$state/metadata.tsv"; protected_file "$file" 0600
+  phase="$(metadata "$file" state)"
+  [[ "$phase" == promoted || "$phase" == source-ready ]] || die "prior runtime was not promoted"
+  [[ "$(metadata "$file" objects_removed)" == yes && "$(live_hash)" == "$(upgrade_stage_field "$id" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" pre_compose_sha256)" ]] || die "prior runtime configuration differs"
+  for path in "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud" "${P[NEXTCLOUD_PI_STORAGE_MOUNT]}/nextcloud_db" "$(metadata "$file" caddy_data_path)" "$(metadata "$file" caddy_config_path)"; do [[ -d "$path" && ! -L "$path" ]] || die "restored runtime path is unsafe"; done
+  if [[ "$phase" == promoted ]]; then
+    recovery_non_db_objects_absent
+    recovery_non_db_write "$file" source-ready "$id" "$(metadata "$file" app_container_id)" "$(metadata "$file" db_container_id)" "$(metadata "$file" caddy_container_id)" "$(metadata "$file" caddy_data_path)" "$(metadata "$file" caddy_config_path)"
+  fi
+  out state source-ready; out id "$id"
 }
 cmd_recovery_cleanup() {
   [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" root state stage phase
@@ -1369,7 +1515,7 @@ cmd_recovery_cleanup() {
   if [[ -e "$state" || -L "$state" ]]; then
     safe_dir "$state"; protected_file "$state/metadata.tsv" 0600
     phase="$(metadata "$state/metadata.tsv" state)"
-    [[ "$phase" == prepared || "$phase" == promoted ]] || die "recovery promotion is unresolved"
+    [[ "$phase" == prepared || "$phase" == promoted || "$phase" == source-ready ]] || die "recovery promotion is unresolved"
   fi
   if [[ -e "$root" || -L "$root" ]]; then safe_recovery_root "$root"; no_nested_mounts "$root" || die "recovery target contains a nested mount"; /usr/bin/rm -rf --one-file-system -- "$root"; fi
   if [[ -e "$state" || -L "$state" ]]; then no_nested_mounts "$state" || die "recovery state contains a nested mount"; /usr/bin/rm -rf --one-file-system -- "$state"; fi
@@ -1414,7 +1560,7 @@ case "$command" in
   db-cutover) sub="${1:-}"; shift || true; case "$sub" in begin) cmd_db_cutover_begin "$@";; env-install) cmd_db_cutover_env_install "$@";; temp-start) cmd_db_cutover_temp_start "$@";; reset-preparing) cmd_db_cutover_reset_preparing "$@";; attest) cmd_db_cutover_attest "$@";; detach) cmd_db_cutover_detach "$@";; switch) cmd_db_cutover_switch "$@";; candidate-ready) cmd_db_cutover_candidate_ready "$@";; running) cmd_db_cutover_running "$@";; accepted) cmd_db_cutover_accepted "$@";; abort) cmd_db_cutover_abort "$@";; recovery-detach) cmd_db_cutover_recovery_detach "$@";; source-ready) cmd_db_cutover_source_ready "$@";; recovered) cmd_db_cutover_recovered "$@";; status) cmd_db_cutover_status "$@";; *) invalid;; esac;;
   active-record) sub="${1:-}"; shift || true; case "$sub" in presence) cmd_active_presence "$@";; status) cmd_active_status "$@";; prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
   runtime-backup) sub="${1:-}"; shift || true; case "$sub" in size) cmd_runtime_backup_size "$@";; stream) cmd_runtime_backup_stream "$@";; *) invalid;; esac;;
-  runtime-recovery) sub="${1:-}"; shift || true; case "$sub" in check) cmd_recovery_check "$@";; status) cmd_recovery_status "$@";; prepare) cmd_recovery_prepare "$@";; reset-prepared) cmd_recovery_reset_prepared "$@";; restore) cmd_recovery_restore "$@";; attest-database) cmd_recovery_attest_database "$@";; promote) cmd_recovery_promote "$@";; cleanup) cmd_recovery_cleanup "$@";; *) invalid;; esac;;
+  runtime-recovery) sub="${1:-}"; shift || true; case "$sub" in check) cmd_recovery_check "$@";; status) cmd_recovery_status "$@";; prepare) cmd_recovery_prepare "$@";; reset-prepared) cmd_recovery_reset_prepared "$@";; restore) cmd_recovery_restore "$@";; attest-database) cmd_recovery_attest_database "$@";; detach) cmd_recovery_detach "$@";; promote) cmd_recovery_promote "$@";; source-ready) cmd_recovery_source_ready "$@";; cleanup) cmd_recovery_cleanup "$@";; *) invalid;; esac;;
   image-readiness) sub="${1:-}"; shift || true; case "$sub" in check) cmd_readiness_check "$@";; start) cmd_readiness_start "$@";; status) cmd_readiness_status "$@";; stop) cmd_readiness_stop "$@";; cleanup) cmd_readiness_cleanup "$@";; *) invalid;; esac;;
   deployment-drill) sub="${1:-}"; shift || true; case "$sub" in check) cmd_drill_check "$@";; apply) cmd_drill_apply "$@";; cleanup) cmd_drill_cleanup "$@";; *) invalid;; esac;;
   *) invalid;;

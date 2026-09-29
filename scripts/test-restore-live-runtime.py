@@ -98,6 +98,12 @@ class FakeTarget:
             return {"timer_active": "no"}
         if args[:2] == ("runtime-recovery", "status"):
             return {"state": self.recovery_phase, "id": args[2]}
+        if args[:2] == ("runtime-recovery", "detach"):
+            self.recovery_phase = "detached"
+            return {"state": "detached", "id": args[2]}
+        if args[:2] == ("runtime-recovery", "source-ready"):
+            self.recovery_phase = "source-ready"
+            return {"state": "source-ready", "id": args[2]}
         if args[:2] == ("runtime-recovery", "reset-prepared"):
             return {"state": "prepared", "id": args[2], "root": self.config["NEXTCLOUD_STORAGE_MOUNT"] + "/.recovery-" + args[2]}
         return {"state": "ok"}
@@ -224,7 +230,11 @@ class ApprovalTests(unittest.TestCase):
             restore.apply(target, base, source, config, runtime, images)
         lifecycle = [call for call in target.calls if call.startswith("ops ")]
         self.assertLess(lifecycle.index("ops service stop"),
+                        next(index for index, call in enumerate(lifecycle) if call.startswith("ops runtime-recovery detach")))
+        self.assertLess(next(index for index, call in enumerate(lifecycle) if call.startswith("ops runtime-recovery detach")),
                         next(index for index, call in enumerate(lifecycle) if call.startswith("ops runtime-recovery promote")))
+        self.assertLess(next(index for index, call in enumerate(lifecycle) if call.startswith("ops runtime-recovery source-ready")),
+                        lifecycle.index("ops service start"))
         self.assertLess(lifecycle.index("ops active-record rollback " + self.stage_id),
                         lifecycle.index("ops active-record commit " + self.stage_id))
         self.assertEqual(lifecycle[-1], "ops upgrade-stage recovered " + self.stage_id + " " + "f" * 64)
@@ -294,6 +304,30 @@ class ApprovalTests(unittest.TestCase):
             restore.resume(target, consumed, self.root / "candidate", source, config, runtime, images)
         self.assertTrue(any(call.startswith("ops runtime-recovery promote") for call in target.calls))
         self.assertFalse(any("upgrade-freeze release" in call for call in target.calls))
+
+    def test_non_db_detach_interruption_resumes_before_promotion(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        target.recovery_phase = "detaching"
+        base.update(host="pi.example.invalid", freeze_id="20260926T000000Z-999",
+                    freeze_table_sha256="b" * 64, project=target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"],
+                    mount=target.config["NEXTCLOUD_STORAGE_MOUNT"])
+        base["evidence"]["env_sha256"] = "e" * 64
+        artifact = restore.plan(self.root, base, 1000)
+        consumed = restore.consume(artifact, self.root, base, 1001)
+        def remote_hash(_target, path):
+            name = path.rsplit("/", 1)[-1]
+            if name == ".env":
+                return "e" * 64
+            return restore.digest(target.files[name])
+        with mock.patch.object(restore, "verify_local", return_value=base["evidence"]), \
+             mock.patch.object(restore, "remote_hash", side_effect=remote_hash), \
+             mock.patch.object(restore, "run", return_value=""):
+            restore.resume(target, consumed, self.root / "candidate", source, config, runtime, images)
+        lifecycle = [call for call in target.calls if call.startswith("ops ")]
+        self.assertLess(next(i for i, call in enumerate(lifecycle) if call.startswith("ops runtime-recovery detach")),
+                        next(i for i, call in enumerate(lifecycle) if call.startswith("ops runtime-recovery promote")))
+        self.assertLess(next(i for i, call in enumerate(lifecycle) if call.startswith("ops runtime-recovery source-ready")),
+                        lifecycle.index("ops service start"))
 
     def test_promoted_source_ready_resume_skips_promotion_and_startup_gate(self) -> None:
         target, base, source, config, runtime, images = self.fixture()

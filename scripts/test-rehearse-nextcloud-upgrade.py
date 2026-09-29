@@ -86,6 +86,24 @@ class NextcloudRehearsalTests(unittest.TestCase):
         self.assertEqual(len([args for args in calls if args[0] == "stop"]), 3)
         self.assertEqual(len(list(self.root.glob("rehearsal-*/database.env"))), 1)
 
+    def test_successful_rehearsal_passes_bound_prefix_to_both_db_checks(self) -> None:
+        self.root.mkdir(mode=0o700)
+        evidence = {f"{key}_index_digest": "sha256:" + letter * 64 for key, letter in
+                    (("db", "a"), ("app30", "b"), ("app31", "c"))}
+        evidence["dbtableprefix"] = "cloud_"
+        checks: list[tuple[str, str]] = []
+        with mock.patch.object(app, "resource_absent"), \
+             mock.patch.object(app, "inspect_loaded"), \
+             mock.patch.object(app, "status"), \
+             mock.patch.object(app, "install_auth"), \
+             mock.patch.object(app, "webdav"), \
+             mock.patch.object(app.base, "wait_ready"), \
+             mock.patch.object(app.base, "check_database", side_effect=lambda name, prefix: checks.append((name, prefix))), \
+             mock.patch.object(app.base, "docker", return_value=""):
+            app.rehearse("20260925T000000Z-abcdef123456", self.backup, evidence, self.root)
+        self.assertEqual(len(checks), 2)
+        self.assertTrue(all(prefix == "cloud_" for _, prefix in checks))
+
 
 if __name__ == "__main__":
     unittest.main()

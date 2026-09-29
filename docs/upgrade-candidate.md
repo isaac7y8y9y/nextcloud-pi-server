@@ -174,7 +174,9 @@ directory, and runs the applications on an internal-only Docker network with
 no published ports. It rewrites only the disposable `config.php` to use the
 isolated database and loopback HTTP. It checks `occ status`, creates a
 synthetic user, and uploads/downloads synthetic files through local WebDAV
-before and after the official-image 30→31 startup migration. The six known
+before and after the official-image 30→31 startup migration. Database checks
+use the table prefix bound in the verified backup; older backups without this
+field require a fresh capture before this rehearsal. The six known
 enabled custom apps are disabled before the core hop, matching the reviewed
 plan. A successful run removes its containers, network, volume, and private
 database directory; failure stops named containers and retains private state
