@@ -501,8 +501,13 @@ PY
   sudo "$FIXTURE/ops" upgrade-stage abort "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\taborted' >/dev/null
   stage_id=20260910T000000Z-112
   sudo "$FIXTURE/ops" upgrade-stage consume "$stage_id" "${stage_args[@]}" | grep -Fx $'phase\tprepared' >/dev/null
-  sudo install -m 0600 -o root -g root "$SOURCE_DIR/candidate-active.env" "$FIXTURE/active-images.env"
+  sudo "$FIXTURE/ops" active-record prepare "$stage_id" "$candidate_record" "$(wc -c <"$SOURCE_DIR/candidate-active.env")" <"$SOURCE_DIR/candidate-active.env" >/dev/null
+  sudo "$FIXTURE/ops" active-record apply "$stage_id" >/dev/null
   sudo install -m 0644 "$SOURCE_DIR/candidate-compose.yml" "$FIXTURE/mount/nextcloud-docker/docker-compose.yml"
+  if sudo "$FIXTURE/ops" upgrade-startup-guard >/dev/null 2>&1 || sudo "$FIXTURE/ops" service start >/dev/null 2>&1; then
+    printf 'prepared app stage permitted runtime startup before its boundary\n' >&2
+    exit 1
+  fi
   sudo "$FIXTURE/ops" upgrade-stage boundary "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\truntime-may-have-changed' >/dev/null
   sudo "$FIXTURE/ops" upgrade-stage status "$stage_id" | grep -Fx "$(printf 'fingerprint\t%s' "$stage_fingerprint")" >/dev/null
   sudo "$FIXTURE/ops" upgrade-stage status "$stage_id" | grep -Fx "$(printf 'pre_record_sha256\t%s' "$pre_record")" >/dev/null
@@ -571,7 +576,8 @@ PY
   sudo grep -Fxq database-data "$FIXTURE/mount/.nextcloud-db-failed-$stage_id/data.txt"
   sudo grep -Fxq caddy-data "$FIXTURE/volumes/caddy-data.failed-$stage_id/data.txt"
   sudo grep -Fxq caddy-config "$FIXTURE/volumes/caddy-config.failed-$stage_id/config.txt"
-  sudo install -m 0600 -o root -g root "$SOURCE_DIR/active-images.env" "$FIXTURE/active-images.env"
+  sudo "$FIXTURE/ops" active-record rollback "$stage_id" >/dev/null
+  sudo "$FIXTURE/ops" active-record commit "$stage_id" >/dev/null
   printf 'source compose\n' | sudo tee "$FIXTURE/mount/nextcloud-docker/docker-compose.yml" >/dev/null
   sudo "$FIXTURE/ops" runtime-recovery source-ready "$stage_id" "$stage_fingerprint" | grep -Fx $'state\tsource-ready' >/dev/null
   sudo "$FIXTURE/ops" service start >/dev/null
