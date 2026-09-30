@@ -77,7 +77,11 @@ If an app/Caddy `--apply` process is interrupted while its stage is still
 `prepared`, `--abort-prepared` with the original consumed `--stage-approval`
 and the same five bound directories restores the prior record and Compose,
 then aborts the stage without releasing the freeze. It refuses a crossed
-runtime boundary; use the full-runtime restore path instead.
+runtime boundary; use the full-runtime restore path instead. The abort first
+claims a protected `aborting` phase, which excludes the runtime boundary and
+candidate record/Compose writes. An interrupted abort can resume from that
+phase; startup and ingress release remain blocked until the source configuration
+is verified and the stage is `aborted`.
 For the initial MariaDB 11.8→11.4 stage, the driver now has a draft
 `--plan-prepare-db`/`--prepare-db`/`--resume-prepare-db` sequence. It binds a
 private source inventory and restricted credentials to the held SQL, imports

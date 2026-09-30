@@ -496,7 +496,9 @@ def stage_apply(target: r.Target, base: dict[str, object], approval: dict[str, o
             r.run(["scp", "-q", str(local_path), target.login + ":" + stage_dir + "/" + name])
             if r.remote_hash(target, stage_dir + "/" + name) != r.digest(local_path):
                 r.reject("staged Compose input differs")
-        install_compose(target, stage_dir, "candidate.yml", project)
+        if target.ops("upgrade-stage", "install-compose", stage_id,
+                      str(approval["fingerprint"])) != {"state": "installed", "id": stage_id}:
+            r.reject("protected candidate Compose installation differed")
         if r.remote_hash(target, project + "/docker-compose.yml") != evidence["candidate_compose"]:
             r.reject("candidate Compose installation differs")
         if r.remote_hash(target, project + "/caddy/Caddyfile") != evidence["source_caddy"]:
@@ -516,6 +518,11 @@ def stage_apply(target: r.Target, base: dict[str, object], approval: dict[str, o
             stage = {}
         if stage.get("phase") == "prepared" and stage.get("fingerprint") == approval["fingerprint"]:
             try:
+                # The root claim serializes against `boundary` before any
+                # configuration rollback, including an ambiguous SSH reply.
+                if target.ops("upgrade-stage", "abort-claim", stage_id,
+                              str(approval["fingerprint"])) != {"phase": "aborting", "id": stage_id}:
+                    r.reject("protected pre-start abort claim differed")
                 if stage_created and r.remote_hash(target, project + "/docker-compose.yml") != evidence["source_compose"]:
                     install_compose(target, stage_dir, "source.yml", project)
                 presence = target.ops("active-record", "presence", stage_id)
@@ -563,7 +570,7 @@ def abort_prepared(target: r.Target, approval: dict[str, object], candidate: Pat
             target.ops("background-jobs", "state").get("timer_active") != "no"):
         r.reject("prepared-stage abort freeze or timer differs")
     stage = target.ops("upgrade-stage", "status", stage_id)
-    if (stage.get("phase") not in ("prepared", "aborted") or stage.get("id") != stage_id or
+    if (stage.get("phase") not in ("prepared", "aborting", "aborted") or stage.get("id") != stage_id or
             stage.get("fingerprint") != approval["fingerprint"] or
             stage.get("target") != approval["target"] or
             stage.get("pre_record_sha256") != evidence["source_record"] or
@@ -575,6 +582,10 @@ def abort_prepared(target: r.Target, approval: dict[str, object], candidate: Pat
     if (r.remote_hash(target, project + "/.env") != evidence["env_sha256"] or
             r.remote_hash(target, project + "/caddy/Caddyfile") != evidence["source_caddy"]):
         r.reject("prepared-stage abort project configuration differs")
+    if stage["phase"] != "aborted":
+        if target.ops("upgrade-stage", "abort-claim", stage_id,
+                      str(approval["fingerprint"])) != {"phase": "aborting", "id": stage_id}:
+            r.reject("protected pre-start abort claim differed")
     try:
         presence = target.ops("active-record", "presence", stage_id)
     except r.RecoveryError:

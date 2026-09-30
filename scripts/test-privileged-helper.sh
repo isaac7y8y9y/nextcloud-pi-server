@@ -498,12 +498,40 @@ PY
     printf 'upgrade freeze released with a prepared stage\n' >&2
     exit 1
   fi
+  if sudo "$FIXTURE/ops" upgrade-stage abort "$stage_id" "$stage_fingerprint" >/dev/null 2>&1; then
+    printf 'app stage aborted without an exclusive claim\n' >&2
+    exit 1
+  fi
+  sudo "$FIXTURE/ops" upgrade-stage abort-claim "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\taborting' >/dev/null
+  if sudo "$FIXTURE/ops" upgrade-stage boundary "$stage_id" "$stage_fingerprint" >/dev/null 2>&1 ||
+     sudo "$FIXTURE/ops" upgrade-startup-guard >/dev/null 2>&1; then
+    printf 'claimed abort still permitted boundary or runtime startup\n' >&2
+    exit 1
+  fi
   sudo "$FIXTURE/ops" upgrade-stage abort "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\taborted' >/dev/null
+  stage_id=20260910T000000Z-119
+  sudo "$FIXTURE/ops" upgrade-stage consume "$stage_id" "${stage_args[@]}" | grep -Fx $'phase\tprepared' >/dev/null
+  sudo "$FIXTURE/ops" active-record prepare "$stage_id" "$candidate_record" "$(wc -c <"$SOURCE_DIR/candidate-active.env")" <"$SOURCE_DIR/candidate-active.env" >/dev/null
+  sudo "$FIXTURE/ops" active-record apply "$stage_id" >/dev/null
+  sudo install -d -m 0700 "$FIXTURE/mount/nextcloud-docker/.upgrade-stage-$stage_id"
+  sudo install -m 0600 "$SOURCE_DIR/candidate-compose.yml" "$FIXTURE/mount/nextcloud-docker/.upgrade-stage-$stage_id/candidate.yml"
+  sudo "$FIXTURE/ops" upgrade-stage abort-claim "$stage_id" "$stage_fingerprint" | grep -Fx $'phase\taborting' >/dev/null
+  if sudo "$FIXTURE/ops" upgrade-stage install-compose "$stage_id" "$stage_fingerprint" >/dev/null 2>&1 ||
+     sudo "$FIXTURE/ops" active-record apply "$stage_id" >/dev/null 2>&1 ||
+     sudo "$FIXTURE/ops" upgrade-stage boundary "$stage_id" "$stage_fingerprint" >/dev/null 2>&1; then
+    printf 'claimed abort permitted candidate mutation or runtime boundary\n' >&2
+    exit 1
+  fi
+  sudo "$FIXTURE/ops" active-record rollback "$stage_id" >/dev/null
+  sudo "$FIXTURE/ops" upgrade-stage abort "$stage_id" "$stage_fingerprint" >/dev/null
+  sudo "$FIXTURE/ops" active-record commit "$stage_id" >/dev/null
   stage_id=20260910T000000Z-112
   sudo "$FIXTURE/ops" upgrade-stage consume "$stage_id" "${stage_args[@]}" | grep -Fx $'phase\tprepared' >/dev/null
   sudo "$FIXTURE/ops" active-record prepare "$stage_id" "$candidate_record" "$(wc -c <"$SOURCE_DIR/candidate-active.env")" <"$SOURCE_DIR/candidate-active.env" >/dev/null
   sudo "$FIXTURE/ops" active-record apply "$stage_id" >/dev/null
-  sudo install -m 0644 "$SOURCE_DIR/candidate-compose.yml" "$FIXTURE/mount/nextcloud-docker/docker-compose.yml"
+  sudo install -d -m 0700 "$FIXTURE/mount/nextcloud-docker/.upgrade-stage-$stage_id"
+  sudo install -m 0600 "$SOURCE_DIR/candidate-compose.yml" "$FIXTURE/mount/nextcloud-docker/.upgrade-stage-$stage_id/candidate.yml"
+  sudo "$FIXTURE/ops" upgrade-stage install-compose "$stage_id" "$stage_fingerprint" | grep -Fx $'state\tinstalled' >/dev/null
   if sudo "$FIXTURE/ops" upgrade-startup-guard >/dev/null 2>&1 || sudo "$FIXTURE/ops" service start >/dev/null 2>&1; then
     printf 'prepared app stage permitted runtime startup before its boundary\n' >&2
     exit 1
@@ -513,6 +541,10 @@ PY
   sudo "$FIXTURE/ops" upgrade-stage status "$stage_id" | grep -Fx "$(printf 'pre_record_sha256\t%s' "$pre_record")" >/dev/null
   if sudo "$FIXTURE/ops" upgrade-stage abort "$stage_id" "$stage_fingerprint" >/dev/null 2>&1; then
     printf 'upgrade stage rolled back after runtime boundary\n' >&2
+    exit 1
+  fi
+  if sudo "$FIXTURE/ops" upgrade-stage abort-claim "$stage_id" "$stage_fingerprint" >/dev/null 2>&1; then
+    printf 'upgrade stage claimed abort after runtime boundary\n' >&2
     exit 1
   fi
   if sudo "$FIXTURE/ops" upgrade-freeze release "$freeze_id" >/dev/null 2>&1; then

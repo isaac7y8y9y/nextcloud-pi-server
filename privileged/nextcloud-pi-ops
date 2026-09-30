@@ -1013,9 +1013,9 @@ upgrade_stage_startup_guard() {
     valid_id "$id" && [[ "$(metadata "$file" format)" == upgrade-stage-v1 && "$(metadata "$file" id)" == "$id" ]] || die "upgrade stage journal is invalid"
     phase="$(metadata "$file" phase)"; target="$(metadata "$file" target)"
     [[ "$target" == app || "$target" == caddy || "$target" == db ]] || die "upgrade stage target is invalid"
-    case "$phase" in prepared|runtime-may-have-changed|accepted|aborted|recovered) ;; *) die "upgrade stage phase is invalid" ;; esac
-    if [[ "$phase" == prepared && "$target" != db ]]; then
-      die "prepared upgrade stage blocks runtime startup until boundary or abort"
+    case "$phase" in prepared|aborting|runtime-may-have-changed|accepted|aborted|recovered) ;; *) die "upgrade stage phase is invalid" ;; esac
+    if [[ "$target" != db && ( "$phase" == prepared || "$phase" == aborting ) ]]; then
+      die "unresolved upgrade stage blocks runtime startup until boundary or abort"
     fi
   done
 }
@@ -1158,6 +1158,40 @@ cmd_upgrade_stage_boundary() {
   upgrade_stage_rewrite "$id" runtime-may-have-changed
   out phase runtime-may-have-changed; out id "$id"
 }
+cmd_upgrade_stage_install_compose() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" project live staged temp owner group
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" phase)" == prepared && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "upgrade stage is not prepared"
+  [[ "$(upgrade_stage_field "$id" target)" != db ]] || die "database Compose uses the cutover path"
+  [[ "$(live_hash)" == "$(upgrade_stage_field "$id" candidate_record_sha256)" ]] || die "candidate active record differs"
+  project="${P[NEXTCLOUD_PI_PROJECT_DIR]}"; live="$project/docker-compose.yml"
+  staged="$project/.upgrade-stage-$id/candidate.yml"
+  [[ -d "${staged%/*}" && ! -L "${staged%/*}" && -f "$staged" && ! -L "$staged" && -f "$live" && ! -L "$live" ]] || die "staged or live Compose file is unsafe"
+  valid_size "$(/usr/bin/stat -c '%s' "$staged")" || die "staged Compose file exceeds the policy limit"
+  [[ "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" pre_compose_sha256)" ]] || die "source Compose differs"
+  owner="$(uid "$live")"; group="$(gid "$live")"
+  temp="$(/usr/bin/mktemp "$project/.nextcloud-pi-compose.XXXXXX")"
+  if ! /usr/bin/install -m 0644 -o "$owner" -g "$group" "$staged" "$temp" ||
+     [[ "$(hash "$temp")" != "$(upgrade_stage_field "$id" candidate_compose_sha256)" ]] ||
+     ! /usr/bin/mv -f -- "$temp" "$live"; then
+    /usr/bin/rm -f -- "$temp"
+    die "candidate Compose installation failed or differed"
+  fi
+  out state installed; out id "$id"
+}
+cmd_upgrade_stage_abort_claim() {
+  [[ $# == 2 ]] || invalid; reject_stdin
+  local id="$1" fingerprint="$2" phase
+  valid_id "$id" && valid_hash "$fingerprint" || invalid
+  lock; validate_host; upgrade_stage_require "$id"
+  [[ "$(upgrade_stage_field "$id" target)" != db && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "app/Caddy abort authority differs"
+  phase="$(upgrade_stage_field "$id" phase)"
+  [[ "$phase" == prepared || "$phase" == aborting ]] || die "runtime boundary was reached; full restore is required"
+  if [[ "$phase" == prepared ]]; then upgrade_stage_rewrite "$id" aborting; fi
+  out phase aborting; out id "$id"
+}
 cmd_upgrade_stage_status() {
   [[ $# == 1 ]] || invalid; reject_stdin; valid_id "$1" || invalid
   validate_host; upgrade_stage_require "$1"
@@ -1191,7 +1225,9 @@ cmd_upgrade_stage_abort() {
   local id="$1" fingerprint="$2"
   valid_id "$id" && valid_hash "$fingerprint" || invalid
   lock; validate_host; upgrade_stage_require "$id"
-  [[ "$(upgrade_stage_field "$id" phase)" == prepared && "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" ]] || die "runtime boundary was reached; full restore is required"
+  local phase target
+  phase="$(upgrade_stage_field "$id" phase)"; target="$(upgrade_stage_field "$id" target)"
+  [[ "$(upgrade_stage_field "$id" fingerprint)" == "$fingerprint" && ( ( "$target" == db && "$phase" == prepared ) || ( "$target" != db && "$phase" == aborting ) ) ]] || die "runtime boundary was reached or abort was not claimed"
   [[ "$(live_hash)" == "$(upgrade_stage_field "$id" pre_record_sha256)" && "$(upgrade_stage_compose_hash)" == "$(upgrade_stage_field "$id" pre_compose_sha256)" ]] || die "pre-start rollback is incomplete"
   upgrade_stage_rewrite "$id" aborted
   out phase aborted; out id "$id"
@@ -1243,8 +1279,16 @@ cmd_upgrade_stage_recovered() {
   upgrade_stage_rewrite "$id" recovered
   out phase recovered; out id "$id"
 }
-cmd_active_prepare() { [[ $# == 3 ]] || invalid; local id="$1" expected="$2" size="$3" tx marker pre; valid_id "$id" && valid_hash "$expected" && valid_size "$size" || invalid; (( size <= 65536 )) || invalid; lock; validate_host; marker="$(active_marker)"; tx="$(active_tx "$id")"; [[ ! -e "$marker" && ! -L "$marker" && ! -e "$tx" && ! -L "$tx" ]] || die "active transaction is already unresolved"; ensure_parent active-record; /usr/bin/install -d -m 0700 -o root -g root "$tx"; ACTIVE_PREPARE_ABORT_TX="$tx"; trap 'active_prepare_abort "$?"' EXIT HUP INT TERM; read_exact "$tx/candidate" "$size"; [[ "$(hash "$tx/candidate")" == "$expected" ]] || die "candidate hash differs"; "$VALIDATOR" --record "$tx/candidate"; pre="$(live_hash)"; if [[ "$pre" == missing ]]; then : >"$tx/absent"; /usr/bin/chmod 0600 "$tx/absent"; else protected_file "$ACTIVE_RECORD" 0600; /usr/bin/cp -p "$ACTIVE_RECORD" "$tx/snapshot"; fi; write_active_meta "$tx/metadata.tsv" prepared "$pre" "$expected" "$size"; printf '%s\n' "$id" >"$marker"; /usr/bin/chmod 0600 "$marker"; trap - EXIT HUP INT TERM; ACTIVE_PREPARE_ABORT_TX=''; out state prepared; out id "$id"; }
-cmd_active_apply() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx meta pre candidate size live; lock; require_active_tx "$id"; tx="$(active_tx "$id")"; meta="$tx/metadata.tsv"; pre="$(metadata "$meta" pre_sha256)"; candidate="$(metadata "$meta" candidate_sha256)"; size="$(metadata "$meta" size)"; [[ "$(metadata "$meta" state)" == prepared && "$(hash "$tx/candidate")" == "$candidate" ]] || die "active transaction is not prepared"; live="$(live_hash)"; if [[ "$live" == "$candidate" ]]; then "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; return; fi; [[ "$live" == "$pre" ]] || die "active record pre-state changed"; "$VALIDATOR" --record "$tx/candidate"; install_record "$tx/candidate"; "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; }
+upgrade_stage_active_apply_allowed() {
+  local file="$(upgrade_stage_file "$1")"
+  [[ ! -e "$file" && ! -L "$file" ]] && return
+  protected_file "$file" 0600
+  [[ "$(metadata "$file" format)" == upgrade-stage-v1 && "$(metadata "$file" id)" == "$1" ]] || die "upgrade stage identity differs"
+  [[ "$(metadata "$file" target)" == db ]] && return
+  [[ "$(metadata "$file" phase)" == prepared ]] || die "upgrade stage no longer permits candidate active-record mutation"
+}
+cmd_active_prepare() { [[ $# == 3 ]] || invalid; local id="$1" expected="$2" size="$3" tx marker pre; valid_id "$id" && valid_hash "$expected" && valid_size "$size" || invalid; (( size <= 65536 )) || invalid; lock; validate_host; upgrade_stage_active_apply_allowed "$id"; marker="$(active_marker)"; tx="$(active_tx "$id")"; [[ ! -e "$marker" && ! -L "$marker" && ! -e "$tx" && ! -L "$tx" ]] || die "active transaction is already unresolved"; ensure_parent active-record; /usr/bin/install -d -m 0700 -o root -g root "$tx"; ACTIVE_PREPARE_ABORT_TX="$tx"; trap 'active_prepare_abort "$?"' EXIT HUP INT TERM; read_exact "$tx/candidate" "$size"; [[ "$(hash "$tx/candidate")" == "$expected" ]] || die "candidate hash differs"; "$VALIDATOR" --record "$tx/candidate"; pre="$(live_hash)"; if [[ "$pre" == missing ]]; then : >"$tx/absent"; /usr/bin/chmod 0600 "$tx/absent"; else protected_file "$ACTIVE_RECORD" 0600; /usr/bin/cp -p "$ACTIVE_RECORD" "$tx/snapshot"; fi; write_active_meta "$tx/metadata.tsv" prepared "$pre" "$expected" "$size"; printf '%s\n' "$id" >"$marker"; /usr/bin/chmod 0600 "$marker"; trap - EXIT HUP INT TERM; ACTIVE_PREPARE_ABORT_TX=''; out state prepared; out id "$id"; }
+cmd_active_apply() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx meta pre candidate size live; lock; upgrade_stage_active_apply_allowed "$id"; require_active_tx "$id"; tx="$(active_tx "$id")"; meta="$tx/metadata.tsv"; pre="$(metadata "$meta" pre_sha256)"; candidate="$(metadata "$meta" candidate_sha256)"; size="$(metadata "$meta" size)"; [[ "$(metadata "$meta" state)" == prepared && "$(hash "$tx/candidate")" == "$candidate" ]] || die "active transaction is not prepared"; live="$(live_hash)"; if [[ "$live" == "$candidate" ]]; then "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; return; fi; [[ "$live" == "$pre" ]] || die "active record pre-state changed"; "$VALIDATOR" --record "$tx/candidate"; install_record "$tx/candidate"; "$VALIDATOR"; write_active_meta "$meta" applied "$pre" "$candidate" "$size"; out state applied; out id "$id"; }
 cmd_active_rollback() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx meta pre candidate size live state; lock; require_active_tx "$id"; tx="$(active_tx "$id")"; meta="$tx/metadata.tsv"; pre="$(metadata "$meta" pre_sha256)"; candidate="$(metadata "$meta" candidate_sha256)"; size="$(metadata "$meta" size)"; state="$(metadata "$meta" state)"; live="$(live_hash)"; [[ "$state" == prepared || "$state" == applied || "$state" == rolledback ]] || die "active transaction state is invalid"; if [[ "$live" == "$candidate" ]]; then if [[ "$pre" == missing ]]; then /usr/bin/rm -f -- "$ACTIVE_RECORD"; else install_record "$tx/snapshot"; "$VALIDATOR"; fi; elif [[ "$live" != "$pre" ]]; then die "active record changed outside transaction"; fi; [[ "$(live_hash)" == "$pre" ]] || die "rollback verification failed"; write_active_meta "$meta" rolledback "$pre" "$candidate" "$size"; out state rolledback; out id "$id"; }
 cmd_active_commit() { [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" tx meta state pre candidate marker; valid_id "$id" || invalid; lock; marker="$(active_marker)"; protected_file "$marker" 0600; [[ "$(<"$marker")" == "$id" ]] || die "another active transaction owns the record"; tx="$(active_tx "$id")"; if [[ ! -e "$tx" && ! -L "$tx" ]]; then /usr/bin/rm -f -- "$marker"; out state committed; out id "$id"; return; fi; safe_dir "$tx"; meta="$tx/metadata.tsv"; protected_file "$meta" 0600; state="$(metadata "$meta" state)"; pre="$(metadata "$meta" pre_sha256)"; candidate="$(metadata "$meta" candidate_sha256)"; if [[ "$state" == applied ]]; then [[ "$(live_hash)" == "$candidate" ]] || die "applied record changed"; elif [[ "$state" == rolledback ]]; then [[ "$(live_hash)" == "$pre" ]] || die "rolled-back record changed"; else die "active transaction is unresolved"; fi; /usr/bin/rm -rf --one-file-system -- "$tx"; /usr/bin/rm -f -- "$marker"; out state committed; out id "$id"; }
 
@@ -1599,7 +1643,7 @@ case "$command" in
   background-jobs) sub="${1:-}"; shift || true; case "$sub" in state) cmd_background_jobs_state "$@";; pause) cmd_background_jobs_pause "$@";; resume) cmd_background_jobs_resume "$@";; *) invalid;; esac;;
   upgrade-freeze) sub="${1:-}"; shift || true; case "$sub" in check) cmd_upgrade_freeze_check "$@";; status) cmd_upgrade_freeze_status "$@";; quiescence) cmd_upgrade_freeze_quiescence "$@";; maintenance-off) cmd_upgrade_freeze_maintenance_off "$@";; activate) cmd_upgrade_freeze_activate "$@";; release) cmd_upgrade_freeze_release "$@";; *) invalid;; esac;;
   upgrade-fetch) sub="${1:-}"; shift || true; case "$sub" in status) cmd_upgrade_fetch_status "$@";; consume) cmd_upgrade_fetch_consume "$@";; complete) cmd_upgrade_fetch_complete "$@";; *) invalid;; esac;;
-  upgrade-stage) sub="${1:-}"; shift || true; case "$sub" in consume) cmd_upgrade_stage_consume "$@";; boundary) cmd_upgrade_stage_boundary "$@";; status) cmd_upgrade_stage_status "$@";; abort) cmd_upgrade_stage_abort "$@";; maintenance-off) cmd_upgrade_stage_maintenance_off "$@";; accept) cmd_upgrade_stage_accept "$@";; recovered) cmd_upgrade_stage_recovered "$@";; *) invalid;; esac;;
+  upgrade-stage) sub="${1:-}"; shift || true; case "$sub" in consume) cmd_upgrade_stage_consume "$@";; install-compose) cmd_upgrade_stage_install_compose "$@";; boundary) cmd_upgrade_stage_boundary "$@";; status) cmd_upgrade_stage_status "$@";; abort-claim) cmd_upgrade_stage_abort_claim "$@";; abort) cmd_upgrade_stage_abort "$@";; maintenance-off) cmd_upgrade_stage_maintenance_off "$@";; accept) cmd_upgrade_stage_accept "$@";; recovered) cmd_upgrade_stage_recovered "$@";; *) invalid;; esac;;
   db-cutover) sub="${1:-}"; shift || true; case "$sub" in begin) cmd_db_cutover_begin "$@";; env-install) cmd_db_cutover_env_install "$@";; temp-start) cmd_db_cutover_temp_start "$@";; reset-preparing) cmd_db_cutover_reset_preparing "$@";; attest) cmd_db_cutover_attest "$@";; detach) cmd_db_cutover_detach "$@";; switch) cmd_db_cutover_switch "$@";; candidate-ready) cmd_db_cutover_candidate_ready "$@";; running) cmd_db_cutover_running "$@";; accepted) cmd_db_cutover_accepted "$@";; abort) cmd_db_cutover_abort "$@";; recovery-detach) cmd_db_cutover_recovery_detach "$@";; source-ready) cmd_db_cutover_source_ready "$@";; recovered) cmd_db_cutover_recovered "$@";; status) cmd_db_cutover_status "$@";; *) invalid;; esac;;
   active-record) sub="${1:-}"; shift || true; case "$sub" in presence) cmd_active_presence "$@";; status) cmd_active_status "$@";; prepare) cmd_active_prepare "$@";; apply) cmd_active_apply "$@";; rollback) cmd_active_rollback "$@";; commit) cmd_active_commit "$@";; *) invalid;; esac;;
   runtime-backup) sub="${1:-}"; shift || true; case "$sub" in size) cmd_runtime_backup_size "$@";; stream) cmd_runtime_backup_stream "$@";; *) invalid;; esac;;

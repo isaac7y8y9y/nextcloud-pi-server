@@ -63,10 +63,24 @@ class FakeTarget:
         if args[:2] == ("background-jobs", "state"):
             return {"timer_active": "no"}
         if args[:2] == ("upgrade-stage", "boundary"):
+            if self.phase != "prepared":
+                raise a.r.RecoveryError("runtime boundary is not permitted")
             self.phase = "runtime-may-have-changed"
             if self.fail == "boundary-response":
                 raise a.r.RecoveryError("injected lost boundary response")
             return {"phase": self.phase, "id": args[2]}
+        if args[:2] == ("upgrade-stage", "install-compose"):
+            if self.phase != "prepared" or self.fail == "compose":
+                raise a.r.RecoveryError("candidate Compose installation is not permitted")
+            self.compose = "c" * 64
+            return {"state": "installed", "id": args[2]}
+        if args[:2] == ("upgrade-stage", "abort-claim"):
+            if self.fail == "claim-race":
+                self.phase = "runtime-may-have-changed"
+            if self.phase not in ("prepared", "aborting"):
+                raise a.r.RecoveryError("runtime boundary was reached")
+            self.phase = "aborting"
+            return {"phase": "aborting", "id": args[2]}
         if args[:2] == ("active-record", "prepare"):
             self.has_tx = True
             return {"state": "prepared"}
@@ -276,6 +290,19 @@ class ActivationTests(unittest.TestCase):
         with mock.patch.object(a.r, "verify_local", return_value=approval["evidence"]), \
              mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash):
             with self.assertRaisesRegex(a.r.RecoveryError, "protected prepared stage differs"):
+                a.abort_prepared(target, approval, self.candidate, self.source, self.root, self.root, self.root)
+        self.assertEqual((target.compose, target.active), ("c" * 64, "d" * 64))
+        self.assertFalse(any(call.startswith("ops active-record rollback") for call in target.calls))
+
+    def test_prepared_abort_claim_loses_boundary_race_without_rollback(self) -> None:
+        target = FakeTarget(fail="claim-race")
+        target.has_tx = True
+        target.active = "d" * 64
+        target.compose = "c" * 64
+        approval = self.prepared_approval(target)
+        with mock.patch.object(a.r, "verify_local", return_value=approval["evidence"]), \
+             mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash):
+            with self.assertRaisesRegex(a.r.RecoveryError, "runtime boundary was reached"):
                 a.abort_prepared(target, approval, self.candidate, self.source, self.root, self.root, self.root)
         self.assertEqual((target.compose, target.active), ("c" * 64, "d" * 64))
         self.assertFalse(any(call.startswith("ops active-record rollback") for call in target.calls))

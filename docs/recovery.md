@@ -80,7 +80,9 @@ stage consumption takes the same lock before writing `prepared`. If app/Caddy
 activation loses its operator process before the boundary, use
 `--abort-prepared --stage-approval <consumed-stage-approval>` with the same
 five bound directories. It checks the freeze, target, local material, and
-protected stage, restores the exact prior Compose and active record, and
+protected stage, first claims a root-owned `aborting` phase that excludes
+the runtime boundary and candidate configuration writes, then restores the
+exact prior Compose and active record, and
 leaves ingress frozen. It is retryable after interruption and refuses any
 stage that crossed the runtime boundary.
 The draft database path prepares a clean 11.4 directory from the held SQL
