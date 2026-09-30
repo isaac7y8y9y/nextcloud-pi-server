@@ -21,7 +21,8 @@ SPEC.loader.exec_module(a)
 
 class FakeTarget:
     def __init__(self, phase: str = "prepared", fail: str = ""):
-        self.config = {"NEXTCLOUD_REMOTE_PROJECT_DIR": "/srv/project"}
+        self.config = {"NEXTCLOUD_REMOTE_PROJECT_DIR": "/srv/project",
+                       "NEXTCLOUD_PI_SYSTEM_HOSTNAME": "pi.example.invalid", "NEXTCLOUD_PI_USER": "test"}
         self.login = "test@example.invalid"
         self.phase = phase
         self.fail = fail
@@ -29,11 +30,18 @@ class FakeTarget:
         self.compose = "b" * 64
         self.active = "a" * 64
         self.has_tx = False
+        self.commit_pending = False
+        self.tx_state = "applied"
+        self.stage_fields: dict[str, str] = {}
 
     def ssh(self, command: str, **_kwargs: object) -> str:
         self.calls.append("ssh " + command)
         if command.startswith("docker image inspect"):
             return "sha256:" + "1" * 64
+        if command == "hostname":
+            return "pi.example.invalid"
+        if command == "id -un":
+            return "test"
         if command.startswith("docker tag") and self.fail == "tag":
             raise a.r.RecoveryError("injected pre-prepare failure")
         if command.startswith("umask 077"):
@@ -49,7 +57,11 @@ class FakeTarget:
         if args[:2] == ("upgrade-stage", "consume"):
             return {"phase": "prepared", "id": args[2]}
         if args[:2] == ("upgrade-stage", "status"):
-            return {"phase": self.phase, "fingerprint": "f" * 64}
+            return {"phase": self.phase, "fingerprint": "f" * 64, **self.stage_fields}
+        if args[:2] == ("upgrade-freeze", "status"):
+            return {"state": "active", "id": "20260926T000000Z-123", "table_sha256": "e" * 64}
+        if args[:2] == ("background-jobs", "state"):
+            return {"timer_active": "no"}
         if args[:2] == ("upgrade-stage", "boundary"):
             self.phase = "runtime-may-have-changed"
             if self.fail == "boundary-response":
@@ -59,6 +71,8 @@ class FakeTarget:
             self.has_tx = True
             return {"state": "prepared"}
         if args[:2] == ("active-record", "presence"):
+            if self.commit_pending:
+                raise a.r.RecoveryError("interrupted commit marker")
             return {"state": "present" if self.has_tx else "absent", "id": args[2]}
         if args[:2] == ("active-record", "apply"):
             self.active = "d" * 64
@@ -66,9 +80,14 @@ class FakeTarget:
         if args[:2] == ("active-record", "status"):
             if not self.has_tx:
                 raise a.r.RecoveryError("no transaction")
-            return {"state": "applied"}
+            return {"state": self.tx_state, "pre_sha256": "a" * 64, "candidate_sha256": "d" * 64}
         if args[:2] == ("active-record", "rollback"):
             self.active = "a" * 64
+            self.tx_state = "rolledback"
+        if args[:2] == ("active-record", "commit"):
+            self.has_tx = False
+            self.commit_pending = False
+            return {"state": "committed", "id": args[2]}
         if args[:2] == ("active-images-state",):
             return {"sha256": self.active}
         if args[:2] == ("upgrade-stage", "abort"):
@@ -114,6 +133,19 @@ class ActivationTests(unittest.TestCase):
         if path.endswith("/docker-compose.yml"):
             return target.compose
         return "e" * 64
+
+    def prepared_approval(self, target: FakeTarget) -> dict[str, object]:
+        base = dict(self.base, host="pi.example.invalid", evidence=dict(self.base["evidence"], env_sha256="e" * 64))
+        artifact = a.approval_plan(self.root, base, 1000, "stage")
+        a.approval_consume(artifact, self.root, base, 1001, "stage")
+        approval = a.consumed_stage(artifact, self.root)
+        evidence = approval["evidence"]
+        target.stage_fields = {"id": self.stage_id, "fingerprint": str(approval["fingerprint"]),
+                               "target": "app", "pre_record_sha256": evidence["source_record"],
+                               "pre_compose_sha256": evidence["source_compose"],
+                               "candidate_record_sha256": evidence["candidate_record"],
+                               "candidate_compose_sha256": evidence["candidate_compose"]}
+        return approval
 
     def test_approval_tamper_expiry_and_replay(self) -> None:
         artifact = a.approval_plan(self.root, self.base, 1000, "stage")
@@ -185,6 +217,68 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(target.compose, "b" * 64)
         self.assertEqual(target.active, "a" * 64)
         self.assertFalse(any("ops service restart" in call for call in target.calls))
+
+    def test_consumed_approval_aborts_interrupted_prepared_stage(self) -> None:
+        target = FakeTarget()
+        target.has_tx = True
+        target.active = "d" * 64
+        target.compose = "c" * 64
+        approval = self.prepared_approval(target)
+        with mock.patch.object(a.r, "verify_local", return_value=approval["evidence"]), \
+             mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash), \
+             mock.patch.object(a.r, "run", return_value=""):
+            a.abort_prepared(target, approval, self.candidate, self.source, self.root, self.root, self.root)
+            a.abort_prepared(target, approval, self.candidate, self.source, self.root, self.root, self.root)
+        self.assertEqual(target.phase, "aborted")
+        self.assertEqual((target.compose, target.active, target.has_tx), ("b" * 64, "a" * 64, False))
+        self.assertFalse(any("ops service " in call for call in target.calls))
+
+    def test_prepared_abort_before_active_record_preparation(self) -> None:
+        target = FakeTarget()
+        approval = self.prepared_approval(target)
+        with mock.patch.object(a.r, "verify_local", return_value=approval["evidence"]), \
+             mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash), \
+             mock.patch.object(a.r, "run", return_value=""):
+            a.abort_prepared(target, approval, self.candidate, self.source, self.root, self.root, self.root)
+        self.assertEqual(target.phase, "aborted")
+        self.assertFalse(any(call.startswith("ops active-record rollback") for call in target.calls))
+
+    def test_prepared_abort_resumes_after_active_rollback(self) -> None:
+        target = FakeTarget()
+        target.has_tx = True
+        target.tx_state = "rolledback"
+        target.compose = "c" * 64
+        approval = self.prepared_approval(target)
+        with mock.patch.object(a.r, "verify_local", return_value=approval["evidence"]), \
+             mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash), \
+             mock.patch.object(a.r, "run", return_value=""):
+            a.abort_prepared(target, approval, self.candidate, self.source, self.root, self.root, self.root)
+        self.assertEqual(target.phase, "aborted")
+        self.assertFalse(target.has_tx)
+        self.assertFalse(any(call.startswith("ops active-record rollback") for call in target.calls))
+
+    def test_prepared_abort_finishes_interrupted_active_commit(self) -> None:
+        target = FakeTarget(phase="aborted")
+        target.commit_pending = True
+        approval = self.prepared_approval(target)
+        with mock.patch.object(a.r, "verify_local", return_value=approval["evidence"]), \
+             mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash):
+            a.abort_prepared(target, approval, self.candidate, self.source, self.root, self.root, self.root)
+        self.assertFalse(target.commit_pending)
+        self.assertIn("ops active-record commit " + self.stage_id, target.calls)
+
+    def test_prepared_abort_refuses_crossed_boundary(self) -> None:
+        target = FakeTarget(phase="runtime-may-have-changed")
+        target.has_tx = True
+        target.active = "d" * 64
+        target.compose = "c" * 64
+        approval = self.prepared_approval(target)
+        with mock.patch.object(a.r, "verify_local", return_value=approval["evidence"]), \
+             mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash):
+            with self.assertRaisesRegex(a.r.RecoveryError, "protected prepared stage differs"):
+                a.abort_prepared(target, approval, self.candidate, self.source, self.root, self.root, self.root)
+        self.assertEqual((target.compose, target.active), ("c" * 64, "d" * 64))
+        self.assertFalse(any(call.startswith("ops active-record rollback") for call in target.calls))
 
     def test_pre_prepare_failure_aborts_without_active_transaction(self) -> None:
         target = FakeTarget(fail="tag")

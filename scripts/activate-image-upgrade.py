@@ -544,6 +544,92 @@ def stage_apply(target: r.Target, base: dict[str, object], approval: dict[str, o
         raise
 
 
+def abort_prepared(target: r.Target, approval: dict[str, object], candidate: Path,
+                   source: Path, config_backup: Path, runtime: Path, images: Path) -> None:
+    stage_id = str(approval["stage_id"])
+    evidence = approval["evidence"]
+    assert isinstance(evidence, dict)
+    if approval.get("target") not in ("app", "caddy"):
+        r.reject("only an app/Caddy prepared stage can use this abort")
+    if (r.verify_local(candidate, source, config_backup, runtime, images, target.config) != evidence or
+            approval.get("host") != target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"] or
+            approval.get("project") != target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] or
+            target.ssh("hostname") != approval["host"] or
+            target.ssh("id -un") != target.config["NEXTCLOUD_PI_USER"]):
+        r.reject("prepared-stage abort target or recovery material differs")
+    freeze = target.ops("upgrade-freeze", "status")
+    if (freeze.get("state") != "active" or freeze.get("id") != approval["freeze"]["id"] or
+            freeze.get("table_sha256") != approval["freeze"]["table_sha256"] or
+            target.ops("background-jobs", "state").get("timer_active") != "no"):
+        r.reject("prepared-stage abort freeze or timer differs")
+    stage = target.ops("upgrade-stage", "status", stage_id)
+    if (stage.get("phase") not in ("prepared", "aborted") or stage.get("id") != stage_id or
+            stage.get("fingerprint") != approval["fingerprint"] or
+            stage.get("target") != approval["target"] or
+            stage.get("pre_record_sha256") != evidence["source_record"] or
+            stage.get("pre_compose_sha256") != evidence["source_compose"] or
+            stage.get("candidate_record_sha256") != evidence["candidate_record"] or
+            stage.get("candidate_compose_sha256") != evidence["candidate_compose"]):
+        r.reject("protected prepared stage differs from consumed approval")
+    project = str(approval["project"])
+    if (r.remote_hash(target, project + "/.env") != evidence["env_sha256"] or
+            r.remote_hash(target, project + "/caddy/Caddyfile") != evidence["source_caddy"]):
+        r.reject("prepared-stage abort project configuration differs")
+    try:
+        presence = target.ops("active-record", "presence", stage_id)
+    except r.RecoveryError:
+        # Commit removes its transaction directory before its ownership marker.
+        if stage["phase"] != "aborted":
+            raise
+        if (r.remote_hash(target, project + "/docker-compose.yml") != evidence["source_compose"] or
+                target.ops("active-images-state").get("sha256") != evidence["source_record"]):
+            r.reject("aborted stage no longer has its source configuration")
+        if target.ops("active-record", "commit", stage_id) != {"state": "committed", "id": stage_id}:
+            r.reject("interrupted active-record commit did not finish")
+        presence = target.ops("active-record", "presence", stage_id)
+    if presence.get("state") == "present":
+        active = target.ops("active-record", "status", stage_id)
+        if (active.get("state") not in ("prepared", "applied", "rolledback") or
+                active.get("pre_sha256") != evidence["source_record"] or
+                active.get("candidate_sha256") != evidence["candidate_record"]):
+            r.reject("prepared-stage active-record transaction differs")
+    elif presence.get("state") == "absent":
+        active = None
+    else:
+        r.reject("prepared-stage active-record presence is ambiguous")
+    compose = r.remote_hash(target, project + "/docker-compose.yml")
+    if compose not in (evidence["source_compose"], evidence["candidate_compose"]):
+        r.reject("prepared-stage Compose differs from both bound versions")
+    current_record = target.ops("active-images-state").get("sha256")
+    if current_record not in (evidence["source_record"], evidence["candidate_record"]):
+        r.reject("prepared-stage active record differs from both bound versions")
+    if stage["phase"] == "aborted":
+        if (compose != evidence["source_compose"] or current_record != evidence["source_record"] or
+                (active is not None and active["state"] != "rolledback")):
+            r.reject("aborted stage did not restore the source configuration")
+    else:
+        stage_dir = project + "/.upgrade-stage-" + stage_id
+        target.ssh("umask 077; if test -e " + r.q(stage_dir) + " || test -L " + r.q(stage_dir) +
+                   "; then test -d " + r.q(stage_dir) + " && test ! -L " + r.q(stage_dir) +
+                   " && test \"$(stat -c %a " + r.q(stage_dir) + ")\" = 700; else mkdir -m 0700 " + r.q(stage_dir) + "; fi")
+        for local_path, name in ((source / "docker-compose.yml", "source.yml"),
+                                 (HERE / "lib/atomic-transaction.sh", "atomic-transaction.sh")):
+            target.ssh("test ! -L " + r.q(stage_dir + "/" + name))
+            r.run(["scp", "-q", str(local_path), target.login + ":" + stage_dir + "/" + name])
+            if r.remote_hash(target, stage_dir + "/" + name) != r.digest(local_path):
+                r.reject("staged source Compose input differs")
+        if compose != evidence["source_compose"]:
+            install_compose(target, stage_dir, "source.yml", project)
+        if active is not None and active["state"] != "rolledback":
+            target.ops("active-record", "rollback", stage_id)
+        if (r.remote_hash(target, project + "/docker-compose.yml") != evidence["source_compose"] or
+                target.ops("active-images-state").get("sha256") != evidence["source_record"]):
+            r.reject("prepared-stage source configuration did not restore")
+        target.ops("upgrade-stage", "abort", stage_id, str(approval["fingerprint"]))
+    if active is not None:
+        target.ops("active-record", "commit", stage_id)
+
+
 def accept_evidence(target: r.Target, candidate: Path, source: Path, config_backup: Path,
                     runtime: Path, images: Path, stage_approval: Path, now: int,
                     *, allow_accepted: bool = False, allow_maintenance_on: bool = False) -> dict[str, object]:
@@ -633,7 +719,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     for name in ("plan", "apply", "maintenance-off", "plan-accept", "accept",
-                 "plan-prepare-db", "prepare-db", "resume-prepare-db", "resume-db", "abort-db"):
+                 "plan-prepare-db", "prepare-db", "resume-prepare-db", "resume-db", "abort-db",
+                 "abort-prepared"):
         mode.add_argument("--" + name, action="store_true")
     parser.add_argument("candidate", type=Path)
     parser.add_argument("source_rendered", type=Path)
@@ -646,7 +733,7 @@ def main() -> int:
     parser.add_argument("--approval", type=Path)
     args = parser.parse_args()
     needs_fetch = args.plan or args.apply or args.plan_prepare_db or args.prepare_db or args.resume_prepare_db
-    needs_stage = args.maintenance_off or args.plan_accept or args.accept or args.resume_db
+    needs_stage = args.maintenance_off or args.plan_accept or args.accept or args.resume_db or args.abort_prepared
     needs_approval = args.apply or args.accept or args.prepare_db or args.resume_prepare_db
     if (needs_fetch != (args.fetch_approval is not None) or
             (not args.abort_db and needs_stage != (args.stage_approval is not None)) or
@@ -661,6 +748,12 @@ def main() -> int:
         if not remote_now.isdecimal() or abs(now - int(remote_now)) > 60:
             r.reject("local and Pi clocks differ by more than 60 seconds")
         root = approval_root()
+        if args.abort_prepared:
+            approved = consumed_stage(args.stage_approval, root)
+            abort_prepared(target, approved, args.candidate, args.source_rendered,
+                           args.config_backup, args.held_runtime_backup, args.prior_image_recovery)
+            print(f"Pre-boundary app/Caddy stage aborted; stage={approved['stage_id']}. Ingress freeze remains held.")
+            return 0
         if args.abort_db:
             prep = json.loads(r.private_file(args.prepare_approval))
             if not isinstance(prep, dict) or not r.IDENTIFIER.fullmatch(str(prep.get("stage_id", ""))):

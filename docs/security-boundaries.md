@@ -32,6 +32,10 @@ logical names, and keeps lifecycle state beneath its root-owned state root.
 Dispatcher and installer mutations serialize on non-truncating lock files
 beneath root:root mode-`0700` `/run/nextcloud-pi-locks`; neither opens a lock
 from the world-writable `/run/lock` namespace.
+The root-owned Compose launcher and upgrade-stage consumption also serialize
+on a separate protected startup-selection lock through Compose `up`. It is
+separate from the dispatcher operations lock so a privileged service start
+cannot deadlock waiting for its launcher.
 Routine deployment cannot replace the helper, sudoers policy, validator,
 launcher, systemd files, or root policy.
 

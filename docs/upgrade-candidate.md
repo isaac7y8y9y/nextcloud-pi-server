@@ -70,6 +70,14 @@ blocked. The root commands are safety primitives; the separate draft
 image, install the candidate record and Compose, mark the boundary before
 restart, and pause for a second health-checked acceptance approval. It leaves
 the freeze held and does not release ingress or alter the source lock.
+The root stage-consumption action and Compose launcher share a protected
+startup-selection lock through the launch, so a launcher that passed its guard
+cannot select a newly installed candidate before the runtime boundary.
+If an app/Caddy `--apply` process is interrupted while its stage is still
+`prepared`, `--abort-prepared` with the original consumed `--stage-approval`
+and the same five bound directories restores the prior record and Compose,
+then aborts the stage without releasing the freeze. It refuses a crossed
+runtime boundary; use the full-runtime restore path instead.
 For the initial MariaDB 11.8→11.4 stage, the driver now has a draft
 `--plan-prepare-db`/`--prepare-db`/`--resume-prepare-db` sequence. It binds a
 private source inventory and restricted credentials to the held SQL, imports

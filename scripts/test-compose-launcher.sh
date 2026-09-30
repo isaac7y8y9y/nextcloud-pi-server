@@ -21,8 +21,14 @@ NEXTCLOUD_PUBLIC_HOSTNAME=nextcloud.test.invalid \
 NEXTCLOUD_DEPLOYMENT_ENV_FILE="$fixture" "$SCRIPT_DIR/render-deployment-config.sh" --output-dir "$TEST_DIR/rendered"
 
 mkdir -p "$TEST_DIR/nextcloud-docker" "$TEST_DIR/bin" "$TEST_DIR/libexec"
+mkdir -m 700 "$TEST_DIR/locks"
+: >"$TEST_DIR/locks/startup-selection.lock"
+chmod 600 "$TEST_DIR/locks/startup-selection.lock"
 cat >"$TEST_DIR/libexec/ops" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${LAUNCHER_ASSERT_LOCK:-no}" == yes ]]; then
+  ! /usr/bin/flock -n "$LAUNCHER_LOCK" true || exit 1
+fi
 [[ "$1" == upgrade-startup-guard && $# == 1 && "${LAUNCHER_CUTOVER_BLOCK:-no}" == no ]]
 EOF
 chmod 700 "$TEST_DIR/libexec/ops"
@@ -38,6 +44,9 @@ sed \
   -e "s|RECORD=/etc/nextcloud-pi/active-images.env|RECORD=$TEST_DIR/active-images.env|" \
   -e "s|/usr/local/libexec/nextcloud-pi-validate-active-images|$TEST_DIR/libexec/validate|" \
   -e "s|/usr/local/libexec/nextcloud-pi-ops|$TEST_DIR/libexec/ops|" \
+  -e "s|/run/nextcloud-pi-locks|$TEST_DIR/locks|" \
+  -e "s|0:0:700|$(id -u):$(id -g):700|" \
+  -e "s|0:0:600|$(id -u):$(id -g):600|" \
   -e "s|/run/nextcloud-pi-compose.XXXXXX|$TEST_DIR/snapshot.XXXXXX|" \
   "$TEST_DIR/rendered/launcher/nextcloud-pi-compose-start" >"$TEST_DIR/launcher"
 chmod 700 "$TEST_DIR/launcher"
@@ -45,6 +54,9 @@ chmod 700 "$TEST_DIR/launcher"
 cat >"$TEST_DIR/bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${LAUNCHER_ASSERT_LOCK:-no}" == yes ]]; then
+  ! /usr/bin/flock -n "$LAUNCHER_LOCK" true || exit 1
+fi
 if [[ "$1 $2" == 'image inspect' ]]; then
   if [[ "${LAUNCHER_IMAGE_MODE:-source}" == recovered && " $* " == *' --platform linux/arm64/v8 '* ]]; then
     case "${@: -1}" in
@@ -82,6 +94,7 @@ if [[ "$(uname -s)" == Darwin && "$1" == -c ]]; then
   case "$2" in
     %a) /usr/bin/stat -f '%Lp' "$3" ;;
     %u) /usr/bin/stat -f '%u' "$3" ;;
+    %u:%g:%a) /usr/bin/stat -f '%u:%g:%Lp' "$3" ;;
     *) exit 2 ;;
   esac
 else
@@ -89,9 +102,17 @@ else
 fi
 EOF
 chmod 700 "$TEST_DIR/bin/stat"
+cat >"$TEST_DIR/bin/flock" <<'EOF'
+#!/usr/bin/env bash
+if [[ -x /usr/bin/flock ]]; then exec /usr/bin/flock "$@"; fi
+exit 0
+EOF
+chmod 700 "$TEST_DIR/bin/flock"
 
 export PATH="$TEST_DIR/bin:$PATH"
 export LAUNCHER_CALLS="$TEST_DIR/calls"
+export LAUNCHER_LOCK="$TEST_DIR/locks/startup-selection.lock"
+if [[ "$(uname -s)" == Linux ]]; then export LAUNCHER_ASSERT_LOCK=yes; fi
 for scenario in wrong extra; do
   : >"$LAUNCHER_CALLS"
   export LAUNCHER_SCENARIO="$scenario"

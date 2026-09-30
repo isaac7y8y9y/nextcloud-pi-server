@@ -1,9 +1,9 @@
 format	nextcloud-pi-bundle-manifest-v1
 version	1
 # file<TAB>logical-name<TAB>repository-path<TAB>installed-path<TAB>mode<TAB>sha256
-file	privileged-helper	privileged/nextcloud-pi-ops	/usr/local/libexec/nextcloud-pi-ops	0700	95b5b56c1d2ef777fd29fcc6e4d8019ffdfdd635c8168cd894136674eb974400
+file	privileged-helper	privileged/nextcloud-pi-ops	/usr/local/libexec/nextcloud-pi-ops	0700	635b45d759ea504bf80c00afa7dcf1b1925bd0041f7128deb885ffc072200967
 file	active-image-validator	systemd/nextcloud-pi-validate-active-images	/usr/local/libexec/nextcloud-pi-validate-active-images	0700	9e454ad92761a94be29c8d3defa15dfbacee583474fc7240954b5ddc76a59d48
-file	compose-launcher	systemd/nextcloud-pi-compose-start	/usr/local/libexec/nextcloud-pi-compose-start	0700	7441de951b07ac17ac80150b98458ea968b94e7576cdfc0c1889f8735da65c20
+file	compose-launcher	systemd/nextcloud-pi-compose-start	/usr/local/libexec/nextcloud-pi-compose-start	0700	ebe48488832931e431bcf20dd2a00b015934d9a6bb113081655da0a7c4323770
 file	background-jobs-runner	systemd/nextcloud-pi-background-jobs	/usr/local/libexec/nextcloud-pi-background-jobs	0700	e3eb267d8bff138841ac22662059447206af733ffe9116bab32c1598b34f6b10
 file	nextcloud-unit	systemd/nextcloud.service	/etc/systemd/system/nextcloud.service	0644	e6a59c79dfafea05f145932a1f59a0fa626879ddf812687934d50de9e00cfcd0
 file	background-jobs-unit	systemd/nextcloud-background-jobs.service	/etc/systemd/system/nextcloud-background-jobs.service	0644	8faec96e8f19ddf921d14361084eac56ed7cd22d333cb7141c3b928f9507dca8

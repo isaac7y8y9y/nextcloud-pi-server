@@ -75,6 +75,14 @@ source runtime, then tags the candidate, installs its active record and Compose,
 records the root boundary, and restarts the stack. A successful stage stops
 with maintenance mode and ingress freeze held. It does not migrate, accept,
 release the freeze, prune images, or alter the repository source lock.
+The Compose launcher holds a protected startup-selection lock through `up`;
+stage consumption takes the same lock before writing `prepared`. If app/Caddy
+activation loses its operator process before the boundary, use
+`--abort-prepared --stage-approval <consumed-stage-approval>` with the same
+five bound directories. It checks the freeze, target, local material, and
+protected stage, restores the exact prior Compose and active record, and
+leaves ingress frozen. It is retryable after interruption and refuses any
+stage that crossed the runtime boundary.
 The draft database path prepares a clean 11.4 directory from the held SQL
 under a separate approval, removes the old containers, records the full
 recovery boundary, and promotes that directory before candidate startup.
