@@ -37,7 +37,8 @@ scripts/test-runtime-recovery.sh --apply "$RUNTIME_BACKUP"
 The drill restores and compares the Nextcloud and Caddy archives, imports the
 database dump into a disposable MariaDB container, runs `mariadb-check`, and
 removes all disposable targets. Success ends with `Controlled runtime recovery
-drill passed`.
+drill passed`. The disposable database container has no external Docker network;
+the drill checks its database over loopback from inside that container.
 
 The apply command prints a recovery-test ID before creating targets. If it
 reports failed or incomplete cleanup, retain that ID, obtain approval for the
