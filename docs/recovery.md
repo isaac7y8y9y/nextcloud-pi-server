@@ -73,8 +73,13 @@ backup, and prior image-recovery directories as the restore driver. Its
 plan. It verifies the protected completed-fetch marker, loaded digest and
 source runtime, then tags the candidate, installs its active record and Compose,
 records the root boundary, and restarts the stack. A successful stage stops
-with maintenance mode and ingress freeze held. It does not migrate, accept,
-release the freeze, prune images, or alter the repository source lock.
+with maintenance mode and ingress freeze held. It does not accept the stage,
+release the freeze, prune images, alter the repository source lock, or invoke
+migration commands itself. However, the first start of a newer
+Nextcloud image can automatically migrate the persistent tree and database.
+The root stage records `runtime-may-have-changed` before that start; afterward,
+configuration-only rollback is unsafe and full-runtime restoration or an
+approved forward repair is required.
 The Compose launcher holds a protected startup-selection lock through `up`;
 stage consumption takes the same lock before writing `prepared`. If app/Caddy
 activation loses its operator process before the boundary, use

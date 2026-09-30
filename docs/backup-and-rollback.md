@@ -111,9 +111,12 @@ Caddy pre-state from `CONFIG_BACKUP`. If application installation, restart, or
 health validation fails, it automatically restores those two files, reloads
 systemd, restarts the service, and checks rollback health.
 
-There is no standalone general configuration-restore command and no automated
-live runtime-restore command in this repository. A configuration backup must
-not be copied over live files manually. A runtime backup has only the disposable
-recovery drill described above; live data recovery requires a separately
-designed and approved procedure. Image rollback and import are independent and
-documented in [recovery](recovery.md#image-recovery-and-restore-readiness).
+There is no standalone general configuration-restore command. A configuration
+backup must not be copied over live files manually. The repository has a draft,
+approval-bound [full-runtime restore driver](recovery.md#draft-full-runtime-restore-after-an-upgrade-boundary)
+for an upgrade after the runtime boundary, but it has not been proven on the Pi
+or installed as an operational procedure. Do not treat the disposable recovery
+drill or this draft driver as authorization for a live restore; that still
+requires its own verified recovery material and explicit approval. Image
+rollback and import are independent and documented in
+[recovery](recovery.md#image-recovery-and-restore-readiness).
