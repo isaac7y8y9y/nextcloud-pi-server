@@ -1,13 +1,51 @@
 # Item-4 ingress and drain proof plan
 
-This is a **pending test plan**, not evidence that the production Pi is
-quiesced or that issue #26 can enter item 5. As of September 26, 2026, the
-installed privileged dispatcher has no `upgrade-freeze` command. No freeze,
-firewall, maintenance-mode, or image change was made while preparing this plan.
-Do not install the draft bundle or execute the live test before the item-4
-failure tests and code/PR reviews are complete and the exact downtime window
-and recovery path are approved. The test changes live ingress and background
-jobs temporarily, even though it does not upgrade an image.
+This is the item-4 test protocol, with a measured checkpoint below. The
+checkpoint proves the tested ingress lifecycle, not that a version upgrade or
+production runtime restoration has been performed. Do not install a new bundle
+or execute the live test before the item-4 failure tests and code/PR reviews
+are complete and the exact downtime window and recovery path are approved.
+The test temporarily changes live ingress and background jobs without upgrading
+an image. Item 5 retains its separate fresh-evidence and approval gates.
+
+## Measured checkpoint — October 1, 2026
+
+The reviewed correction at `040979a` was installed and its bundle manifest
+verified before the separate-client test. Readiness had no hard failures;
+configuration/runtime/prior-image recovery material was reverified within its
+freshness limit. The following observations passed on the deployed Docker
+iptables path with direct routing disabled:
+
+- Trusted IPv4 HTTPS and a synthetic authenticated WebDAV roundtrip passed
+  before freezing. Two requests used the same retained TLS connection.
+- Fresh host TCP 80/443, alternate IPv4 addresses, direct-container paths, and
+  the retained connection could not reach the application while frozen. A
+  separately attempted authenticated PUT was denied. SSH and SMB remained
+  available; Pi IPv4 and IPv6 loopback HTTPS reached installed Nextcloud.
+- A synthetic upload started before activation and safely aborted. Its final
+  file and the denied PUT's final file were absent. The protected drain check
+  passed two zero app/Caddy socket and InnoDB-transaction samples five seconds
+  apart. A later loopback probe opened internal connections and correctly
+  blocked the first held prerequisite check; the first retry passed after
+  those connections settled, without bypassing the guard.
+- The held capture completed and verified its payloads. Its `runtime-backup-v2`
+  manifest bound the same freeze ID and rule hash; maintenance mode, paused
+  timer, source images, and running container identities were preserved.
+- Interrupting SSH during a disposable read-only protected quiescence recheck
+  left the same active rule, maintenance mode, and paused timer intact. No real
+  backup was interrupted.
+- Approval-bound release removed the exact rule, restored the prior active
+  timer, and left maintenance off. LAN synthetic upload/download/delete passed,
+  release replay was denied, and the test account and retained client were
+  removed/stopped. Source image and container identities remained unchanged.
+
+LAN IPv6 HTTPS was unavailable from the tested Mac, including scoped link-local
+probes, so LAN IPv6 denial is **not applicable for this checkpoint**, not passed.
+Reassess it when connectivity changes. This interruption test is not a Pi reboot
+or Docker restart test. No candidate image activation, production migration, or
+full production-runtime restore occurred. Detailed evidence and private recovery
+artifacts remain outside Git. Repeat the applicable proof and freshness checks
+before each approved item-5 stage.
 
 ## Preconditions and evidence
 
