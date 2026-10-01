@@ -1,5 +1,6 @@
 [Unit]
 Description=Run Nextcloud background jobs while the Pi is on
+ConditionPathExists=!/var/lib/nextcloud-pi-ops/upgrade-freeze/timer-held
 
 [Timer]
 OnBootSec=10min

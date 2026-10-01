@@ -266,7 +266,7 @@ remote "set -eu
   printf 'MARIADB_ROOT_PASSWORD=%s\\nMARIADB_DATABASE=nextcloud_recovery\\n' \"\$recovery_password\" >\"\$test_environment\"
   test -d '$REMOTE_TEST_ROOT/mariadb-data' && test ! -L '$REMOTE_TEST_ROOT/mariadb-data'
   docker image inspect '$database_image' >/dev/null
-  docker run --pull=never -d --name '$TEST_DB_CONTAINER' --env-file \"\$test_environment\" -v '$REMOTE_TEST_ROOT/mariadb-data:/var/lib/mysql' '$database_image' >/dev/null
+  docker run --pull=never --network none -d --name '$TEST_DB_CONTAINER' --env-file \"\$test_environment\" -v '$REMOTE_TEST_ROOT/mariadb-data:/var/lib/mysql' '$database_image' >/dev/null
   rm -f \"\$test_environment\"
   trap - EXIT HUP INT TERM
   ready=0

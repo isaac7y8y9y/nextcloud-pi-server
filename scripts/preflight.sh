@@ -9,10 +9,17 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 PREFLIGHT_MODE="${1:---readiness}"
-[[ $# -le 1 && ( "$PREFLIGHT_MODE" == "--readiness" || "$PREFLIGHT_MODE" == "--conformance" ) ]] || {
-  printf 'Usage: %s [--readiness|--conformance]\n' "$0" >&2
+CANDIDATE_DIR=""
+if [[ $# -eq 3 && "$1" == "--conformance" && "$2" == "--candidate" ]]; then
+  CANDIDATE_DIR="$3"
+  [[ "$CANDIDATE_DIR" == /* ]] || { printf 'Error: candidate path must be absolute\n' >&2; exit 2; }
+  python3 "$SCRIPT_DIR/verify-image-upgrade.py" "$CANDIDATE_DIR" >/dev/null || exit 1
+  export NEXTCLOUD_IMAGE_LOCK_FILE="$CANDIDATE_DIR/image-lock.env"
+elif [[ $# -gt 1 || ( "$PREFLIGHT_MODE" != "--readiness" && "$PREFLIGHT_MODE" != "--conformance" ) ]]; then
+  printf 'Usage: %s [--readiness|--conformance [--candidate <private-directory>]]\n' "$0" >&2
   exit 2
-}
+fi
+cd "$REPOSITORY_ROOT"
 
 source "$SCRIPT_DIR/lib/deployment-config.sh"
 source "$SCRIPT_DIR/lib/image-lock.sh"
@@ -35,6 +42,14 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 RENDERED_CONFIG_DIR="$TMP_DIR/rendered"
 "$SCRIPT_DIR/render-deployment-config.sh" --output-dir "$RENDERED_CONFIG_DIR"
+if [[ -n "$CANDIDATE_DIR" ]]; then
+  for pair in 'caddy/Caddyfile:Caddyfile' 'active-images/active-images.env:active-images.env'; do
+    [[ -f "$RENDERED_CONFIG_DIR/${pair%%:*}" ]] && cmp -s "$RENDERED_CONFIG_DIR/${pair%%:*}" "$CANDIDATE_DIR/${pair#*:}" || {
+      printf 'Error: private candidate differs from rendered deployment configuration\n' >&2
+      exit 1
+    }
+  done
+fi
 
 section() {
   printf '\n== %s ==\n' "$1"
@@ -331,10 +346,19 @@ else
 fi
 
 check_active_image_identity() {
-  local active_image_mode output state
+  local active_image_mode output state active_hash lock_hash
   if output="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops active-images-state" 2>/dev/null)"; then
     active_image_mode="$(awk -F $'\t' '$1 == "mode" { print $2 }' <<<"$output")"
-    if [[ "$active_image_mode" == source ]]; then
+    if [[ -n "$CANDIDATE_DIR" ]]; then
+      active_hash="$(awk -F $'\t' '$1 == "sha256" { print $2 }' <<<"$output")"
+      lock_hash="$(awk -F $'\t' '$1 == "source_lock_sha256" { print $2 }' <<<"$output")"
+      if [[ "$active_image_mode" == source && "$active_hash" == "$(local_sha256 "$CANDIDATE_DIR/active-images.env")" &&
+            "$lock_hash" == "$(local_sha256 "$CANDIDATE_DIR/image-lock.env")" ]]; then
+        record PASS "Protected active-image record matches the private candidate"
+      else
+        record FAIL "Protected active-image record differs from the private candidate"
+      fi
+    elif [[ "$active_image_mode" == source ]]; then
       record PASS "Protected source active-image record matches local image tags"
     elif [[ "$PREFLIGHT_MODE" == "--readiness" ]]; then
       record FAIL "Protected active-image record is recovered; readiness requires source mode"
@@ -346,6 +370,10 @@ check_active_image_identity() {
   else
     record FAIL "Protected active image record is invalid, unreadable, or differs"
   fi
+}
+local_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
+  else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 check_active_image_identity
 
@@ -470,6 +498,9 @@ fi
 
 section "Safe configuration comparison"
 
+if [[ -n "$CANDIDATE_DIR" ]]; then
+  compare_file_to_remote_command "candidate Compose" "$CANDIDATE_DIR/docker-compose.yml" "cat '$NEXTCLOUD_REMOTE_PROJECT_DIR/docker-compose.yml'" "$NEXTCLOUD_REMOTE_PROJECT_DIR/docker-compose.yml"
+fi
 compare_normalized_file_to_remote_command "Caddyfile" "$RENDERED_CONFIG_DIR/caddy/Caddyfile" "cat '$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile'" "$NEXTCLOUD_REMOTE_PROJECT_DIR/caddy/Caddyfile"
 for protected in compose-launcher active-image-validator; do
   if remote "sudo -n /usr/local/libexec/nextcloud-pi-ops protected-state '$protected'" >/dev/null 2>&1; then
@@ -496,7 +527,14 @@ case "$background_jobs_state" in
     fi
     compare_file_to_remote_command "background-job service" "$RENDERED_CONFIG_DIR/systemd/nextcloud-background-jobs.service" "cat /etc/systemd/system/nextcloud-background-jobs.service" "/etc/systemd/system/nextcloud-background-jobs.service"
     compare_file_to_remote_command "background-job timer" "$RENDERED_CONFIG_DIR/systemd/nextcloud-background-jobs.timer" "cat /etc/systemd/system/nextcloud-background-jobs.timer" "/etc/systemd/system/nextcloud-background-jobs.timer"
-    if remote "systemctl is-enabled --quiet nextcloud-background-jobs.timer && systemctl is-active --quiet nextcloud-background-jobs.timer" >/dev/null 2>&1; then
+    if [[ -n "$CANDIDATE_DIR" ]]; then
+      freeze_state="$(remote "sudo -n /usr/local/libexec/nextcloud-pi-ops upgrade-freeze status" 2>/dev/null || true)"
+      if [[ "$freeze_state" == *$'state\tactive'* ]] && remote "! systemctl is-active --quiet nextcloud-background-jobs.timer" >/dev/null 2>&1; then
+        record PASS "Ingress freeze is active and background-job timer is paused"
+      else
+        record FAIL "Candidate conformance requires an active freeze and paused timer"
+      fi
+    elif remote "systemctl is-enabled --quiet nextcloud-background-jobs.timer && systemctl is-active --quiet nextcloud-background-jobs.timer" >/dev/null 2>&1; then
       record PASS "background-job timer is enabled and active"
     else
       drift "background-job timer is not enabled and active"
@@ -549,9 +587,9 @@ app_image="$(remote "docker inspect nextcloud-docker-app-1 --format '{{.Config.I
 db_image="$(remote "docker inspect nextcloud-docker-db-1 --format '{{.Config.Image}}'" 2>/dev/null || true)"
 caddy_image="$(remote "docker inspect nextcloud-docker-caddy-1 --format '{{.Config.Image}}'" 2>/dev/null || true)"
 
-[[ "$app_image" == "nextcloud:30" ]] && record PASS "App image matches nextcloud:30" || drift "App image differs from nextcloud:30"
-[[ "$db_image" == "mariadb:11" ]] && record PASS "Database image matches mariadb:11" || drift "Database image differs from mariadb:11"
-[[ "$caddy_image" == "caddy:2" ]] && record PASS "Caddy image matches caddy:2" || drift "Caddy image differs from caddy:2"
+[[ "$app_image" == "$NEXTCLOUD_IMAGE_APP_TAG" ]] && record PASS "App image matches reviewed lock" || drift "App image differs from reviewed lock"
+[[ "$db_image" == "$NEXTCLOUD_IMAGE_DB_TAG" ]] && record PASS "Database image matches reviewed lock" || drift "Database image differs from reviewed lock"
+[[ "$caddy_image" == "$NEXTCLOUD_IMAGE_CADDY_TAG" ]] && record PASS "Caddy image matches reviewed lock" || drift "Caddy image differs from reviewed lock"
 
 app_restart="$(remote "docker inspect nextcloud-docker-app-1 --format '{{.HostConfig.RestartPolicy.Name}}'" 2>/dev/null || true)"
 db_restart="$(remote "docker inspect nextcloud-docker-db-1 --format '{{.HostConfig.RestartPolicy.Name}}'" 2>/dev/null || true)"

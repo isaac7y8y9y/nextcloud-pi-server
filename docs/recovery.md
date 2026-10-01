@@ -2,9 +2,9 @@
 
 Recover only from a verified protected artifact bound to the configured target.
 Begin with the read-only validation mode and stop at every stated human approval
-pause. A human approval pause is not a generated approval artifact: deployment
-and image import are the only workflows here that generate expiring, single-use
-authorization files.
+pause. A human approval pause is not a generated approval artifact: deployment,
+image import, and the draft live-runtime restore and activation drivers generate expiring,
+single-use authorization files for their separate operations.
 
 Treat all backups, image archives, attestations, disposable extraction paths,
 and command output as sensitive. Keep them outside Git and do not publish them.
@@ -37,7 +37,8 @@ scripts/test-runtime-recovery.sh --apply "$RUNTIME_BACKUP"
 The drill restores and compares the Nextcloud and Caddy archives, imports the
 database dump into a disposable MariaDB container, runs `mariadb-check`, and
 removes all disposable targets. Success ends with `Controlled runtime recovery
-drill passed`.
+drill passed`. The disposable database container has no external Docker network;
+the drill checks its database over loopback from inside that container.
 
 The apply command prints a recovery-test ID before creating targets. If it
 reports failed or incomplete cleanup, retain that ID, obtain approval for the
@@ -51,14 +52,161 @@ scripts/test-runtime-recovery.sh --cleanup "$RECOVERY_TEST_ID"
 Success prints that the disposable recovery-test targets are absent. Never
 construct a different path or remove recovery targets manually.
 
-This drill is the repository's only runtime restore automation. There is no
-script that restores a runtime backup into live Nextcloud, MariaDB, and Caddy
-state. A passed drill is recovery evidence, not authority or tooling for a live
-runtime restore.
+This drill remains the only *live-tested* runtime restore automation. Draft PR
+#37 also contains a planned, single-use approved live-restore driver described
+below. That driver is not yet a production operator procedure: its failure
+paths have local tests, but it and the ingress freeze have not been proved on
+the Pi's actual network path or passed the required code/PR reviews. A passed
+disposable drill alone does not authorize a live restore.
 
 The helper derives every disposable recovery path from that ID beneath the
 policy-bound storage mount. It validates the mount and UUID again before each
 creation, restoration, or recursive cleanup; never substitute a path manually.
+
+## Draft full-runtime restore after an upgrade boundary
+
+The separate draft `scripts/activate-image-upgrade.py` stages exactly one
+fetched, verified image under the active ingress freeze. It accepts the same
+candidate, source-rendered baseline, configuration backup, held runtime
+backup, and prior image-recovery directories as the restore driver. Its
+`--plan`/`--apply` modes additionally require the consumed `--fetch-approval`;
+`--apply` additionally requires the fresh private `--approval` printed by the
+plan. It verifies the protected completed-fetch marker, loaded digest and
+source runtime, then tags the candidate, installs its active record and Compose,
+records the root boundary, and restarts the stack. A successful stage stops
+with maintenance mode and ingress freeze held. It does not accept the stage,
+release the freeze, prune images, alter the repository source lock, or invoke
+migration commands itself. However, the first start of a newer
+Nextcloud image can automatically migrate the persistent tree and database.
+The root stage records `runtime-may-have-changed` before that start; afterward,
+configuration-only rollback is unsafe and full-runtime restoration or an
+approved forward repair is required.
+The Compose launcher holds a protected startup-selection lock through `up`;
+stage consumption takes the same lock before writing `prepared`. If app/Caddy
+activation loses its operator process before the boundary, use
+`--abort-prepared --stage-approval <consumed-stage-approval>` with the same
+five bound directories. It checks the freeze, target, local material, and
+protected stage, first claims a root-owned `aborting` phase that excludes
+the runtime boundary and candidate configuration writes, then restores the
+exact prior Compose and active record, and
+leaves ingress frozen. It is retryable after interruption and refuses any
+stage that crossed the runtime boundary.
+The draft database path prepares a clean 11.4 directory from the held SQL
+under a separate approval, removes the old containers, records the full
+recovery boundary, and promotes that directory before candidate startup.
+The original 11.8 directory is preserved. The root startup guard rejects
+partial switches, and `--resume-db` continues a consumed cutover approval.
+Synthetic fault, Linux directory, and isolated Docker-daemon tests now cover
+the core cutover and recovery boundaries. The remaining CI, engineering/PR
+reviews, and measured Pi proof in the
+[cutover design](issue-26-mariadb-cutover-design.md) still gate live use.
+
+After separate application/migration, use `--maintenance-off` with the consumed
+`--stage-approval` and the same five directories. This stage-bound action
+rechecks the freeze, candidate configuration and running image IDs, drains
+work, turns maintenance mode off, and checks loopback health while ingress
+remains blocked. It can be retried if health checking fails. Then
+`--plan-accept` and
+`--accept` use `--stage-approval` (the consumed stage artifact) and the same
+five directories; `--accept` also requires its newly printed `--approval`.
+Acceptance rechecks the protected stage and candidate image IDs, maintenance
+off, no app host port, and loopback health; it marks the stage accepted and
+commits the active-record transaction. The freeze still requires a separate
+release. If staging fails before the root boundary, the driver attempts only
+the approved pre-start configuration rollback and verifies it. At or after an
+ambiguous boundary, never use config-only rollback: preserve the freeze and
+use the full-runtime restore below or a separately approved forward repair.
+This driver is item-4 code under local test, **not a live Pi upgrade procedure**.
+The real ingress/drain path, disposable rehearsal, reviews, and item-5 approval
+remain outstanding.
+
+`scripts/restore-live-runtime.py` is an item-4 implementation under test, not
+yet an item-5 production instruction. It requires a root-owned upgrade stage
+already at `runtime-may-have-changed`, its active-record
+transaction, an active ingress freeze, a matching `runtime-backup-v2` held at
+that freeze, verified prior image recovery, a source-rendered baseline, and a
+verified one-image candidate. The source configuration backup must include a
+protected `.env` matching the unchanged live project file. Planning is
+read-only on the Pi and creates a private, 15-minute approval artifact outside
+Git; applying consumes it before the first mutation.
+The held runtime backup must carry a validated `dbtableprefix` captured from
+Nextcloud during the quiesced snapshot. Restore uses this bound prefix for the
+staged file-cache check; older backups without it remain verifiable as archives
+but are not eligible for this live-restore driver. Capture a fresh held backup
+before a stage rather than assuming the default `oc_` prefix.
+If an interrupted restore is still in the protected `prepared` phase,
+`--resume` checks the consumed approval and current stage/freeze, removes only
+the identity-bound temporary import container, resets the isolated staged
+datasets, and restarts the restore. It never discards the live or preserved
+failed runtime. A prepared app/Caddy activation stage blocks service startup;
+an interrupted configuration switch must reach its protected boundary or be
+aborted before Compose can restart. For app/Caddy recovery, the root dispatcher
+accepts only stage-bound prior or candidate image identity for the target
+container, tolerates an already absent container, disables restart policies on
+existing objects, stops the service, and removes the identity-checked stack
+objects before recording a detached checkpoint. Docker may restart during a
+detached, Caddy-copying, or promoting phase so recovery can resume, but the Compose launcher
+remains blocked until all four runtime datasets and prior configuration are
+restored. Interrupted Caddy staging is discarded and recopied from the held
+snapshot; promotion-phase resumes continue from the guarded directory moves.
+If promotion already completed and the database journal reached
+`source-ready`, resume verifies the restored configuration and retries service
+start and health without repeating promotion or that startup gate. App/Caddy
+recovery has its own `source-ready` checkpoint before service start. Both paths
+retain the ingress freeze until verified recovery.
+If the upgrade stage was marked recovered but the database cutover journal is
+still `source-ready`, the same consumed approval can resume the final journal
+transition after rechecking the prior configuration, running image IDs,
+maintenance state, and loopback health; it does not restart the stack.
+For a database cutover, restoration first finishes any interrupted directory
+placement under the closed startup gate, removes candidate container objects,
+and then promotes all four datasets. The protected journal permits Docker to
+start for an interrupted container-free recovery while keeping Compose
+startup blocked until the prior configuration and runtime are restored.
+
+The draft interface is:
+
+```sh
+scripts/restore-live-runtime.py --plan "$STAGE_ID" "$CANDIDATE" \
+  "$SOURCE_RENDERED" "$CONFIG_BACKUP" "$HELD_RUNTIME_BACKUP" "$PRIOR_IMAGE_RECOVERY"
+scripts/restore-live-runtime.py --apply "$STAGE_ID" "$CANDIDATE" \
+  "$SOURCE_RENDERED" "$CONFIG_BACKUP" "$HELD_RUNTIME_BACKUP" "$PRIOR_IMAGE_RECOVERY" \
+  --approval "$RESTORE_APPROVAL"
+scripts/restore-live-runtime.py --resume "$STAGE_ID" "$CANDIDATE" \
+  "$SOURCE_RENDERED" "$CONFIG_BACKUP" "$HELD_RUNTIME_BACKUP" "$PRIOR_IMAGE_RECOVERY" \
+  --approval "$RESTORE_APPROVAL"
+```
+
+`--plan` is only available after the root-owned runtime boundary. A partial
+database switch may still have its active-record transaction prepared; the
+restore driver binds the protected cutover identities and accepts only the
+recorded source/candidate configuration combinations. It does not create the held
+backup or freeze; it requires that backup to predate the stage by no more than
+24 hours. Review the private approval record's exact stage, hashes,
+actions, exclusions, and expiry before any future approved apply; the plan
+command alone is not approval.
+
+The approved apply restores three archives into the protected staging root,
+loads and verifies prior image IDs if needed, imports the held SQL into an
+isolated MariaDB bind directory using only the quote-decoded protected backup
+credentials streamed to Docker, checks application tables and all databases,
+and stops that temporary container. It then stops the stack, preserves failed
+Nextcloud/MariaDB/Caddy state under transaction-specific names, promotes the
+staged state, restores prior Compose/Caddy and the protected active record,
+starts the prior images, turns off restored maintenance mode, and checks
+loopback health before marking the stage recovered. It never releases the
+ingress freeze; that requires a separate approved gate.
+
+On any interruption, preserve the stage ID, root recovery state, failed-state
+directories, and ingress freeze. If the protected recovery status is
+`promoting` or `promoted`, the same consumed approval can be used only with
+`--resume`: it rechecks local recovery material, stage/freeze identity, and
+the prior configuration, completes any interrupted directory moves, then
+repeats health and recovered-state checks. Do not retry `--apply`, remove
+staging paths, or reopen LAN access. Diagnose other phases and obtain a new
+reviewed recovery decision. This workflow must not be used on the production
+Pi until its operator tests, live ingress/drain proof, reviews, and bundle
+installation gates have passed.
 
 ## Image recovery and restore-readiness
 

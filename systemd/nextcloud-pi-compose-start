@@ -7,6 +7,8 @@ set -euo pipefail
 readonly RECORD=/etc/nextcloud-pi/active-images.env
 readonly PROJECT=@NEXTCLOUD_REMOTE_PROJECT_DIR@
 readonly COMPOSE_FILE="$PROJECT/docker-compose.yml"
+readonly LOCK_ROOT=/run/nextcloud-pi-locks
+readonly LOCK="$LOCK_ROOT/startup-selection.lock"
 SNAPSHOT_DIR=""
 
 die() { printf 'nextcloud image identity error: %s\n' "$1" >&2; exit 1; }
@@ -17,6 +19,16 @@ value() {
   awk -F= -v key="$key" '$1 == key { count++; value=$2 } END { if (count == 1) print value; else exit 1 }' "$RECORD"
 }
 
+# Hold the stage-consumption selection lock through Compose `up`, so a
+# prepared-stage check cannot race candidate selection.
+[[ -d "$LOCK_ROOT" && ! -L "$LOCK_ROOT" && "$(stat -c '%u:%g:%a' "$LOCK_ROOT")" == 0:0:700 ]] || die "operations lock root is unsafe"
+if [[ ! -e "$LOCK" && ! -L "$LOCK" ]]; then
+  ( umask 077; set -C; : >"$LOCK" ) 2>/dev/null || :
+fi
+[[ -f "$LOCK" && ! -L "$LOCK" && "$(stat -c '%u:%g:%a' "$LOCK")" == 0:0:600 ]] || die "startup selection lock is unsafe"
+exec 9>>"$LOCK"
+flock -w 600 9 || die "another operation retains the startup lock"
+/usr/local/libexec/nextcloud-pi-ops upgrade-startup-guard >/dev/null
 /usr/local/libexec/nextcloud-pi-validate-active-images
 [[ -f "$COMPOSE_FILE" && ! -L "$COMPOSE_FILE" ]] || die "Compose file is missing or unsafe"
 for command in docker python3; do command -v "$command" >/dev/null 2>&1 || die "required command is unavailable: $command"; done
