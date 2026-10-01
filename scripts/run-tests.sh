@@ -44,6 +44,7 @@ readonly -a PR_COMMANDS=(
   'bash scripts/test-recovery-promotion.sh'
   'bash scripts/test-runtime-recovery-startup.sh'
   'bash scripts/test-held-runtime-backup.sh'
+  'python3 scripts/test-maintenance-status-guards.py'
   'bash scripts/test-ssh-keepalive.sh'
   'bash scripts/test-deploy-config.sh'
   'bash scripts/test-health-check.sh'

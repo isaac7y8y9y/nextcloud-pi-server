@@ -171,12 +171,12 @@ prepare_backup_root() {
 
 maintenance_is_off() {
   remote "docker exec --user www-data '$NEXTCLOUD_APP_CONTAINER' php /var/www/html/occ status" |
-    grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$'
+    grep -E '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' >/dev/null
 }
 
 maintenance_is_on() {
   remote "docker exec --user www-data '$NEXTCLOUD_APP_CONTAINER' php /var/www/html/occ status" |
-    grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*true$'
+    grep -E '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*true$' >/dev/null
 }
 
 verify_held_freeze() {

@@ -310,7 +310,7 @@ cmd_upgrade_freeze_quiescence() {
   ! /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer is active"
   service="$(/usr/bin/systemctl is-active "$background_jobs_service" 2>/dev/null || true)"
   [[ "$service" == inactive || "$service" == failed || "$service" == unknown ]] || die "background-job service is still running"
-  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*true$' || die "Nextcloud maintenance mode is not on"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -E '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*true$' >/dev/null || die "Nextcloud maintenance mode is not on"
   for sample in 1 2; do
     app="$(freeze_socket_count "${P[NEXTCLOUD_PI_APP_CONTAINER]}")" || die "application sockets could not be inspected"
     caddy="$(freeze_socket_count "${P[NEXTCLOUD_PI_CADDY_CONTAINER]}")" || die "Caddy sockets could not be inspected"
@@ -334,13 +334,13 @@ cmd_upgrade_freeze_maintenance_off() {
   ! /usr/bin/systemctl is-active --quiet "$background_jobs_timer" || die "background-job timer is active"
   cmd_upgrade_freeze_quiescence "$id" >/dev/null
   /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ maintenance:mode --off >/dev/null || die "could not leave maintenance mode"
-  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "maintenance mode remains on"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -E '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' >/dev/null || die "maintenance mode remains on"
   out state maintenance-off; out id "$id"
 }
 cmd_upgrade_freeze_activate() {
   [[ $# == 1 ]] || invalid; reject_stdin; local id="$1" timer=no service_state attempt table
   valid_id "$id" || invalid; lock; cmd_upgrade_freeze_check "$id"
-  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is already on"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -E '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' >/dev/null || die "Nextcloud maintenance mode is already on"
   ensure_parent upgrade-freeze
   /usr/bin/systemctl is-active --quiet "$background_jobs_timer" && timer=yes
   freeze_write "$id" preparing "$timer" pending
@@ -352,7 +352,7 @@ cmd_upgrade_freeze_activate() {
   done
   [[ "$service_state" =~ ^(inactive|failed|unknown|)$ ]] || die "background-job service did not quiesce"
   /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ maintenance:mode --on >/dev/null || die "could not enable maintenance mode"
-  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*true$' || die "maintenance mode was not confirmed"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -E '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*true$' >/dev/null || die "maintenance mode was not confirmed"
   freeze_install_rule || die "upgrade ingress rule did not install; maintenance remains on"
   table="$(freeze_table_hash)"; [[ "$table" =~ ^[0-9a-f]{64}$ ]] || die "upgrade ingress rule could not be identified"
   freeze_write "$id" active "$timer" "$table"
@@ -444,7 +444,7 @@ PY
     upgrade_fetch_release_allowed
     upgrade_stage_release_allowed
     [[ ! -e "$(active_marker)" && ! -L "$(active_marker)" ]] || die "an active-image transaction is unresolved; retain the ingress freeze"
-    /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is still on"
+    /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -E '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' >/dev/null || die "Nextcloud maintenance mode is still on"
     if [[ ! -e "$approval" && ! -L "$approval" ]]; then printf '%s\n' "$approval_hash" >"$approval"; /usr/bin/chmod 0600 "$approval"; fi
     freeze_write "$id" releasing "$timer" "$table"
     /usr/sbin/nft delete table inet "$freeze_table" || die "could not release upgrade firewall"
@@ -1104,7 +1104,7 @@ cmd_upgrade_stage_maintenance_off() {
   done
   cmd_upgrade_freeze_quiescence "$(upgrade_stage_field "$id" freeze_id)" >/dev/null
   /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ maintenance:mode --off >/dev/null || die "could not leave maintenance mode"
-  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "maintenance mode remains on"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -E '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' >/dev/null || die "maintenance mode remains on"
   out state maintenance-off; out id "$id"
 }
 cmd_upgrade_stage_consume() {
@@ -1251,7 +1251,7 @@ cmd_upgrade_stage_accept() {
     case "$service" in APP) running="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; DB) running="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; CADDY) running="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
     [[ "$(/usr/bin/docker inspect "$running" --format '{{.Image}} {{.State.Running}}')" == "$expected true" ]] || die "running container image differs from candidate"
   done
-  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "Nextcloud maintenance mode is still on"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -E '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' >/dev/null || die "Nextcloud maintenance mode is still on"
   upgrade_stage_rewrite "$id" accepted
   out phase accepted; out id "$id"
 }
@@ -1275,7 +1275,7 @@ cmd_upgrade_stage_recovered() {
     case "$service" in APP) running="${P[NEXTCLOUD_PI_APP_CONTAINER]}";; DB) running="${P[NEXTCLOUD_PI_DB_CONTAINER]}";; CADDY) running="${P[NEXTCLOUD_PI_CADDY_CONTAINER]}";; esac
     [[ "$(/usr/bin/docker inspect "$running" --format '{{.Image}} {{.State.Running}}')" == "$expected true" ]] || die "restored container image differs"
   done
-  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -Eq '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' || die "restored Nextcloud remains in maintenance mode"
+  /usr/bin/docker exec --user www-data "${P[NEXTCLOUD_PI_APP_CONTAINER]}" php /var/www/html/occ status | /usr/bin/grep -E '^[[:space:]]*-[[:space:]]*maintenance:[[:space:]]*false$' >/dev/null || die "restored Nextcloud remains in maintenance mode"
   upgrade_stage_rewrite "$id" recovered
   out phase recovered; out id "$id"
 }
