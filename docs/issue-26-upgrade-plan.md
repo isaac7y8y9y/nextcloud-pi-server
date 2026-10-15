@@ -43,7 +43,7 @@ Image metadata yielded exact PHP versions 8.3.30, 8.3.33, 8.4.25, and 8.5.10 res
 
 ## Image identity candidates
 
-Registry inspection on September 23 confirmed ARM64/v8 manifests for every reference below. These are **multi-platform index digests**, not the loaded image IDs that `config/image-lock.env` stores. Before approval, resolve each index digest, ARM64 manifest digest, and that manifest's image-config digest from registry metadata without pulling; the config digest is the expected loaded image ID. Bind those values and the proposed stage lock in the approval artifact. During approved apply, pull only the approved digest and verify the loaded ID equals the preapproved expected ID before changing tags or state. Abort if metadata or loaded ID differs.
+Registry inspection on September 23 confirmed ARM64/v8 manifests for every reference below. These are **multi-platform index digests**, not the loaded image IDs that `config/image-lock.env` stores. Before approval, resolve each index digest, ARM64 manifest digest, and that manifest's image-config digest from registry metadata without pulling; the expected unqualified loaded ID is the config digest on the classic image store and the index digest on the containerd image store for an index-bound pull. Bind the explicit target store using the [image identity contract](upgrade-candidate.md); platform-qualified inspection remains a separate ARM64-manifest check. Bind those values and the proposed stage lock in the approval artifact. During approved apply, pull only the approved digest and verify the loaded ID equals the preapproved expected ID before changing tags or state. Abort if metadata or loaded ID differs.
 
 | Image reference | Index digest |
 | --- | --- |

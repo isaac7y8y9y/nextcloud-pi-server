@@ -30,7 +30,8 @@ fixture="$(cd -- "$fixture" && pwd -P)"
 trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
 mkdir -p "$fixture/repo/scripts/lib" "$fixture/repo/config" "$fixture/bin" "$fixture/rendered/caddy" "$fixture/rendered/active-images" "$fixture/candidate" "$fixture/config-backup/compose" "$fixture/config-backup/caddy" "$fixture/runtime-backup" "$fixture/image-recovery"
 cp "$FETCH" "$fixture/repo/scripts/fetch-image-upgrade.sh"
-cp "$SCRIPT_DIR/lib/deployment-config.sh" "$SCRIPT_DIR/lib/image-lock.sh" "$fixture/repo/scripts/lib/"
+cp "$SCRIPT_DIR/lib/deployment-config.sh" "$SCRIPT_DIR/lib/image-lock.sh" "$SCRIPT_DIR/lib/image_identity.py" "$fixture/repo/scripts/lib/"
+export FETCH_REAL_PYTHON="$(command -v python3)"
 cp "$SCRIPT_DIR/../config/image-lock.env" "$fixture/repo/config/image-lock.env"
 printf 'NEXTCLOUD_PI_HOST=test-pi.example.invalid\nNEXTCLOUD_PI_SYSTEM_HOSTNAME=test-pi\nNEXTCLOUD_PI_USER=tester\nNEXTCLOUD_REMOTE_PROJECT_DIR=/srv/test/nextcloud-docker\nNEXTCLOUD_STORAGE_MOUNT=/srv/test/storage\nNEXTCLOUD_STORAGE_UUID=11111111-1111-1111-1111-111111111111\nNEXTCLOUD_PUBLIC_HOSTNAME=cloud.test.invalid\n' >"$fixture/deployment.env"
 chmod 600 "$fixture/deployment.env"
@@ -39,6 +40,8 @@ printf 'test caddy\n' >"$fixture/rendered/caddy/Caddyfile"
 printf 'source record\n' >"$fixture/rendered/active-images/active-images.env"
 printf 'candidate\n' >"$fixture/candidate/candidate-manifest.tsv"
 printf 'format\tnextcloud-upgrade-image-v1\nimage\tnextcloud\ntag\tnextcloud:31.0.14-apache\nplatform\tlinux/arm64/v8\nindex_digest\tsha256:%064d\nmanifest_digest\tsha256:%064d\nconfig_digest\tsha256:%064d\n' 0 1 2 >"$fixture/candidate/registry-metadata.tsv"
+printf 'format\tnextcloud-image-identity-v1\nimage_store\tclassic\nexpected_id\tsha256:%064d\n' 2 >"$fixture/candidate/image-identity.tsv"
+printf '{"driver":"overlay2","status":[]}\n' >"$fixture/store.json"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 printf 'timestamp\t%s\nremote_host\ttest-pi\nremote_user\ttester\nsource_project\t/srv/test/nextcloud-docker\n' "$timestamp" >"$fixture/config-backup/manifest.tsv"
 cp "$fixture/rendered/docker-compose.yml" "$fixture/config-backup/compose/docker-compose.yml"
@@ -50,12 +53,23 @@ for verifier in verify-config-backup.sh verify-runtime-backup.sh verify-image-re
   printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture/repo/scripts/$verifier"
   chmod 755 "$fixture/repo/scripts/$verifier"
 done
-printf '#!/usr/bin/env bash\ncase "$1" in *verify-image-upgrade.py) exit 0;; *resolve-image-upgrade.py) cat "$FETCH_FIXTURE/candidate/registry-metadata.tsv";; *) exit 1;; esac\n' >"$fixture/bin/python3"
+printf '#!/usr/bin/env bash\ncase "$1" in *verify-image-upgrade.py) exit 0;; *image_identity.py) exec "$FETCH_REAL_PYTHON" "$@";; *resolve-image-upgrade.py) cat "$FETCH_FIXTURE/candidate/registry-metadata.tsv";; *) exit 1;; esac\n' >"$fixture/bin/python3"
 chmod 755 "$fixture/bin/python3"
 printf '%b' '#!/usr/bin/env bash\nset -euo pipefail\nfor arg; do command_text="$arg"; done\ncase "$command_text" in\n  *"upgrade-freeze status"*) printf "state\\tactive\\nid\\t20260924T000000Z-101\\ntable_sha256\\t%064d\\n" 3;;\n  *"background-jobs state"*) printf "timer_active\\tno\\n";;\n  *"occ status"*) printf "  - maintenance: true\\n";;\n  hostname) printf "test-pi\\n";;\n  "id -un") printf "tester\\n";;\n  "date -u +%s") date -u +%s;;\n  *"sha256sum"*"docker-compose.yml"*) shasum -a 256 "$FETCH_FIXTURE/rendered/docker-compose.yml";;\n  *"sha256sum"*"Caddyfile"*) shasum -a 256 "$FETCH_FIXTURE/rendered/caddy/Caddyfile";;\n  *"active-images-state"*) printf "mode\\tsource\\nsha256\\t%s\\n" "$(shasum -a 256 "$FETCH_FIXTURE/rendered/active-images/active-images.env" | awk "{print \\$1}")";;\n  *"docker image inspect"*"nextcloud:30"*) awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_APP_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env";;\n  *"docker image inspect"*"mariadb:11"*) awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_DB_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env";;\n  *"docker image inspect"*"caddy:2"*) awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_CADDY_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env";;\n  *"docker inspect"*"nextcloud-docker-app-1"*) printf "%064d %s true\\n" 4 "$(awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_APP_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env")";;\n  *"docker inspect"*"nextcloud-docker-db-1"*) printf "%064d %s true\\n" 5 "$(awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_DB_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env")";;\n  *"docker inspect"*"nextcloud-docker-caddy-1"*) printf "%064d %s true\\n" 6 "$(awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_CADDY_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env")";;\n  *"docker pull"*) printf "pull\\n" >>"$FETCH_FIXTURE/pulls";;\n  *"docker image inspect"*"nextcloud@sha256:"*) printf "sha256:%064d\\n" 2;;\n  *) printf "Unexpected fake SSH command: %s\\n" "$command_text" >&2; exit 1;;\nesac\n' >"$fixture/bin/ssh"
 chmod 755 "$fixture/bin/ssh"
 mv "$fixture/bin/ssh" "$fixture/bin/ssh-base"
-printf '%b' '#!/usr/bin/env bash\nset -euo pipefail\ncase "$*" in\n  *"upgrade-fetch consume"*) [[ ! -e "$FETCH_FIXTURE/root-fetch" ]] || exit 1; printf "pending\\n" >"$FETCH_FIXTURE/root-fetch";;\n  *"upgrade-fetch complete"*) [[ "$(cat "$FETCH_FIXTURE/root-fetch")" == pending ]] || exit 1; printf "complete\\n" >"$FETCH_FIXTURE/root-fetch";;\n  *) exec "$FETCH_FIXTURE/bin/ssh-base" "$@";;\nesac\n' >"$fixture/bin/ssh"
+cat >"$fixture/bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"upgrade-fetch consume"*) [[ ! -e "$FETCH_FIXTURE/root-fetch" ]] || exit 1; printf "pending\n" >"$FETCH_FIXTURE/root-fetch";;
+  *"upgrade-fetch complete"*) [[ "$(cat "$FETCH_FIXTURE/root-fetch")" == pending ]] || exit 1; printf "complete\n" >"$FETCH_FIXTURE/root-fetch";;
+  *"docker info"*) cat "$FETCH_FIXTURE/store.json";;
+  *"docker image inspect"*"--platform linux/arm64/v8"*) cat "$FETCH_FIXTURE/manifest-id";;
+  *"docker image inspect"*"nextcloud@sha256:"*) awk -F '\t' '$1 == "expected_id" {print $2}' "$FETCH_FIXTURE/candidate/image-identity.tsv";;
+  *) exec "$FETCH_FIXTURE/bin/ssh-base" "$@";;
+esac
+EOF
 chmod 755 "$fixture/bin/ssh"
 
 export FETCH_FIXTURE="$fixture"
@@ -84,6 +98,13 @@ if bash "$fixture/repo/scripts/fetch-image-upgrade.sh" --apply "$fixture/tampere
   exit 1
 fi
 [[ ! -e "$fixture/pulls" ]]
+printf '{"driver":"overlayfs","status":[["driver-type","io.containerd.snapshotter.v1"]]}\n' >"$fixture/store.json"
+if bash "$fixture/repo/scripts/fetch-image-upgrade.sh" --apply "$artifact" "${inputs[@]}" >"$fixture/wrong-store.out" 2>&1; then
+  printf 'changed image store was accepted\n' >&2; exit 1
+fi
+grep -Fx $'state\tunused' "$artifact" >/dev/null
+[[ ! -e "$fixture/pulls" && ! -e "$fixture/root-fetch" ]]
+printf '{"driver":"overlay2","status":[]}\n' >"$fixture/store.json"
 bash "$fixture/repo/scripts/fetch-image-upgrade.sh" --apply "$artifact" "${inputs[@]}" >"$fixture/apply.out"
 grep -Fx $'state\tconsumed' "$artifact" >/dev/null
 [[ "$(wc -l <"$fixture/pulls" | tr -d '[:space:]')" == 1 ]]
@@ -93,4 +114,23 @@ if bash "$fixture/repo/scripts/fetch-image-upgrade.sh" --apply "$artifact" "${in
   exit 1
 fi
 [[ "$(wc -l <"$fixture/pulls" | tr -d '[:space:]')" == 1 ]]
-printf 'upgrade image fetch approval fixture passed\n'
+# A containerd candidate uses the index for its loaded ID, and separately checks ARM64.
+rm "$fixture/root-fetch" "$fixture/pulls"
+printf 'format\tnextcloud-image-identity-v1\nimage_store\tcontainerd\nexpected_id\tsha256:%064d\n' 0 >"$fixture/candidate/image-identity.tsv"
+printf '{"driver":"overlayfs","status":[["driver-type","io.containerd.snapshotter.v1"]]}\n' >"$fixture/store.json"
+printf 'sha256:%064d\n' 1 >"$fixture/manifest-id"
+bash "$fixture/repo/scripts/fetch-image-upgrade.sh" --plan "${inputs[@]}" >"$fixture/containerd-plan.out"
+artifact="$(awk -F ': ' '$1 == "Approval artifact" {print $2}' "$fixture/containerd-plan.out")"
+grep -Fx $'image_store\tcontainerd' "$artifact" >/dev/null
+bash "$fixture/repo/scripts/fetch-image-upgrade.sh" --apply "$artifact" "${inputs[@]}" >"$fixture/containerd-apply.out"
+[[ "$(cat "$fixture/root-fetch")" == complete ]]
+rm "$fixture/root-fetch"
+printf 'sha256:%064d\n' 9 >"$fixture/manifest-id"
+bash "$fixture/repo/scripts/fetch-image-upgrade.sh" --plan "${inputs[@]}" >"$fixture/bad-manifest-plan.out"
+artifact="$(awk -F ': ' '$1 == "Approval artifact" {print $2}' "$fixture/bad-manifest-plan.out")"
+if bash "$fixture/repo/scripts/fetch-image-upgrade.sh" --apply "$artifact" "${inputs[@]}" >"$fixture/bad-manifest-apply.out" 2>&1; then
+  printf 'wrong ARM64 manifest was accepted\n' >&2; exit 1
+fi
+[[ "$(cat "$fixture/root-fetch")" == pending ]]
+grep -F 'fetched ARM64 manifest differs' "$fixture/bad-manifest-apply.out" >/dev/null
+printf 'upgrade image fetch approval fixture passed for classic and containerd stores\n'

@@ -24,8 +24,8 @@ assert SPEC and SPEC.loader
 r = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(r)
 
-FETCH_KEYS = set("format state transaction_id fingerprint candidate_sha256 source_lock_sha256 config_manifest_sha256 runtime_manifest_sha256 image_manifest_sha256 image_attestation_sha256 prestate_sha256 freeze_id freeze_table_sha256 tag index_digest manifest_digest config_digest host created remote_created expires actions exclusions".split())
-FETCH_AUTHORITY = "transaction_id candidate_sha256 source_lock_sha256 config_manifest_sha256 runtime_manifest_sha256 image_manifest_sha256 image_attestation_sha256 prestate_sha256 freeze_id freeze_table_sha256 tag index_digest manifest_digest config_digest host created remote_created expires actions exclusions".split()
+FETCH_KEYS = set("format state transaction_id fingerprint candidate_sha256 source_lock_sha256 config_manifest_sha256 runtime_manifest_sha256 image_manifest_sha256 image_attestation_sha256 prestate_sha256 freeze_id freeze_table_sha256 tag index_digest manifest_digest config_digest image_store expected_id host created remote_created expires actions exclusions".split())
+FETCH_AUTHORITY = "transaction_id candidate_sha256 source_lock_sha256 config_manifest_sha256 runtime_manifest_sha256 image_manifest_sha256 image_attestation_sha256 prestate_sha256 freeze_id freeze_table_sha256 tag index_digest manifest_digest config_digest image_store expected_id host created remote_created expires actions exclusions".split()
 CONTAINERS = {"APP": "nextcloud-docker-app-1", "DB": "nextcloud-docker-db-1", "CADDY": "nextcloud-docker-caddy-1"}
 
 
@@ -56,7 +56,7 @@ def fetch_record(path: Path, local: dict[str, object], metadata: dict[str, str],
                  freeze: dict[str, str], host: str, now: int, prestate_hash: str) -> dict[str, str]:
     r.private_file(path)
     record = r.fields(path)
-    if set(record) != FETCH_KEYS or record["format"] != "image-upgrade-fetch-v1" or record["state"] != "consumed":
+    if set(record) != FETCH_KEYS or record["format"] != "image-upgrade-fetch-v2" or record["state"] != "consumed":
         r.reject("completed fetch approval schema differs")
     if not r.IDENTIFIER.fullmatch(record["transaction_id"]) or not r.HASH.fullmatch(record["fingerprint"]):
         r.reject("completed fetch approval identity is invalid")
@@ -70,6 +70,7 @@ def fetch_record(path: Path, local: dict[str, object], metadata: dict[str, str],
                 "freeze_id": freeze["id"], "freeze_table_sha256": freeze["table_sha256"],
                 "tag": metadata["tag"], "index_digest": metadata["index_digest"],
                 "manifest_digest": metadata["manifest_digest"], "config_digest": metadata["config_digest"],
+                "image_store": metadata["image_store"], "expected_id": metadata["expected_id"],
                 "host": host}
     if any(record.get(key) != value for key, value in expected.items()):
         r.reject("completed fetch differs from candidate, backups, or freeze")
@@ -108,7 +109,8 @@ def common(target: r.Target, candidate: Path, source: Path, config_backup: Path,
         for path in (config_backup / "manifest.tsv", runtime / "manifest.tsv",
                      images / "manifest.tsv", images / "restore-attestation.tsv"):
             age(path, now)
-    metadata = r.fields(candidate / "registry-metadata.tsv")
+    metadata = r.candidate_metadata(candidate)
+    r.require_image_store(target, metadata["image_store"])
     if before_stage:
         resolved = r.run(["python3", str(HERE / "resolve-image-upgrade.py"), metadata["tag"],
                           "--expected-index", metadata["index_digest"]], timeout=120)
@@ -158,24 +160,24 @@ def stage_evidence(target: r.Target, candidate: Path, source: Path, config_backu
     expected_fetch = {"state": "complete", "id": fetch["transaction_id"], "fingerprint": fetch["fingerprint"],
                       "freeze_id": freeze["id"], "freeze_table_sha256": freeze["table_sha256"],
                       "ref": metadata["image"] + "@" + metadata["index_digest"],
-                      "expected_id": metadata["config_digest"], "expires": fetch["expires"]}
+                      "expected_id": metadata["expected_id"], "expires": fetch["expires"]}
     if status != expected_fetch:
         r.reject("protected fetch completion differs")
     ref = expected_fetch["ref"]
-    if target.ssh("docker image inspect --format '{{.Id}}' " + r.q(ref)) != metadata["config_digest"]:
+    if target.ssh("docker image inspect --format '{{.Id}}' " + r.q(ref)) != metadata["expected_id"]:
         r.reject("fetched digest image ID differs")
     tag = metadata["tag"]
     try:
         existing = target.ssh("docker image inspect --format '{{.Id}}' " + r.q(tag))
     except r.RecoveryError:
         existing = ""
-    if existing and existing != metadata["config_digest"]:
+    if existing and existing != metadata["expected_id"]:
         r.reject("candidate tag already points to another image")
     image_key = {"nextcloud": "APP", "mariadb": "DB", "caddy": "CADDY"}[metadata["image"]]
     return {"format": "image-activation-stage-v1", "stage_id": "", "host": target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"],
             "project": project, "freeze": freeze, "fetch_id": fetch["transaction_id"],
             "fetch_fingerprint": fetch["fingerprint"], "fetch_artifact_sha256": r.digest(fetch_path),
-            "tag": tag, "ref": ref, "target": image_key.lower(), "expected_id": metadata["config_digest"],
+            "tag": tag, "ref": ref, "target": image_key.lower(), "expected_id": metadata["expected_id"],
             "source_running": before, "evidence": local,
             "actions": "tag-approved-digest,prepare-active-record,install-compose,mark-boundary,restart-target,stage-maintenance-off",
             "exclusions": "pull,prune,image-removal,source-lock-write,freeze-release,post-boundary-config-only-rollback"}
@@ -558,6 +560,7 @@ def abort_prepared(target: r.Target, approval: dict[str, object], candidate: Pat
     assert isinstance(evidence, dict)
     if approval.get("target") not in ("app", "caddy"):
         r.reject("only an app/Caddy prepared stage can use this abort")
+    r.require_image_store(target, r.candidate_metadata(candidate)["image_store"])
     if (r.verify_local(candidate, source, config_backup, runtime, images, target.config) != evidence or
             approval.get("host") != target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"] or
             approval.get("project") != target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] or
@@ -670,7 +673,7 @@ def accept_evidence(target: r.Target, candidate: Path, source: Path, config_back
                 "fingerprint": stage["fingerprint"], "freeze_id": metadata["freeze_id"],
                 "freeze_table_sha256": metadata["freeze_table_sha256"],
                 "fetch_id": stage["fetch_id"], "target": stage["target"],
-                "tag": metadata["tag"], "expected_id": metadata["config_digest"],
+                "tag": metadata["tag"], "expected_id": metadata["expected_id"],
                 "pre_record_sha256": local["source_record"], "pre_compose_sha256": local["source_compose"],
                 "candidate_record_sha256": local["candidate_record"], "candidate_compose_sha256": local["candidate_compose"]}
     if allow_accepted and root_stage.get("phase") == "accepted":
@@ -827,6 +830,7 @@ def main() -> int:
             approved = consumed_stage(args.stage_approval, root)
             if approved.get("target") != "db":
                 r.reject("only a database cutover can use database resume")
+            r.require_image_store(target, r.candidate_metadata(args.candidate)["image_store"])
             local = r.verify_local(args.candidate, args.source_rendered, args.config_backup,
                                    args.held_runtime_backup, args.prior_image_recovery, target.config)
             if local != approved.get("evidence") or approved.get("host") != target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"]:

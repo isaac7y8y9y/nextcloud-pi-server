@@ -11,6 +11,7 @@ import re
 import stat
 import subprocess
 import sys
+from lib import image_identity
 
 
 KEYS = ("APP", "DB", "CADDY")
@@ -121,7 +122,7 @@ def validate_exact_tag(image: str, tag: str) -> None:
 
 
 def prepare(target: str, metadata_raw: bytes, lock_raw: bytes, compose_raw: bytes,
-            record_raw: bytes, caddy_raw: bytes) -> dict[str, bytes]:
+            record_raw: bytes, caddy_raw: bytes, *, image_store: str) -> dict[str, bytes]:
     metadata = fields(metadata_raw, "\t", set(METADATA_KEYS))
     if metadata["format"] != "nextcloud-upgrade-image-v1" or metadata["image"] != IMAGES[target] or metadata["platform"] != "linux/arm64/v8":
         raise CandidateError("registry record does not match the selected service")
@@ -160,7 +161,10 @@ def prepare(target: str, metadata_raw: bytes, lock_raw: bytes, compose_raw: byte
     old_tag = lock[f"NEXTCLOUD_IMAGE_{target}_TAG"]
     old_id = lock[f"NEXTCLOUD_IMAGE_{target}_ID"]
     new_tag = metadata["tag"]
-    new_id = metadata["config_digest"]
+    try:
+        new_id = image_identity.expected_id(metadata, image_store)
+    except ValueError as exc:
+        raise CandidateError(str(exc)) from exc
     if old_tag == new_tag or old_id == new_id:
         raise CandidateError("new image tag and loaded ID must both change")
     candidate_lock = substitute_field(lock_raw, f"NEXTCLOUD_IMAGE_{target}_TAG", old_tag, new_tag)
@@ -173,6 +177,8 @@ def prepare(target: str, metadata_raw: bytes, lock_raw: bytes, compose_raw: byte
     candidate_compose = replace_service_image(compose_raw, SERVICES[target], old_tag, new_tag)
     return {
         "registry-metadata.tsv": metadata_raw,
+        "image-identity.tsv": ("format\tnextcloud-image-identity-v1\n"
+                               f"image_store\t{image_store}\nexpected_id\t{new_id}\n").encode(),
         "image-lock.env": candidate_lock,
         "docker-compose.yml": candidate_compose,
         "active-images.env": candidate_record,
@@ -184,6 +190,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", choices=("app", "db", "caddy"), required=True)
     parser.add_argument("--metadata", type=Path, required=True)
+    parser.add_argument("--image-store", choices=image_identity.STORES, required=True)
     parser.add_argument("--image-lock", type=Path, required=True)
     parser.add_argument("--rendered", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -204,6 +211,7 @@ def main() -> int:
             regular_bytes(rendered / "docker-compose.yml"),
             regular_bytes(rendered / "active-images" / "active-images.env"),
             regular_bytes(rendered / "caddy" / "Caddyfile"),
+            image_store=args.image_store,
         )
         output.mkdir(mode=0o700)
         for name, data in result.items():

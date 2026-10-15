@@ -8,16 +8,25 @@ Pi change. The active production Compose and image lock remain unchanged.
 tag using `docker buildx imagetools inspect --raw`. It selects exactly one
 `linux/arm64/v8` manifest, checks the manifest's bytes against the index, and
 reports the index, platform-manifest, and image-config digests. The image-config
-digest is the expected loaded Docker image ID on the Pi's classic Docker image
-store; the index digest is not. Docker Desktop's containerd image store can
-report the platform-manifest digest as `.Id`, so the isolated rehearsal binds
-both reviewed identities plus the exact pulled repo digest and ARM64 platform.
-Do not substitute that local behavior for a live Pi image-ID check. Pass
+digest is the unqualified Docker image ID on the classic image store.
+On the containerd image store, an index-bound pull exposes that index as the
+unqualified ID and container `.Image`; platform-qualified inspection exposes
+the selected ARM64 manifest. Keep all three registry facts distinct. See
+[Docker's store documentation](https://docs.docker.com/engine/storage/containerd/)
+and [platform inspection](https://docs.docker.com/reference/cli/docker/image/inspect/).
+Isolated rehearsals that address a platform manifest do not prove the live
+index-bound fetch/activation contract. Pass
 `--expected-index` when a previously reviewed index digest must be enforced.
 The command reads metadata only; it does not pull the image.
 
 `scripts/prepare-image-upgrade.py` accepts that TSV record, the current tracked
-image lock, and a **private** baseline rendered by `render-deployment-config.sh`.
+image lock, a required `--image-store containerd|classic`, and a **private**
+baseline rendered by `render-deployment-config.sh`. Detect the actual target
+store read-only with Docker DriverStatus; do not infer it from the client,
+Docker version, or this documentation. `image-identity.tsv` binds that store
+and the single derived expected ID into the candidate manifest; the original
+seven-field registry metadata remains unchanged. Legacy candidates without
+this file must be regenerated.
 It verifies source-lock, Compose, and active-record agreement, then creates a
 new private directory containing one-image candidate versions of those files.
 It refuses a Git destination and publishes `candidate-manifest.tsv` last. It
@@ -44,7 +53,11 @@ backup, a held runtime backup, attested prior-image recovery, the Pi's active
 freeze, source images, running containers, Compose, Caddyfile, and clock. It
 creates a private, 15-minute, single-use approval artifact. Its `--apply`
 rechecks those bindings, consumes the artifact before any pull, pulls only the
-approved index digest for ARM64, and proves the loaded image ID. The
+approved index digest for ARM64, and proves the loaded image ID. Containerd
+fetch also verifies the exact platform manifest ID. The live store must match
+before approval consumption and on subsequent activation/recovery checks.
+The v2 fetch artifact binds store and expected ID separately from config digest;
+old fetch approvals are rejected and must be regenerated. The
 root-owned dispatcher also records the fetch ID once, so a copied local
 approval cannot be replayed; a pending or failed fetch prevents freeze release
 until recovery is resolved. It does not
@@ -200,3 +213,16 @@ evidence for that backup and those three image digests, **not** a substitute
 for a fresh item-5 quiesced recovery point, live mount and ingress proof,
 approved activation, or live full-runtime restore. It does not test the later
 31→34 hops or custom-app re-enablement.
+
+## Image-store repair and remaining recovery gate
+
+The [image identity repair plan](issue-26-image-store-identity-plan.md) preserves
+the existing source-lock, protected driver, acceptance, and release interfaces.
+Their exact ID comparisons use the new bound runtime ID; no alternative-ID
+fallback is added. Full-runtime restoration still requires the exact prior
+source record. A platform-only archive can have a different attested loaded
+ID, so a successful platform archive load alone is insufficient proof of that
+full restore. Test missing/changed prior tags against the original exact IDs
+and stop before the affected live cutover if that fallback cannot restore them.
+The separate unchanged-source freeze/drain/held-backup proof does not fetch or
+activate a candidate.

@@ -61,7 +61,7 @@ private_outside_git() {
 }
 check_artifact_schema() {
   awk -F '\t' '
-    BEGIN { split("format state transaction_id fingerprint candidate_sha256 source_lock_sha256 config_manifest_sha256 runtime_manifest_sha256 image_manifest_sha256 image_attestation_sha256 prestate_sha256 freeze_id freeze_table_sha256 tag index_digest manifest_digest config_digest host created remote_created expires actions exclusions", list, " "); for (i in list) expected[list[i]]=1 }
+    BEGIN { split("format state transaction_id fingerprint candidate_sha256 source_lock_sha256 config_manifest_sha256 runtime_manifest_sha256 image_manifest_sha256 image_attestation_sha256 prestate_sha256 freeze_id freeze_table_sha256 tag index_digest manifest_digest config_digest image_store expected_id host created remote_created expires actions exclusions", list, " "); for (i in list) expected[list[i]]=1 }
     NF != 2 || !($1 in expected) || seen[$1]++ { bad=1 }
     END { for (key in expected) if (seen[key] != 1) bad=1; exit bad }
   ' "$ARTIFACT" || die "approval artifact schema is invalid"
@@ -79,7 +79,11 @@ check_inputs() {
   [[ "$(field "$IMAGE_RECOVERY/manifest.tsv" remote_host)" == "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" && "$(field "$IMAGE_RECOVERY/manifest.tsv" remote_user)" == "$NEXTCLOUD_PI_USER" && "$(field "$IMAGE_RECOVERY/manifest.tsv" source_project)" == "$NEXTCLOUD_REMOTE_PROJECT_DIR" && "$(field "$IMAGE_RECOVERY/manifest.tsv" storage_mount)" == "$NEXTCLOUD_STORAGE_MOUNT" ]] || die "prior image recovery target differs"
   metadata="$CANDIDATE/registry-metadata.tsv"
   tag="$(field "$metadata" tag)"; image="$(field "$metadata" image)"; index="$(field "$metadata" index_digest)"
-  manifest="$(field "$metadata" manifest_digest)"; loaded="$(field "$metadata" config_digest)"
+  manifest="$(field "$metadata" manifest_digest)"; config="$(field "$metadata" config_digest)"
+  image_store="$(field "$CANDIDATE/image-identity.tsv" image_store)"
+  loaded="$(field "$CANDIDATE/image-identity.tsv" expected_id)"
+  store_info="$(remote "docker info --format '{\"driver\":{{json .Driver}},\"status\":{{json .DriverStatus}}}'")" || die "Docker image-store evidence is unavailable"
+  python3 "$SCRIPT_DIR/lib/image_identity.py" --check-store "$image_store" <<<"$store_info" || die "target Docker image store differs from candidate"
   python3 "$SCRIPT_DIR/resolve-image-upgrade.py" "$tag" --expected-index "$index" >"$TMP_DIR/registry.tsv" || die "registry identity changed"
   cmp -s "$metadata" "$TMP_DIR/registry.tsv" || die "registry ARM64/config identity changed"
   status="$(remote 'sudo -n /usr/local/libexec/nextcloud-pi-ops upgrade-freeze status')" || die "protected freeze is unavailable"
@@ -111,8 +115,8 @@ check_inputs() {
   done
 }
 authority() {
-  printf 'transaction_id\t%s\ncandidate_sha256\t%s\nsource_lock_sha256\t%s\nconfig_manifest_sha256\t%s\nruntime_manifest_sha256\t%s\nimage_manifest_sha256\t%s\nimage_attestation_sha256\t%s\nprestate_sha256\t%s\nfreeze_id\t%s\nfreeze_table_sha256\t%s\ntag\t%s\nindex_digest\t%s\nmanifest_digest\t%s\nconfig_digest\t%s\nhost\t%s\ncreated\t%s\nremote_created\t%s\nexpires\t%s\nactions\tpull-exact-digest,verify-loaded-id\nexclusions\ttag-change,compose,source-lock,active-record,container-start,container-stop,pruning,image-removal,runtime-restore,freeze-release\n' \
-    "$transaction_id" "$(sha256 "$CANDIDATE/candidate-manifest.tsv")" "$(sha256 "$ROOT/config/image-lock.env")" "$(sha256 "$CONFIG_BACKUP/manifest.tsv")" "$(sha256 "$RUNTIME_BACKUP/manifest.tsv")" "$(sha256 "$IMAGE_RECOVERY/manifest.tsv")" "$(sha256 "$IMAGE_RECOVERY/restore-attestation.tsv")" "$(sha256 "$TMP_DIR/prestate.tsv")" "$FREEZE_ID" "$freeze_hash" "$tag" "$index" "$manifest" "$loaded" "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" "$created" "$remote_created" "$expires"
+  printf 'transaction_id\t%s\ncandidate_sha256\t%s\nsource_lock_sha256\t%s\nconfig_manifest_sha256\t%s\nruntime_manifest_sha256\t%s\nimage_manifest_sha256\t%s\nimage_attestation_sha256\t%s\nprestate_sha256\t%s\nfreeze_id\t%s\nfreeze_table_sha256\t%s\ntag\t%s\nindex_digest\t%s\nmanifest_digest\t%s\nconfig_digest\t%s\nimage_store\t%s\nexpected_id\t%s\nhost\t%s\ncreated\t%s\nremote_created\t%s\nexpires\t%s\nactions\tpull-exact-digest,verify-loaded-id\nexclusions\ttag-change,compose,source-lock,active-record,container-start,container-stop,pruning,image-removal,runtime-restore,freeze-release\n' \
+    "$transaction_id" "$(sha256 "$CANDIDATE/candidate-manifest.tsv")" "$(sha256 "$ROOT/config/image-lock.env")" "$(sha256 "$CONFIG_BACKUP/manifest.tsv")" "$(sha256 "$RUNTIME_BACKUP/manifest.tsv")" "$(sha256 "$IMAGE_RECOVERY/manifest.tsv")" "$(sha256 "$IMAGE_RECOVERY/restore-attestation.tsv")" "$(sha256 "$TMP_DIR/prestate.tsv")" "$FREEZE_ID" "$freeze_hash" "$tag" "$index" "$manifest" "$config" "$image_store" "$loaded" "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" "$created" "$remote_created" "$expires"
 }
 [[ "$MODE" == --plan || "$MODE" == --apply ]] && [[ $# == 6 ]] || { usage; exit 2; }
 [[ -n "$CANDIDATE" && -n "$RENDERED" && -n "$CONFIG_BACKUP" && -n "$RUNTIME_BACKUP" && -n "$IMAGE_RECOVERY" ]] || { usage; exit 2; }
@@ -126,7 +130,7 @@ if [[ "$MODE" == --plan ]]; then
   mkdir -p "$APPROVAL_ROOT"; chmod 700 "$APPROVAL_ROOT"
   [[ "$(mode_of "$APPROVAL_ROOT")" == 700 ]] || die "approval root protection failed"
   artifact="$APPROVAL_ROOT/fetch-$fingerprint-$created.tsv"
-  (umask 077; set -C; printf 'format\timage-upgrade-fetch-v1\nstate\tunused\nfingerprint\t%s\n' "$fingerprint" >"$artifact"; cat "$TMP_DIR/authority.tsv" >>"$artifact") || die "approval artifact already exists"
+  (umask 077; set -C; printf 'format\timage-upgrade-fetch-v2\nstate\tunused\nfingerprint\t%s\n' "$fingerprint" >"$artifact"; cat "$TMP_DIR/authority.tsv" >>"$artifact") || die "approval artifact already exists"
   printf 'Redacted image-fetch plan: host=%s tag=%s index=%s expected-loaded-id=%s\nApproval artifact: %s\n' "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" "$tag" "$index" "$loaded" "$artifact"
   exit 0
 fi
@@ -134,7 +138,7 @@ fi
 private_outside_git "$(dirname -- "$ARTIFACT")"
 check_artifact_schema
 [[ "$(mode_of "$ARTIFACT")" == 600 && "$(mode_of "$(dirname -- "$ARTIFACT")")" == 700 ]] || die "approval artifact protection is invalid"
-[[ "$(field "$ARTIFACT" format)" == image-upgrade-fetch-v1 && "$(field "$ARTIFACT" state)" == unused ]] || die "approval is not unused"
+[[ "$(field "$ARTIFACT" format)" == image-upgrade-fetch-v2 && "$(field "$ARTIFACT" state)" == unused ]] || die "approval is not unused"
 transaction_id="$(field "$ARTIFACT" transaction_id)"; [[ "$transaction_id" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || die "approval transaction ID is invalid"
 created="$(field "$ARTIFACT" created)"; remote_created="$(field "$ARTIFACT" remote_created)"; expires="$(field "$ARTIFACT" expires)"
 [[ "$created" =~ ^[0-9]+$ && "$remote_created" =~ ^[0-9]+$ && "$expires" =~ ^[0-9]+$ ]] || die "approval clock is invalid"
@@ -153,6 +157,10 @@ remote "sudo -n /usr/local/libexec/nextcloud-pi-ops upgrade-fetch consume '$tran
 remote "docker pull --platform linux/arm64/v8 '$ref' >/dev/null" </dev/null || die "approved digest pull failed; freeze remains held"
 actual="$(remote "docker image inspect --format '{{.Id}}' '$ref'")" || die "fetched image is unavailable; freeze remains held"
 [[ "$actual" == "$loaded" ]] || die "fetched image ID differs; freeze remains held"
+if [[ "$image_store" == containerd ]]; then
+  actual_manifest="$(remote "docker image inspect --platform linux/arm64/v8 --format '{{.Id}}' '$ref'")" || die "fetched ARM64 manifest is unavailable; freeze remains held"
+  [[ "$actual_manifest" == "$manifest" ]] || die "fetched ARM64 manifest differs; freeze remains held"
+fi
 check_inputs
 authority >"$TMP_DIR/authority.tsv"
 [[ "$(sha256 "$TMP_DIR/authority.tsv")" == "$(field "$ARTIFACT" fingerprint)" ]] || die "approved evidence changed after fetch; freeze remains held"

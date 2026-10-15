@@ -20,6 +20,7 @@ readonly -a PR_COMMANDS=(
   'bash scripts/test-image-lock.sh'
   'python3 scripts/test-resolve-image-upgrade.py'
   'python3 scripts/test-prepare-image-upgrade.py'
+  'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-image-identity.py'
   'python3 scripts/test-rehearse-mariadb-upgrade.py'
   'python3 scripts/test-rehearse-nextcloud-upgrade.py'
   'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-restore-live-runtime.py'

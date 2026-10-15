@@ -31,7 +31,7 @@ class DatabaseCutoverTests(unittest.TestCase):
                      "candidate_record": "3" * 64, "candidate_compose": "4" * 64,
                      "source_caddy": "5" * 64}
             metadata = {"freeze_id": stage_id, "freeze_table_sha256": "6" * 64,
-                        "tag": "mariadb:11.4.13", "config_digest": "sha256:" + "7" * 64}
+                        "tag": "mariadb:11.4.13", "config_digest": "sha256:" + "0" * 64, "expected_id": "sha256:" + "7" * 64}
             base = {"format": "image-activation-stage-v1", "stage_id": stage_id,
                     "host": "pi.example.invalid", "target": "db", "fetch_id": stage_id,
                     "tag": metadata["tag"], "freeze": {"id": stage_id, "table_sha256": "6" * 64},
@@ -51,7 +51,7 @@ class DatabaseCutoverTests(unittest.TestCase):
                         return {"phase": "runtime-may-have-changed", "id": stage_id,
                                 "fingerprint": stage["fingerprint"], "freeze_id": stage_id,
                                 "freeze_table_sha256": "6" * 64, "fetch_id": stage_id,
-                                "target": "db", "tag": metadata["tag"], "expected_id": metadata["config_digest"],
+                                "target": "db", "tag": metadata["tag"], "expected_id": metadata["expected_id"],
                                 "pre_record_sha256": local["source_record"],
                                 "pre_compose_sha256": local["source_compose"],
                                 "candidate_record_sha256": local["candidate_record"],
