@@ -36,6 +36,8 @@ class FakeTarget:
 
     def ssh(self, command: str, **_kwargs: object) -> str:
         self.calls.append("ssh " + command)
+        if command.startswith("docker info"):
+            return '{"driver":"overlay2","status":[]}'
         if command.startswith("docker image inspect"):
             return "sha256:" + "1" * 64
         if command == "hostname":
@@ -129,6 +131,8 @@ class ActivationTests(unittest.TestCase):
         self.candidate = self.root / "candidate"
         self.source = self.root / "source"
         self.candidate.mkdir()
+        (self.candidate / "registry-metadata.tsv").write_text("index_digest\tsha256:" + "1" * 64 + "\nconfig_digest\tsha256:" + "2" * 64 + "\n")
+        (self.candidate / "image-identity.tsv").write_text("format\tnextcloud-image-identity-v1\nimage_store\tclassic\nexpected_id\tsha256:" + "2" * 64 + "\n")
         self.source.mkdir()
         (self.candidate / "active-images.env").write_text("candidate")
         (self.candidate / "docker-compose.yml").write_text("candidate")
@@ -186,8 +190,9 @@ class ActivationTests(unittest.TestCase):
                  "backup_manifest": "c" * 64, "image_manifest": "d" * 64,
                  "image_attestation": "e" * 64}
         metadata = {"tag": "nextcloud:31.0.14-apache", "index_digest": "sha256:" + "1" * 64,
-                    "manifest_digest": "sha256:" + "2" * 64, "config_digest": "sha256:" + "3" * 64}
-        record = {"format": "image-upgrade-fetch-v1", "state": "consumed",
+                    "manifest_digest": "sha256:" + "2" * 64, "config_digest": "sha256:" + "3" * 64,
+                    "image_store": "containerd", "expected_id": "sha256:" + "1" * 64}
+        record = {"format": "image-upgrade-fetch-v2", "state": "consumed",
                   "transaction_id": self.stage_id, "candidate_sha256": local["candidate_manifest"],
                   "source_lock_sha256": a.r.digest(a.r.ROOT / "config/image-lock.env"),
                   "config_manifest_sha256": local["config_manifest"],
@@ -198,7 +203,8 @@ class ActivationTests(unittest.TestCase):
                   "freeze_table_sha256": "9" * 64, "tag": metadata["tag"],
                   "index_digest": metadata["index_digest"],
                   "manifest_digest": metadata["manifest_digest"],
-                  "config_digest": metadata["config_digest"], "host": "test.example.invalid",
+                  "config_digest": metadata["config_digest"],
+                  "image_store": metadata["image_store"], "expected_id": metadata["expected_id"], "host": "test.example.invalid",
                   "created": "999", "remote_created": "999", "expires": "1899",
                   "actions": "pull-exact-digest,verify-loaded-id",
                   "exclusions": "tag-change,compose,source-lock,active-record,container-start,container-stop,pruning,image-removal,runtime-restore,freeze-release"}
@@ -214,6 +220,15 @@ class ActivationTests(unittest.TestCase):
             a.fetch_record(path, local, metadata,
                            {"id": self.stage_id, "table_sha256": "9" * 64},
                            "test.example.invalid", 1000, "f" * 64)
+
+    def test_wrong_store_stops_common_checks_before_protected_operations(self) -> None:
+        target = FakeTarget()
+        with mock.patch.object(a.r, "verify_local", return_value={}), \
+             mock.patch.object(a.r, "candidate_metadata", return_value={"image_store": "containerd"}):
+            with self.assertRaisesRegex(a.r.RecoveryError, "image store differs"):
+                a.common(target, self.candidate, self.source, self.root, self.root, self.root,
+                         1000, before_stage=False)
+        self.assertFalse(any(call.startswith("ops ") for call in target.calls))
 
     def test_stale_recovery_evidence_is_rejected_before_stage(self) -> None:
         path = self.root / "manifest.tsv"

@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
 from lib import db_cutover as db
+from lib import image_identity
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -239,7 +240,9 @@ def verify_local(candidate: Path, source: Path, config_backup: Path,
     if len(image_rows) != 3 or any(image_map.get(old_tags[key]) != old_ids[key]
                                    for key in old_tags):
         reject("prior image archive does not match the source record")
-    return {"backup_manifest": digest(runtime / "manifest.tsv"),
+    identity = candidate_metadata(candidate)
+    return {"image_store": identity["image_store"], "expected_id": identity["expected_id"],
+            "backup_manifest": digest(runtime / "manifest.tsv"),
             "config_manifest": digest(config_backup / "manifest.tsv"),
             "image_manifest": digest(images / "manifest.tsv"),
             "image_attestation": digest(images / "restore-attestation.tsv"),
@@ -255,6 +258,23 @@ def verify_local(candidate: Path, source: Path, config_backup: Path,
             "old_tags": old_tags, "old_ids": old_ids}
 
 
+def candidate_metadata(candidate: Path) -> dict[str, str]:
+    metadata = fields(candidate / "registry-metadata.tsv")
+    identity = fields(candidate / "image-identity.tsv")
+    try:
+        image_identity.validate(identity, metadata)
+    except ValueError as exc:
+        raise RecoveryError(str(exc)) from exc
+    return dict(metadata, image_store=identity["image_store"], expected_id=identity["expected_id"])
+
+
+def require_image_store(target: Target, store: str) -> None:
+    try:
+        image_identity.require_store(target.ssh(image_identity.INFO_COMMAND), store)
+    except ValueError as exc:
+        raise RecoveryError(str(exc)) from exc
+
+
 def evidence(target: Target, stage_id: str, candidate: Path, source: Path,
              config_backup: Path, runtime: Path, images: Path) -> dict[str, object]:
     if not IDENTIFIER.fullmatch(stage_id):
@@ -267,7 +287,8 @@ def evidence(target: Target, stage_id: str, candidate: Path, source: Path,
     stage = target.ops("upgrade-stage", "status", stage_id)
     active = target.ops("active-record", "status", stage_id)
     manifest = manifest_fields(runtime / "manifest.tsv")
-    metadata = manifest_fields(candidate / "registry-metadata.tsv")
+    metadata = candidate_metadata(candidate)
+    require_image_store(target, metadata["image_store"])
     try:
         stage_time = datetime.strptime(stage_id[:16], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
         backup_time = datetime.strptime(manifest["timestamp"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
@@ -288,7 +309,7 @@ def evidence(target: Target, stage_id: str, candidate: Path, source: Path,
             stage.get("candidate_record_sha256") != local["candidate_record"] or
             stage.get("candidate_compose_sha256") != local["candidate_compose"] or
             stage.get("tag") != metadata.get("tag") or
-            stage.get("expected_id") != metadata.get("config_digest") or
+            stage.get("expected_id") != metadata.get("expected_id") or
             active.get("state") not in (("prepared", "applied") if database_stage else ("applied",)) or
             active.get("id") != stage_id or
             active.get("pre_sha256") != local["source_record"] or
@@ -397,6 +418,7 @@ def resume(target: Target, base: dict[str, object], candidate: Path, source: Pat
            config_backup: Path, runtime: Path, images: Path) -> None:
     stage_id = str(base["stage_id"])
     local = verify_local(candidate, source, config_backup, runtime, images, target.config)
+    require_image_store(target, str(local["image_store"]))
     if (local != base.get("evidence") or base.get("host") != target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"] or
             base.get("project") != target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"] or
             base.get("mount") != target.config["NEXTCLOUD_STORAGE_MOUNT"]):

@@ -10,8 +10,10 @@ from pathlib import Path
 import stat
 import sys
 
-
 sys.dont_write_bytecode = True
+from lib import image_identity
+
+
 HERE = Path(__file__).parent
 SPEC = importlib.util.spec_from_file_location("prepare_image_upgrade", HERE / "prepare-image-upgrade.py")
 assert SPEC and SPEC.loader
@@ -19,7 +21,7 @@ candidate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(candidate)
 EXPECTED = {
     "registry-metadata.tsv", "image-lock.env", "docker-compose.yml",
-    "active-images.env", "Caddyfile", "candidate-manifest.tsv",
+    "active-images.env", "Caddyfile", "candidate-manifest.tsv", "image-identity.tsv",
 }
 
 
@@ -47,6 +49,11 @@ def verify(directory: Path, source_lock: Path | None = None,
     for field in ("index_digest", "manifest_digest", "config_digest"):
         if not candidate.DIGEST.fullmatch(metadata[field]):
             raise candidate.CandidateError("candidate registry digest is invalid")
+    identity = candidate.fields(contents["image-identity.tsv"], "\t", image_identity.KEYS)
+    try:
+        image_identity.validate(identity, metadata)
+    except ValueError as exc:
+        raise candidate.CandidateError(str(exc)) from exc
     lock_keys = {"NEXTCLOUD_IMAGE_PLATFORM"}
     record_keys = {
         "NEXTCLOUD_ACTIVE_IMAGES_FORMAT", "NEXTCLOUD_ACTIVE_IMAGES_MODE",
@@ -78,7 +85,7 @@ def verify(directory: Path, source_lock: Path | None = None,
         raise candidate.CandidateError("candidate registry image is invalid")
     target = targets[0]
     candidate.validate_exact_tag(metadata["image"], metadata["tag"])
-    if lock[f"NEXTCLOUD_IMAGE_{target}_TAG"] != metadata["tag"] or lock[f"NEXTCLOUD_IMAGE_{target}_ID"] != metadata["config_digest"]:
+    if lock[f"NEXTCLOUD_IMAGE_{target}_TAG"] != metadata["tag"] or lock[f"NEXTCLOUD_IMAGE_{target}_ID"] != identity["expected_id"]:
         raise candidate.CandidateError("candidate registry identity differs from its lock")
     if (source_lock is None) != (source_rendered is None):
         raise candidate.CandidateError("source lock and rendered baseline must be supplied together")
@@ -92,11 +99,12 @@ def verify(directory: Path, source_lock: Path | None = None,
             candidate.regular_bytes(source_rendered / "docker-compose.yml"),
             candidate.regular_bytes(source_rendered / "active-images" / "active-images.env"),
             candidate.regular_bytes(source_rendered / "caddy" / "Caddyfile"),
+            image_store=identity["image_store"],
         )
         for name, expected_data in expected.items():
             if contents[name] != expected_data:
                 raise candidate.CandidateError("candidate differs from the one-image source transition")
-    return metadata
+    return dict(metadata, image_store=identity["image_store"], expected_id=identity["expected_id"])
 
 
 def main() -> int:

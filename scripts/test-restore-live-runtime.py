@@ -39,6 +39,8 @@ class FakeTarget:
 
     def ssh(self, command: str, **kwargs: object) -> str:
         self.calls.append(command)
+        if command.startswith("docker info"):
+            return '{"driver":"overlay2","status":[]}'
         if kwargs.get("input_bytes") is not None:
             self.inputs.append(kwargs["input_bytes"])
         if command.startswith("docker image inspect"):
@@ -196,7 +198,7 @@ class ApprovalTests(unittest.TestCase):
         old_tags = {"APP": "nextcloud:30.0.17-apache", "DB": "mariadb:11.8.6", "CADDY": "caddy:2.10.2"}
         old_ids = {key: "sha256:" + str(index) * 64 for index, key in enumerate(old_tags, 1)}
         base = {"stage_id": self.stage_id, "stage_fingerprint": "f" * 64,
-                "evidence": {"old_tags": old_tags, "old_ids": old_ids,
+                "evidence": {"image_store": "classic", "old_tags": old_tags, "old_ids": old_ids,
                              "dbtableprefix": "oc_",
                              "sql_sha256": restore.digest(runtime / "database/nextcloud.sql"),
                              "source_compose": restore.digest(config / "compose/docker-compose.yml"),
@@ -211,6 +213,70 @@ class ApprovalTests(unittest.TestCase):
                         "atomic-transaction.sh": restore.ROOT / "scripts/lib/atomic-transaction.sh"}
         target.source_record = "a" * 64
         return target, base, source, config, runtime, images
+
+    def test_restore_stage_binds_runtime_id_separately_from_config_digest(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        local = dict(base["evidence"], candidate_record="c" * 64, env_sha256="e" * 64)
+        runtime_id = "sha256:" + "7" * 64
+        config_digest = "sha256:" + "8" * 64
+        metadata = {"tag": "nextcloud:31.0.14-apache", "image_store": "containerd",
+                    "expected_id": runtime_id, "config_digest": config_digest}
+        freeze = target.ops("upgrade-freeze", "status")
+        stage = {"phase": "runtime-may-have-changed", "id": self.stage_id,
+                 "fingerprint": "f" * 64, "target": "app", "freeze_id": freeze["id"],
+                 "freeze_table_sha256": freeze["table_sha256"], "tag": metadata["tag"],
+                 "expected_id": runtime_id, "pre_record_sha256": local["source_record"],
+                 "pre_compose_sha256": local["source_compose"],
+                 "candidate_record_sha256": local["candidate_record"],
+                 "candidate_compose_sha256": local["candidate_compose"]}
+        original_ops = target.ops
+        def ops(*args):
+            if args[:2] == ("upgrade-stage", "status"):
+                return stage
+            if args[:2] == ("active-record", "status"):
+                return {"state": "applied", "id": self.stage_id,
+                        "pre_sha256": local["source_record"], "candidate_sha256": local["candidate_record"]}
+            if args == ("active-images-state",):
+                return {"sha256": local["candidate_record"]}
+            return original_ops(*args)
+        def remote_hash(_target, path):
+            if path.endswith("/.env"):
+                return local["env_sha256"]
+            if path.endswith("/Caddyfile"):
+                return local["source_caddy"]
+            return local["candidate_compose"]
+        held = {"timestamp": "20260926T000000Z", "freeze_id": freeze["id"],
+                "freeze_table_sha256": freeze["table_sha256"]}
+        with mock.patch.object(restore, "verify_local", return_value=local), \
+             mock.patch.object(restore, "candidate_metadata", return_value=metadata), \
+             mock.patch.object(restore, "require_image_store"), \
+             mock.patch.object(restore, "manifest_fields", return_value=held), \
+             mock.patch.object(restore, "remote_hash", side_effect=remote_hash), \
+             mock.patch.object(target, "ops", side_effect=ops):
+            restore.evidence(target, self.stage_id, self.root / "candidate", source, config, runtime, images)
+            stage["expected_id"] = config_digest
+            with self.assertRaisesRegex(restore.RecoveryError, "active transaction differ"):
+                restore.evidence(target, self.stage_id, self.root / "candidate", source, config, runtime, images)
+
+    def test_platform_archive_id_cannot_replace_exact_source_id(self) -> None:
+        target, base, source, config, runtime, images = self.fixture()
+        original_ssh = target.ssh
+        loaded = False
+        def ssh(command, **kwargs):
+            nonlocal loaded
+            if command.startswith("docker load"):
+                loaded = True
+                return ""
+            if command.startswith("docker image inspect"):
+                if not loaded:
+                    raise restore.RecoveryError("prior source tag missing")
+                return "sha256:" + "9" * 64
+            return original_ssh(command, **kwargs)
+        with mock.patch.object(target, "ssh", side_effect=ssh):
+            with self.assertRaisesRegex(restore.RecoveryError, "loaded prior image identity differs"):
+                restore.apply(target, base, source, config, runtime, images)
+        self.assertTrue(loaded)
+        self.assertFalse(any(call.startswith("ops runtime-recovery") for call in target.calls))
 
     def test_promotion_failure_retains_freeze_and_failed_state(self) -> None:
         target, base, source, config, runtime, images = self.fixture(fail_promote=True)
@@ -297,6 +363,7 @@ class ApprovalTests(unittest.TestCase):
                     freeze_table_sha256="b" * 64, project=target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"],
                     mount=target.config["NEXTCLOUD_STORAGE_MOUNT"])
         base["evidence"]["env_sha256"] = "e" * 64
+        base["evidence"]["image_store"] = "classic"
         artifact = restore.plan(self.root, base, 1000)
         restore.consume(artifact, self.root, base, 1001)
         consumed = restore.consumed_for_resume(artifact, self.root, self.stage_id)
@@ -319,6 +386,7 @@ class ApprovalTests(unittest.TestCase):
                     freeze_table_sha256="b" * 64, project=target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"],
                     mount=target.config["NEXTCLOUD_STORAGE_MOUNT"])
         base["evidence"]["env_sha256"] = "e" * 64
+        base["evidence"]["image_store"] = "classic"
         artifact = restore.plan(self.root, base, 1000)
         consumed = restore.consume(artifact, self.root, base, 1001)
         def remote_hash(_target, path):
@@ -346,6 +414,7 @@ class ApprovalTests(unittest.TestCase):
                     mount=target.config["NEXTCLOUD_STORAGE_MOUNT"], db_prepare_fingerprint="b" * 64,
                     db_cutover_identity={})
         base["evidence"]["env_sha256"] = "e" * 64
+        base["evidence"]["image_store"] = "classic"
         artifact = restore.plan(self.root, base, 1000)
         consumed = restore.consume(artifact, self.root, base, 1001)
         def remote_hash(_target, path):
@@ -372,6 +441,7 @@ class ApprovalTests(unittest.TestCase):
                     mount=target.config["NEXTCLOUD_STORAGE_MOUNT"], db_prepare_fingerprint="b" * 64,
                     db_cutover_identity={})
         base["evidence"]["env_sha256"] = "e" * 64
+        base["evidence"]["image_store"] = "classic"
         artifact = restore.plan(self.root, base, 1000)
         consumed = restore.consume(artifact, self.root, base, 1001)
         def remote_hash(_target, path):
@@ -398,6 +468,7 @@ class ApprovalTests(unittest.TestCase):
                     mount=target.config["NEXTCLOUD_STORAGE_MOUNT"], db_prepare_fingerprint="b" * 64,
                     db_cutover_identity={})
         base["evidence"]["env_sha256"] = "e" * 64
+        base["evidence"]["image_store"] = "classic"
         artifact = restore.plan(self.root, base, 1000)
         consumed = restore.consume(artifact, self.root, base, 1001)
         def remote_hash(_target, path):

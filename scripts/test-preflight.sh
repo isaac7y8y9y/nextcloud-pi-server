@@ -34,7 +34,7 @@ chmod 600 "$TEST_DIR/deployment.env"
 NEXTCLOUD_DEPLOYMENT_ENV_FILE="$TEST_DIR/deployment.env" "$REPOSITORY_ROOT/scripts/render-deployment-config.sh" --output-dir "$TEST_DIR/rendered"
 printf 'format\tnextcloud-upgrade-image-v1\nimage\tmariadb\ntag\tmariadb:11.4.13\nplatform\tlinux/arm64/v8\nindex_digest\tsha256:%064d\nmanifest_digest\tsha256:%064d\nconfig_digest\tsha256:%064d\n' 0 0 0 >"$TEST_DIR/metadata.tsv"
 NEXTCLOUD_DEPLOYMENT_ENV_FILE="$TEST_DIR/deployment.env" python3 "$REPOSITORY_ROOT/scripts/prepare-image-upgrade.py" \
-  --target db --metadata "$TEST_DIR/metadata.tsv" --image-lock "$REPOSITORY_ROOT/config/image-lock.env" \
+  --image-store classic --target db --metadata "$TEST_DIR/metadata.tsv" --image-lock "$REPOSITORY_ROOT/config/image-lock.env" \
   --rendered "$TEST_DIR/rendered" --output-dir "$TEST_DIR/candidate" >/dev/null
 if PATH="$TEST_DIR/bin:$PATH" NEXTCLOUD_DEPLOYMENT_ENV_FILE="$TEST_DIR/deployment.env" \
   bash "$PREFLIGHT" --conformance --candidate "$TEST_DIR/candidate" >"$TEST_DIR/preflight.out" 2>&1; then
