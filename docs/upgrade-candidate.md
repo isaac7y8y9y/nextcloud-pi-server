@@ -1,5 +1,12 @@
 # Image upgrade candidate preparation
 
+Upgrade fetch and full-runtime recovery require a v2 exact-source image archive
+and isolated reload attestation, with the same Docker image store as the
+candidate. Export using `scripts/export-image-recovery.sh --exact-source`.
+Follow the [exact-source archive procedure](recovery.md) before staging an
+upgrade; the legacy platform archive does not satisfy this gate.
+
+
 This is the first, read-only part of [issue #26's upgrade plan](issue-26-upgrade-plan.md).
 It does not authorize a pull, container replacement, database migration, or a
 Pi change. The active production Compose and image lock remain unchanged.

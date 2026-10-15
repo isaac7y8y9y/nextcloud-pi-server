@@ -199,7 +199,7 @@ def verify_local(candidate: Path, source: Path, config_backup: Path,
          "--source-lock", str(ROOT / "config/image-lock.env"), "--source-rendered", str(source)],
         [str(ROOT / "scripts/verify-config-backup.sh"), str(config_backup)],
         [str(ROOT / "scripts/verify-runtime-backup.sh"), str(runtime)],
-        [str(ROOT / "scripts/verify-image-recovery.sh"), "--require-attestation", str(images)],
+        [str(ROOT / "scripts/verify-image-recovery.sh"), "--require-exact-source", str(images)],
     )
     for command in checks:
         run(command, timeout=600)
@@ -241,6 +241,8 @@ def verify_local(candidate: Path, source: Path, config_backup: Path,
                                    for key in old_tags):
         reject("prior image archive does not match the source record")
     identity = candidate_metadata(candidate)
+    if recovery.get("image_store") != identity["image_store"]:
+        reject("prior image archive store differs from candidate")
     return {"image_store": identity["image_store"], "expected_id": identity["expected_id"],
             "backup_manifest": digest(runtime / "manifest.tsv"),
             "config_manifest": digest(config_backup / "manifest.tsv"),
@@ -600,15 +602,8 @@ def finish_promoted(target: Target, base: dict[str, object], config_backup: Path
             reject("protected database recovery completion differs")
 
 
-def apply(target: Target, base: dict[str, object], source: Path,
-          config_backup: Path, runtime: Path, images: Path, *, prepared: bool = False) -> None:
-    stage_id = str(base["stage_id"])
-    project = target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"]
-    mount = target.config["NEXTCLOUD_STORAGE_MOUNT"]
-    local = base["evidence"]
-    assert isinstance(local, dict)
-    old_tags = local["old_tags"]
-    old_ids = local["old_ids"]
+def restore_prior_images(target: Target, local: dict[str, object], images: Path) -> None:
+    old_tags, old_ids = local["old_tags"], local["old_ids"]
     assert isinstance(old_tags, dict) and isinstance(old_ids, dict)
     prior_ok = True
     for key in ("APP", "DB", "CADDY"):
@@ -622,6 +617,19 @@ def apply(target: Target, base: dict[str, object], source: Path,
     for key in ("APP", "DB", "CADDY"):
         if target.ssh("docker image inspect --format '{{.Id}}' " + q(str(old_tags[key]))) != old_ids[key]:
             reject("loaded prior image identity differs; ingress freeze remains held")
+
+
+def apply(target: Target, base: dict[str, object], source: Path,
+          config_backup: Path, runtime: Path, images: Path, *, prepared: bool = False) -> None:
+    stage_id = str(base["stage_id"])
+    project = target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"]
+    mount = target.config["NEXTCLOUD_STORAGE_MOUNT"]
+    local = base["evidence"]
+    assert isinstance(local, dict)
+    old_tags = local["old_tags"]
+    old_ids = local["old_ids"]
+    assert isinstance(old_tags, dict) and isinstance(old_ids, dict)
+    restore_prior_images(target, local, images)
 
     if prepared:
         restore_root = mount + "/.recovery-" + stage_id

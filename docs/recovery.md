@@ -1,5 +1,31 @@
 # Recovery
 
+Before an upgrade stage, export the locked source images with
+`scripts/export-image-recovery.sh --exact-source`, then run
+`scripts/run-image-restore-readiness.sh --apply <image-recovery-directory>`.
+Verify the result:
+
+```sh
+scripts/verify-image-recovery.sh --require-exact-source <image-recovery-directory>
+```
+
+This v2 archive saves all locally
+present variants for the three locked tags, preserving the source indexes.
+Its isolated daemon must have the same image store and initially contain no
+images or containers. Attestation requires the original default IDs and Linux
+ARM64 selection; selected-platform IDs are recorded separately. Fetch and full
+runtime restoration require that proof and archive/candidate store agreement.
+Existing approval fingerprints bind the new manifest and attestation, so
+regenerate approvals after replacing recovery material.
+
+The default exporter still creates v1 platform-only archives for the separate
+`restore-image-recovery.sh` recovered-mode workflow. They do not satisfy the
+exact-source upgrade recovery gate; that platform importer rejects v2 archives.
+Keep protected archives outside Git. A later cutover needs a fresh freeze and
+held backup after writes have reopened. See the
+[exact-source correction plan](issue-26-exact-image-recovery-plan.md).
+
+
 Recover only from a verified protected artifact bound to the configured target.
 Begin with the read-only validation mode and stop at every stated human approval
 pause. A human approval pause is not a generated approval artifact: deployment,

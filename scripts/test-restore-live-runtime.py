@@ -258,6 +258,28 @@ class ApprovalTests(unittest.TestCase):
             with self.assertRaisesRegex(restore.RecoveryError, "active transaction differ"):
                 restore.evidence(target, self.stage_id, self.root / "candidate", source, config, runtime, images)
 
+    def test_exact_archive_restores_missing_and_wrong_prior_tags(self) -> None:
+        for missing in (True, False):
+            with self.subTest(missing=missing):
+                target, base, source, config, runtime, images = self.fixture()
+                original_ssh = target.ssh
+                loaded = False
+                def ssh(command, **kwargs):
+                    nonlocal loaded
+                    if command.startswith("docker load"):
+                        self.assertEqual(kwargs["input_file"], images / "images.tar")
+                        loaded = True
+                        return ""
+                    if command.startswith("docker image inspect") and not loaded:
+                        if missing:
+                            raise restore.RecoveryError("missing prior tag")
+                        return "sha256:" + "9" * 64
+                    return original_ssh(command, **kwargs)
+                with mock.patch.object(target, "ssh", side_effect=ssh):
+                    restore.restore_prior_images(target, base["evidence"], images)
+                self.assertTrue(loaded)
+                self.assertFalse(any(call.startswith("ops ") for call in target.calls))
+
     def test_platform_archive_id_cannot_replace_exact_source_id(self) -> None:
         target, base, source, config, runtime, images = self.fixture()
         original_ssh = target.ssh

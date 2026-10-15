@@ -1,5 +1,12 @@
 # Backup and rollback
 
+Upgrade fetch and full-runtime recovery require a v2 exact-source image archive
+and isolated reload attestation, with the same Docker image store as the
+candidate. Export using `scripts/export-image-recovery.sh --exact-source`.
+Follow the [exact-source archive procedure](recovery.md) before staging an
+upgrade; the legacy platform archive does not satisfy this gate.
+
+
 Configuration and runtime backups are separate protected artifacts. Run these
 procedures from the repository root in a clean linked worktree with a valid
 mode-`0600` `config/deployment.env`. See [operations](operations.md) for the

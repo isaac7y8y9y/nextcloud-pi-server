@@ -38,6 +38,7 @@ readonly -a PR_COMMANDS=(
   'bash scripts/test-image-import.sh'
   'bash scripts/test-image-import-transaction.sh'
   'bash scripts/test-image-import-interruption.sh'
+  'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-exact-image-recovery.py'
   'bash scripts/test-image-recovery-attestation.sh'
   'bash scripts/test-image-readiness-lifecycle.sh'
   'bash scripts/test-image-readiness-e2e.sh'

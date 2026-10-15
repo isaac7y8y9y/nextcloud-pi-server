@@ -97,9 +97,15 @@ build_recovered_record() {
   } >"$out"
   chmod 600 "$out"
 }
+verify_platform_recovery() {
+  local recovery="$1"
+  "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery" >/dev/null
+  [[ "$(awk -F '\t' '$1 == "format" {print $2}' "$recovery/manifest.tsv")" == image-recovery-v1 ]] ||
+    die "exact source archives belong to full-runtime restoration, not platform image import"
+}
 plan() {
   local recovery="$ARGUMENT" now remote_now artifact recovered_hash prestate fingerprint expiry transaction_id
-  "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery" >/dev/null
+  verify_platform_recovery "$recovery"
   build_recovered_record "$recovery" "$TMP_DIR/recovered.env"
   capture_remote_prestate "$TMP_DIR/prestate.tsv"
   recovered_hash="$(sha256 "$TMP_DIR/recovered.env")"; prestate="$(sha256 "$TMP_DIR/prestate.tsv")"
@@ -136,7 +142,7 @@ apply() {
   [[ "$(record_value format)" == image-import-approval-v1 && "$(record_value state)" == unused && "$(record_value transaction_id)" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ && "$(record_value fingerprint)" =~ ^[0-9a-f]{64}$ && "$(record_value created)" =~ ^[0-9]+$ && "$(record_value expires)" =~ ^[0-9]+$ && $(record_value expires) -eq $(($(record_value created) + 900)) && $(date -u +%s) -le $(record_value expires) && "$(record_value actions)" == "$IMAGE_IMPORT_ACTIONS" ]] || die "import approval is invalid or expired"
   [[ "$(record_value host)" == "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" && "$(record_value remote_created)" =~ ^[0-9]+$ ]] && clock_skew_ok "$(record_value created)" "$(record_value remote_created)" || die "import approval target or timestamp binding differs"
   clock_skew_ok "$(date -u +%s)" "$(remote 'date -u +%s')" || die "local and Pi clocks differ by more than 60 seconds"
-  "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery" >/dev/null
+  verify_platform_recovery "$recovery"
   build_recovered_record "$recovery" "$TMP_DIR/recovered.env"
   capture_remote_prestate "$TMP_DIR/prestate.tsv"
   { printf 'transaction_id\t%s\narchive_sha256\t%s\nattestation_sha256\t%s\nrecovered_record_sha256\t%s\nprestate_sha256\t%s\nhost\t%s\ncreated\t%s\nremote_created\t%s\nexpires\t%s\nactions\t%s\n' "$(record_value transaction_id)" "$(manifest_value "$recovery/manifest.tsv" archive_sha256)" "$(sha256 "$recovery/restore-attestation.tsv")" "$(sha256 "$TMP_DIR/recovered.env")" "$(sha256 "$TMP_DIR/prestate.tsv")" "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" "$(record_value created)" "$(record_value remote_created)" "$(record_value expires)" "$IMAGE_IMPORT_ACTIONS"; } >"$TMP_DIR/authority.tsv"

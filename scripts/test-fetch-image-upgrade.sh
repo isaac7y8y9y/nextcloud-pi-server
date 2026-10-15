@@ -48,11 +48,17 @@ cp "$fixture/rendered/docker-compose.yml" "$fixture/config-backup/compose/docker
 cp "$fixture/rendered/caddy/Caddyfile" "$fixture/config-backup/caddy/Caddyfile"
 printf 'timestamp\t%s\nformat\truntime-backup-v2\nremote_host\ttest-pi\nremote_user\ttester\nsource_nextcloud\t/srv/test/storage/nextcloud\nfreeze_id\t20260924T000000Z-101\nfreeze_table_sha256\t%s\n' "$timestamp" "$(printf '%064d' 3)" >"$fixture/runtime-backup/manifest.tsv"
 printf 'timestamp\t%s\nremote_host\ttest-pi\nremote_user\ttester\nsource_project\t/srv/test/nextcloud-docker\nstorage_mount\t/srv/test/storage\n' "$timestamp" >"$fixture/image-recovery/manifest.tsv"
+printf 'image_store\tclassic\n' >>"$fixture/image-recovery/manifest.tsv"
 printf 'timestamp\t%s\n' "$timestamp" >"$fixture/image-recovery/restore-attestation.tsv"
 for verifier in verify-config-backup.sh verify-runtime-backup.sh verify-image-recovery.sh; do
   printf '#!/usr/bin/env bash\nexit 0\n' >"$fixture/repo/scripts/$verifier"
   chmod 755 "$fixture/repo/scripts/$verifier"
 done
+cat >"$fixture/repo/scripts/verify-image-recovery.sh" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == --require-exact-source ]]
+EOF
+chmod 755 "$fixture/repo/scripts/verify-image-recovery.sh"
 printf '#!/usr/bin/env bash\ncase "$1" in *verify-image-upgrade.py) exit 0;; *image_identity.py) exec "$FETCH_REAL_PYTHON" "$@";; *resolve-image-upgrade.py) cat "$FETCH_FIXTURE/candidate/registry-metadata.tsv";; *) exit 1;; esac\n' >"$fixture/bin/python3"
 chmod 755 "$fixture/bin/python3"
 printf '%b' '#!/usr/bin/env bash\nset -euo pipefail\nfor arg; do command_text="$arg"; done\ncase "$command_text" in\n  *"upgrade-freeze status"*) printf "state\\tactive\\nid\\t20260924T000000Z-101\\ntable_sha256\\t%064d\\n" 3;;\n  *"background-jobs state"*) printf "timer_active\\tno\\n";;\n  *"occ status"*) printf "  - maintenance: true\\n";;\n  hostname) printf "test-pi\\n";;\n  "id -un") printf "tester\\n";;\n  "date -u +%s") date -u +%s;;\n  *"sha256sum"*"docker-compose.yml"*) shasum -a 256 "$FETCH_FIXTURE/rendered/docker-compose.yml";;\n  *"sha256sum"*"Caddyfile"*) shasum -a 256 "$FETCH_FIXTURE/rendered/caddy/Caddyfile";;\n  *"active-images-state"*) printf "mode\\tsource\\nsha256\\t%s\\n" "$(shasum -a 256 "$FETCH_FIXTURE/rendered/active-images/active-images.env" | awk "{print \\$1}")";;\n  *"docker image inspect"*"nextcloud:30"*) awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_APP_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env";;\n  *"docker image inspect"*"mariadb:11"*) awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_DB_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env";;\n  *"docker image inspect"*"caddy:2"*) awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_CADDY_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env";;\n  *"docker inspect"*"nextcloud-docker-app-1"*) printf "%064d %s true\\n" 4 "$(awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_APP_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env")";;\n  *"docker inspect"*"nextcloud-docker-db-1"*) printf "%064d %s true\\n" 5 "$(awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_DB_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env")";;\n  *"docker inspect"*"nextcloud-docker-caddy-1"*) printf "%064d %s true\\n" 6 "$(awk -F= "\\$1 == \\"NEXTCLOUD_IMAGE_CADDY_ID\\" {print \\$2}" "$FETCH_FIXTURE/repo/config/image-lock.env")";;\n  *"docker pull"*) printf "pull\\n" >>"$FETCH_FIXTURE/pulls";;\n  *"docker image inspect"*"nextcloud@sha256:"*) printf "sha256:%064d\\n" 2;;\n  *) printf "Unexpected fake SSH command: %s\\n" "$command_text" >&2; exit 1;;\nesac\n' >"$fixture/bin/ssh"
@@ -105,6 +111,14 @@ fi
 grep -Fx $'state\tunused' "$artifact" >/dev/null
 [[ ! -e "$fixture/pulls" && ! -e "$fixture/root-fetch" ]]
 printf '{"driver":"overlay2","status":[]}\n' >"$fixture/store.json"
+cp "$fixture/image-recovery/manifest.tsv" "$fixture/image-manifest.original"
+printf 'image_store\tcontainerd\n' >>"$fixture/image-recovery/manifest.tsv"
+if bash "$fixture/repo/scripts/fetch-image-upgrade.sh" --apply "$artifact" "${inputs[@]}" >"$fixture/archive-store.out" 2>&1; then
+  printf 'archive store mismatch was accepted\n' >&2; exit 1
+fi
+[[ ! -e "$fixture/pulls" && ! -e "$fixture/root-fetch" ]]
+grep -Fx $'state\tunused' "$artifact" >/dev/null
+mv "$fixture/image-manifest.original" "$fixture/image-recovery/manifest.tsv"
 bash "$fixture/repo/scripts/fetch-image-upgrade.sh" --apply "$artifact" "${inputs[@]}" >"$fixture/apply.out"
 grep -Fx $'state\tconsumed' "$artifact" >/dev/null
 [[ "$(wc -l <"$fixture/pulls" | tr -d '[:space:]')" == 1 ]]
@@ -119,6 +133,8 @@ rm "$fixture/root-fetch" "$fixture/pulls"
 printf 'format\tnextcloud-image-identity-v1\nimage_store\tcontainerd\nexpected_id\tsha256:%064d\n' 0 >"$fixture/candidate/image-identity.tsv"
 printf '{"driver":"overlayfs","status":[["driver-type","io.containerd.snapshotter.v1"]]}\n' >"$fixture/store.json"
 printf 'sha256:%064d\n' 1 >"$fixture/manifest-id"
+sed 's/image_store.classic/image_store\tcontainerd/' "$fixture/image-recovery/manifest.tsv" >"$fixture/image-recovery/manifest.new"
+mv "$fixture/image-recovery/manifest.new" "$fixture/image-recovery/manifest.tsv"
 bash "$fixture/repo/scripts/fetch-image-upgrade.sh" --plan "${inputs[@]}" >"$fixture/containerd-plan.out"
 artifact="$(awk -F ': ' '$1 == "Approval artifact" {print $2}' "$fixture/containerd-plan.out")"
 grep -Fx $'image_store\tcontainerd' "$artifact" >/dev/null
