@@ -11,6 +11,8 @@ import re
 import stat
 import subprocess
 import sys
+
+sys.dont_write_bytecode = True
 from lib import image_identity
 
 

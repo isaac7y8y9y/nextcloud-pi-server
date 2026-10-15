@@ -9,10 +9,11 @@ import importlib.util
 from pathlib import Path
 import stat
 import sys
+
+sys.dont_write_bytecode = True
 from lib import image_identity
 
 
-sys.dont_write_bytecode = True
 HERE = Path(__file__).parent
 SPEC = importlib.util.spec_from_file_location("prepare_image_upgrade", HERE / "prepare-image-upgrade.py")
 assert SPEC and SPEC.loader
