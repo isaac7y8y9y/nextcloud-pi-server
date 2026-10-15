@@ -60,10 +60,16 @@ def require_store(raw: str, expected: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check-store", required=True, choices=STORES)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--check-store", choices=STORES)
+    group.add_argument("--print-store", action="store_true")
     args = parser.parse_args()
     try:
-        require_store(sys.stdin.read(), args.check_store)
+        raw = sys.stdin.read()
+        if args.print_store:
+            print(classify(raw))
+        else:
+            require_store(raw, args.check_store)
     except (ValueError, TypeError) as exc:
         print(f"Image identity rejected: {exc}", file=sys.stderr)
         return 1

@@ -15,8 +15,9 @@ image_lock_load "$REPOSITORY_ROOT"
 readonly REMOTE="${NEXTCLOUD_PI_USER}@${NEXTCLOUD_PI_HOST}"
 OUTPUT_ROOT="${NEXTCLOUD_IMAGE_RECOVERY_ROOT:-$HOME/nextcloud-pi-image-recovery}"
 STAGING_DIR=""
+EXACT_SOURCE=0
 
-usage() { printf 'Usage: %s [--output-root <absolute-directory>]\n' "$0" >&2; }
+usage() { printf 'Usage: %s [--exact-source] [--output-root <absolute-directory>]\n' "$0" >&2; }
 die() { printf 'Image recovery export failed: %s\n' "$1" >&2; exit 1; }
 mode_of() { if stat -f '%Lp' "$1" >/dev/null 2>&1; then stat -f '%Lp' "$1"; else stat -c '%a' "$1"; fi; }
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
@@ -32,7 +33,8 @@ reject_git_target() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --output-root) [[ $# -eq 2 ]] || { usage; exit 2; }; OUTPUT_ROOT="$2"; shift 2 ;;
+    --exact-source) EXACT_SOURCE=1; shift ;;
+    --output-root) [[ $# -ge 2 ]] || { usage; exit 2; }; OUTPUT_ROOT="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage; exit 2 ;;
   esac
@@ -43,11 +45,21 @@ chmod 700 "$OUTPUT_ROOT"
 [[ "$(mode_of "$OUTPUT_ROOT")" == "700" ]] || die "could not protect output root"
 
 remote "test \"\$(hostname)\" = '$NEXTCLOUD_PI_SYSTEM_HOSTNAME' && test \"\$(id -un)\" = '$NEXTCLOUD_PI_USER'" || die "connected Pi identity does not match"
-while IFS= read -r tag; do
-  expected="$(image_lock_expected_id "$tag")"
-  actual="$(remote "docker image inspect --format '{{.Id}}' '$tag'" </dev/null)"
-  [[ "$actual" == "$expected" ]] || die "remote locked image is missing or has a different ID: $tag"
-done < <(image_lock_tags)
+check_source_ids() {
+  local tag expected actual
+  while IFS= read -r tag; do
+    expected="$(image_lock_expected_id "$tag")"
+    actual="$(remote "docker image inspect --format '{{.Id}}' '$tag'" </dev/null)"
+    [[ "$actual" == "$expected" ]] || die "remote locked image is missing or has a different ID: $tag"
+  done < <(image_lock_tags)
+}
+source_store() {
+  remote "docker info --format '{\"driver\":{{json .Driver}},\"status\":{{json .DriverStatus}}}'" |
+    python3 "$SCRIPT_DIR/lib/image_identity.py" --print-store
+}
+check_source_ids
+image_store=""
+if (( EXACT_SOURCE )); then image_store="$(source_store)"; fi
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 final_dir="$OUTPUT_ROOT/image-recovery-$timestamp"
@@ -59,12 +71,22 @@ mkdir "$STAGING_DIR"
 chmod 700 "$STAGING_DIR"
 
 printf 'Exporting locked images from the configured Pi; no containers will start.\n'
-remote "docker image save --platform '$NEXTCLOUD_IMAGE_PLATFORM' $(image_lock_tags | sed "s/^/'/;s/$/'/" | tr '\n' ' ')" >"$STAGING_DIR/images.tar"
+save_platform="--platform '$NEXTCLOUD_IMAGE_PLATFORM'"
+if (( EXACT_SOURCE )); then save_platform=""; fi
+remote "docker image save $save_platform $(image_lock_tags | sed "s/^/'/;s/$/'/" | tr '\n' ' ')" >"$STAGING_DIR/images.tar"
 chmod 600 "$STAGING_DIR/images.tar"
 [[ -s "$STAGING_DIR/images.tar" ]] || die "image archive is empty"
+check_source_ids
+if (( EXACT_SOURCE )); then
+  [[ "$(source_store)" == "$image_store" ]] || die "source image store changed during export"
+fi
 
 {
-  printf 'format\timage-recovery-v1\n'
+  if (( EXACT_SOURCE )); then
+    printf 'format\timage-recovery-v2\nimage_store\t%s\n' "$image_store"
+  else
+    printf 'format\timage-recovery-v1\n'
+  fi
   printf 'state\tcomplete\n'
   printf 'timestamp\t%s\n' "$timestamp"
   printf 'remote_host\t%s\n' "$NEXTCLOUD_PI_SYSTEM_HOSTNAME"

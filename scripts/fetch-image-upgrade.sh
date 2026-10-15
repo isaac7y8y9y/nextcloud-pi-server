@@ -72,7 +72,7 @@ check_inputs() {
   python3 "$SCRIPT_DIR/verify-image-upgrade.py" "$CANDIDATE" --source-lock "$ROOT/config/image-lock.env" --source-rendered "$RENDERED" >/dev/null || die "candidate is not the exact one-image transition"
   "$SCRIPT_DIR/verify-config-backup.sh" "$CONFIG_BACKUP" >/dev/null || die "configuration backup failed verification"
   "$SCRIPT_DIR/verify-runtime-backup.sh" "$RUNTIME_BACKUP" >/dev/null || die "runtime backup failed verification"
-  "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$IMAGE_RECOVERY" >/dev/null || die "prior image recovery failed verification"
+  "$SCRIPT_DIR/verify-image-recovery.sh" --require-exact-source "$IMAGE_RECOVERY" >/dev/null || die "prior image recovery failed verification"
   for name in "$CONFIG_BACKUP/manifest.tsv" "$RUNTIME_BACKUP/manifest.tsv" "$IMAGE_RECOVERY/manifest.tsv" "$IMAGE_RECOVERY/restore-attestation.tsv"; do fresh "$name"; done
   [[ "$(field "$CONFIG_BACKUP/manifest.tsv" remote_host)" == "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" && "$(field "$CONFIG_BACKUP/manifest.tsv" remote_user)" == "$NEXTCLOUD_PI_USER" && "$(field "$CONFIG_BACKUP/manifest.tsv" source_project)" == "$NEXTCLOUD_REMOTE_PROJECT_DIR" ]] || die "configuration backup target differs"
   [[ "$(field "$RUNTIME_BACKUP/manifest.tsv" format)" == runtime-backup-v2 && "$(field "$RUNTIME_BACKUP/manifest.tsv" remote_host)" == "$NEXTCLOUD_PI_SYSTEM_HOSTNAME" && "$(field "$RUNTIME_BACKUP/manifest.tsv" remote_user)" == "$NEXTCLOUD_PI_USER" && "$(field "$RUNTIME_BACKUP/manifest.tsv" source_nextcloud)" == "$NEXTCLOUD_STORAGE_MOUNT/nextcloud" && "$(field "$RUNTIME_BACKUP/manifest.tsv" freeze_id)" == "$FREEZE_ID" ]] || die "held runtime backup target or freeze differs"
@@ -82,6 +82,7 @@ check_inputs() {
   manifest="$(field "$metadata" manifest_digest)"; config="$(field "$metadata" config_digest)"
   image_store="$(field "$CANDIDATE/image-identity.tsv" image_store)"
   loaded="$(field "$CANDIDATE/image-identity.tsv" expected_id)"
+  [[ "$(field "$IMAGE_RECOVERY/manifest.tsv" image_store)" == "$image_store" ]] || die "prior image archive store differs from candidate"
   store_info="$(remote "docker info --format '{\"driver\":{{json .Driver}},\"status\":{{json .DriverStatus}}}'")" || die "Docker image-store evidence is unavailable"
   python3 "$SCRIPT_DIR/lib/image_identity.py" --check-store "$image_store" <<<"$store_info" || die "target Docker image store differs from candidate"
   python3 "$SCRIPT_DIR/resolve-image-upgrade.py" "$tag" --expected-index "$index" >"$TMP_DIR/registry.tsv" || die "registry identity changed"

@@ -37,12 +37,30 @@ trap 'exit 143' TERM
 [[ "$docker_host" != "unix:///var/run/docker.sock" ]] || die "the live Docker socket is never allowed"
 "$SCRIPT_DIR/verify-image-recovery.sh" "$recovery_dir" >/dev/null
 
+format="$(awk -F '\t' '$1 == "format" {print $2}' "$recovery_dir/manifest.tsv")"
+image_store="$(awk -F '\t' '$1 == "image_store" {print $2}' "$recovery_dir/manifest.tsv")"
+verify_option=--require-attestation
+check_store() {
+  docker -H "$docker_host" info --format '{"driver":{{json .Driver}},"status":{{json .DriverStatus}}}' |
+    python3 "$SCRIPT_DIR/lib/image_identity.py" --check-store "$image_store"
+}
+if [[ "$format" == image-recovery-v2 ]]; then
+  verify_option=--require-exact-source
+  check_store || die "isolated image store differs from source"
+  loaded_images="$(docker -H "$docker_host" image ls -aq)" || die "isolated image list is unavailable"
+  [[ -z "$loaded_images" ]] || die "exact source proof requires an empty image store"
+fi
 docker -H "$docker_host" info >/dev/null || die "isolated Docker daemon is not reachable"
-[[ -z "$(docker -H "$docker_host" ps -aq)" ]] || die "isolated daemon already contains containers"
+containers="$(docker -H "$docker_host" ps -aq)" || die "isolated container list is unavailable"
+[[ -z "$containers" ]] || die "isolated daemon already contains containers"
 docker -H "$docker_host" load -i "$recovery_dir/images.tar" >/dev/null
 umask 077
 {
-  printf 'format\timage-restore-attestation-v1\n'
+  if [[ "$format" == image-recovery-v2 ]]; then
+    printf 'format\timage-restore-attestation-v2\nimage_store\t%s\n' "$image_store"
+  else
+    printf 'format\timage-restore-attestation-v1\n'
+  fi
   printf 'archive_sha256\t%s\n' "$(awk -F $'\t' '$1 == "archive_sha256" { print $2 }' "$recovery_dir/manifest.tsv")"
   for field in platform remote_host remote_user source_project storage_mount; do
     printf '%s\t%s\n' "$field" "$(awk -F $'\t' -v key="$field" '$1 == key { print $2 }' "$recovery_dir/manifest.tsv")"
@@ -52,7 +70,14 @@ umask 077
   printf 'timestamp\t%s\n' "$(date -u +%Y%m%dT%H%M%SZ)"
   while IFS= read -r tag; do
     printf 'source_image\t%s\t%s\n' "$tag" "$(image_lock_expected_id "$tag")"
-    printf 'image\t%s\t%s\n' "$tag" "$(docker -H "$docker_host" image inspect --format '{{.Id}}' "$tag")"
+    loaded="$(docker -H "$docker_host" image inspect --format '{{.Id}}' "$tag")"
+    printf 'image\t%s\t%s\n' "$tag" "$loaded"
+    if [[ "$format" == image-recovery-v2 ]]; then
+      [[ "$loaded" == "$(image_lock_expected_id "$tag")" ]] || die "loaded source ID differs: $tag"
+      platform="$(docker -H "$docker_host" image inspect --platform "$NEXTCLOUD_IMAGE_PLATFORM" --format '{{.Os}} {{.Architecture}} {{.Id}}' "$tag")"
+      [[ "$platform" =~ ^linux\ arm64\ sha256:[0-9a-f]{64}$ ]] || die "loaded ARM64 platform differs: $tag"
+      printf 'platform_image\t%s\t%s\n' "$tag" "${platform##* }"
+    fi
   done < <(image_lock_tags)
 } >"$staging_attestation"
 chmod 600 "$staging_attestation"
@@ -61,7 +86,10 @@ while IFS= read -r tag; do
   actual="$(docker -H "$docker_host" image inspect --format '{{.Id}}' "$tag")"
   [[ "$actual" == "$expected" ]] || die "loaded tag does not resolve to the attested image ID: $tag"
 done < <(image_lock_tags)
-[[ -z "$(docker -H "$docker_host" ps -aq)" ]] || die "the restore-readiness test must not create containers"
+containers="$(docker -H "$docker_host" ps -aq)" || die "isolated final container list is unavailable"
+[[ -z "$containers" ]] || die "the restore-readiness test must not create containers"
+
+if [[ "$format" == image-recovery-v2 ]]; then check_store || die "isolated image store changed"; fi
 
 # Validate the complete candidate before publishing it. Hard links keep the
 # potentially large archive on the same filesystem without copying it.
@@ -71,11 +99,11 @@ ln "$recovery_dir/manifest.tsv" "$validation_dir/manifest.tsv"
 ln "$recovery_dir/images.tar" "$validation_dir/images.tar"
 cp "$staging_attestation" "$validation_dir/restore-attestation.tsv"
 chmod 600 "$validation_dir/restore-attestation.tsv"
-"$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$validation_dir" >/dev/null
+"$SCRIPT_DIR/verify-image-recovery.sh" "$verify_option" "$validation_dir" >/dev/null
 rm -rf -- "$validation_dir"
 validation_dir=""
 
 mv "$staging_attestation" "$attestation"
-"$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery_dir" >/dev/null
+"$SCRIPT_DIR/verify-image-recovery.sh" "$verify_option" "$recovery_dir" >/dev/null
 ATTESTATION_COMPLETE=1
 printf 'Image restore-readiness passed; remove the isolated daemon and its data root separately.\n'
