@@ -96,6 +96,20 @@ blocked. The root commands are safety primitives; the separate draft
 image, install the candidate record and Compose, mark the boundary before
 restart, and pause for a second health-checked acceptance approval. It leaves
 the freeze held and does not release ingress or alter the source lock.
+For Nextcloud activation, repeat `--disable-app ID` on both `--plan` and
+`--apply` for each enabled custom app that must be disabled before the core
+upgrade. The approval binds the sorted list, installed versions and resolved
+custom-app manifest hashes. Changed evidence or flags invalidate the approval.
+The driver records the protected runtime boundary, verifies the original
+containers and app evidence again, disables only those apps on the original
+app container, and verifies their disabled state before restarting. A partial
+disable, failed check or ambiguous boundary response requires full-runtime
+recovery or approved forward repair with ingress held; configuration-only
+abort is no longer permitted. DB/Caddy stages and other modes reject this
+option. Existing invocations without it retain their previous behavior.
+This step does not update or re-enable apps. Rehearse exact signed compatible
+app installation, restore the required enabled state, finish migrations/jobs,
+and verify application health before accepting the stage or releasing ingress.
 The root stage-consumption action and Compose launcher share a protected
 startup-selection lock through the launch, so a launcher that passed its guard
 cannot select a newly installed candidate before the runtime boundary.

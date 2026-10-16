@@ -2,6 +2,12 @@
 
 This changelog records major engineering phases rather than individual commits.
 
+## Unreleased — Nextcloud upgrade preparation
+
+- Added opt-in, approval-bound custom-app disabling after the protected runtime
+  boundary and before the core-image restart, with drift and partial-failure
+  guards. No Nextcloud production version change is included.
+
 ## 2026-10 — First live database stage
 
 - Promoted a verified clean MariaDB 11.4.13 import while retaining Nextcloud 30

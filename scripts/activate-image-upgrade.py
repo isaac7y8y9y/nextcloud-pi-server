@@ -27,6 +27,80 @@ SPEC.loader.exec_module(r)
 FETCH_KEYS = set("format state transaction_id fingerprint candidate_sha256 source_lock_sha256 config_manifest_sha256 runtime_manifest_sha256 image_manifest_sha256 image_attestation_sha256 prestate_sha256 freeze_id freeze_table_sha256 tag index_digest manifest_digest config_digest image_store expected_id host created remote_created expires actions exclusions".split())
 FETCH_AUTHORITY = "transaction_id candidate_sha256 source_lock_sha256 config_manifest_sha256 runtime_manifest_sha256 image_manifest_sha256 image_attestation_sha256 prestate_sha256 freeze_id freeze_table_sha256 tag index_digest manifest_digest config_digest image_store expected_id host created remote_created expires actions exclusions".split()
 CONTAINERS = {"APP": "nextcloud-docker-app-1", "DB": "nextcloud-docker-db-1", "CADDY": "nextcloud-docker-caddy-1"}
+STAGE_ACTIONS = "tag-approved-digest,prepare-active-record,install-compose,mark-boundary,restart-target,stage-maintenance-off"
+DISABLE_ACTIONS = STAGE_ACTIONS.replace("mark-boundary,", "mark-boundary,disable-approved-apps,")
+
+
+def disable_app_ids(values: list[str], target: str) -> list[str]:
+    if values and target != "app":
+        r.reject("app disabling is only supported for app activation")
+    if len(set(values)) != len(values) or any(not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", value) for value in values):
+        r.reject("disable-app IDs must be safe and unique")
+    return sorted(values)
+
+
+def app_list(target: r.Target, container: str) -> dict[str, dict[str, str]]:
+    try:
+        result = json.loads(target.ssh("docker exec --user www-data " + r.q(container) +
+                                       " php /var/www/html/occ app:list --output=json"))
+    except ValueError as exc:
+        raise r.RecoveryError("source app list is invalid") from exc
+    if (not isinstance(result, dict) or set(result) != {"enabled", "disabled"} or
+            any(not isinstance(group, dict) or any(not isinstance(k, str) or not isinstance(v, str)
+                                                   for k, v in group.items()) for group in result.values())):
+        r.reject("source app list is invalid")
+    return result
+
+
+def app_disable_evidence(target: r.Target, ids: list[str]) -> list[dict[str, str]]:
+    apps = app_list(target, CONTAINERS["APP"])
+    records = []
+    # Resolve the selected code through Nextcloud, rather than trusting a
+    # same-named directory that its app manager might not actually use.
+    php = '''define('OC_CONSOLE', 1);
+require '/var/www/html/lib/base.php';
+$id = $argv[1]; $base = '/var/www/html/custom_apps'; $path = $base . '/' . $id;
+if (OC_App::getAppPath($id) !== $path) { throw new RuntimeException('Not a custom app'); }
+foreach ([$base, $path, $path . '/appinfo', $path . '/appinfo/info.xml'] as $part) {
+    if (is_link($part)) { throw new RuntimeException('Symlink app path'); }
+}
+$file = $path . '/appinfo/info.xml';
+if (!is_file($file)) { throw new RuntimeException('Missing app manifest'); }
+$xml = simplexml_load_string(file_get_contents($file));
+if ($xml === false || (string)$xml->id !== $id) { throw new RuntimeException('App ID differs'); }
+echo json_encode(['version' => (string)$xml->version, 'manifest_sha256' => hash_file('sha256', $file)]);'''
+    for app in ids:
+        if app not in apps["enabled"] or app in apps["disabled"]:
+            r.reject("selected app is not enabled")
+        try:
+            info = json.loads(target.ssh("docker exec --user www-data " + r.q(CONTAINERS["APP"]) +
+                                         " php -r " + r.q(php) + " " + r.q(app)))
+        except ValueError as exc:
+            raise r.RecoveryError("custom app evidence is invalid") from exc
+        if (not isinstance(info, dict) or set(info) != {"version", "manifest_sha256"} or
+                info["version"] != apps["enabled"][app] or
+                not isinstance(info["manifest_sha256"], str) or not r.HASH.fullmatch(info["manifest_sha256"])):
+            r.reject("custom app manifest differs from installed version")
+        records.append(dict(info, id=app))
+    return records
+
+
+def approved_app_disables(stage: dict[str, object]) -> list[dict[str, str]]:
+    records = stage.get("disable_apps", [])
+    if not isinstance(records, list):
+        r.reject("approved app disable records are invalid")
+    ids = []
+    for record in records:
+        if (not isinstance(record, dict) or set(record) != {"id", "version", "manifest_sha256"} or
+                any(not isinstance(value, str) or not value for value in record.values()) or
+                not r.HASH.fullmatch(record["manifest_sha256"])):
+            r.reject("approved app disable records are invalid")
+        ids.append(record["id"])
+    if disable_app_ids(ids, str(stage.get("target"))) != ids:
+        r.reject("approved app disable records are not sorted")
+    if records and stage.get("actions") != DISABLE_ACTIONS or not records and stage.get("actions") == DISABLE_ACTIONS:
+        r.reject("approved app disable actions differ")
+    return records
 
 
 def approval_root() -> Path:
@@ -131,8 +205,9 @@ def common(target: r.Target, candidate: Path, source: Path, config_backup: Path,
 
 def stage_evidence(target: r.Target, candidate: Path, source: Path, config_backup: Path,
                    runtime: Path, images: Path, fetch_path: Path, now: int,
-                   *, before_stage: bool = True) -> dict[str, object]:
+                   *, before_stage: bool = True, disable_apps: list[str] | None = None) -> dict[str, object]:
     local, metadata = common(target, candidate, source, config_backup, runtime, images, now, before_stage=before_stage)
+    ids = disable_app_ids(disable_apps or [], {"nextcloud": "app", "mariadb": "db", "caddy": "caddy"}[metadata["image"]])
     freeze = {"id": metadata["freeze_id"], "table_sha256": metadata["freeze_table_sha256"]}
     project = target.config["NEXTCLOUD_REMOTE_PROJECT_DIR"]
     for path, expected in ((project + "/docker-compose.yml", local["source_compose"]),
@@ -174,13 +249,17 @@ def stage_evidence(target: r.Target, candidate: Path, source: Path, config_backu
     if existing and existing != metadata["expected_id"]:
         r.reject("candidate tag already points to another image")
     image_key = {"nextcloud": "APP", "mariadb": "DB", "caddy": "CADDY"}[metadata["image"]]
-    return {"format": "image-activation-stage-v1", "stage_id": "", "host": target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"],
+    result = {"format": "image-activation-stage-v1", "stage_id": "", "host": target.config["NEXTCLOUD_PI_SYSTEM_HOSTNAME"],
             "project": project, "freeze": freeze, "fetch_id": fetch["transaction_id"],
             "fetch_fingerprint": fetch["fingerprint"], "fetch_artifact_sha256": r.digest(fetch_path),
             "tag": tag, "ref": ref, "target": image_key.lower(), "expected_id": metadata["expected_id"],
             "source_running": before, "evidence": local,
-            "actions": "tag-approved-digest,prepare-active-record,install-compose,mark-boundary,restart-target,stage-maintenance-off",
+            "actions": STAGE_ACTIONS,
             "exclusions": "pull,prune,image-removal,source-lock-write,freeze-release,post-boundary-config-only-rollback"}
+    if ids:
+        result["disable_apps"] = app_disable_evidence(target, ids)
+        result["actions"] = DISABLE_ACTIONS
+    return result
 
 
 def private_inventory(root: Path, stage_id: str) -> Path:
@@ -462,6 +541,9 @@ def db_stage_apply(target: r.Target, base: dict[str, object], approval: dict[str
 
 def stage_apply(target: r.Target, base: dict[str, object], approval: dict[str, object],
                 candidate: Path, source: Path) -> None:
+    disables = approved_app_disables(base)
+    if disables and app_disable_evidence(target, [item["id"] for item in disables]) != disables:
+        r.reject("approved source app evidence changed")
     if base["target"] == "db":
         if not all(key in base for key in ("db_prepare_fingerprint", "db_candidate_digest", "db_inventory_sha256")):
             r.reject("database activation requires a separately verified clean-directory cutover")
@@ -509,6 +591,17 @@ def stage_apply(target: r.Target, base: dict[str, object], approval: dict[str, o
         result = target.ops("upgrade-stage", "boundary", stage_id, str(approval["fingerprint"]))
         if result != {"phase": "runtime-may-have-changed", "id": stage_id}:
             r.reject("root boundary result differed")
+        if disables:
+            if (running(target, source / "active-images/active-images.env") != base["source_running"] or
+                    app_disable_evidence(target, [item["id"] for item in disables]) != disables):
+                r.reject("source apps or containers changed before disabling")
+            container = str(base["source_running"]["APP"])
+            for item in disables:
+                target.ssh("docker exec --user www-data " + r.q(container) +
+                           " php /var/www/html/occ app:disable " + r.q(item["id"]))
+            apps = app_list(target, container)
+            if any(item["id"] in apps["enabled"] or apps["disabled"].get(item["id"]) != item["version"] for item in disables):
+                r.reject("approved apps were not disabled at their original versions")
         target.ops("service", "restart", timeout=600)
         running(target, candidate / "active-images.env")
     except r.RecoveryError:
@@ -651,7 +744,8 @@ def accept_evidence(target: r.Target, candidate: Path, source: Path, config_back
     stage = json.loads(r.private_file(stage_approval))
     if not isinstance(stage, dict) or stage.get("format") != "image-activation-stage-v1" or stage.get("state") != "consumed":
         r.reject("stage approval was not consumed")
-    if stage.get("actions") not in ("tag-approved-digest,prepare-active-record,install-compose,mark-boundary,restart-target,stage-maintenance-off",
+    approved_app_disables(stage)
+    if stage.get("actions") not in (STAGE_ACTIONS, DISABLE_ACTIONS,
                                     "detach-source-containers,promote-attested-database,install-candidate,start,stage-maintenance-off"):
         r.reject("stage approval does not authorize maintenance-off")
     if stage_approval.parent != approval_root() or not stage_approval.name.startswith("stage-"):
@@ -745,7 +839,11 @@ def main() -> int:
     parser.add_argument("--stage-approval", type=Path)
     parser.add_argument("--prepare-approval", type=Path)
     parser.add_argument("--approval", type=Path)
+    parser.add_argument("--disable-app", action="append", default=[], metavar="ID",
+                        help="disable this enabled custom app after the runtime boundary, before restart (repeatable)")
     args = parser.parse_args()
+    if args.disable_app and not (args.plan or args.apply):
+        parser.error("--disable-app is only supported with --plan or --apply")
     needs_fetch = args.plan or args.apply or args.plan_prepare_db or args.prepare_db or args.resume_prepare_db
     needs_stage = args.maintenance_off or args.plan_accept or args.accept or args.resume_db or args.abort_prepared
     needs_approval = args.apply or args.accept or args.prepare_db or args.resume_prepare_db
@@ -843,7 +941,8 @@ def main() -> int:
             return 0
         if args.plan or args.apply:
             base = stage_evidence(target, args.candidate, args.source_rendered, args.config_backup,
-                                  args.held_runtime_backup, args.prior_image_recovery, args.fetch_approval, now)
+                                  args.held_runtime_backup, args.prior_image_recovery, args.fetch_approval, now,
+                                  disable_apps=args.disable_app)
             if base["target"] == "db":
                 if args.prepare_approval is None:
                     r.reject("database stage needs the consumed clean-import approval")

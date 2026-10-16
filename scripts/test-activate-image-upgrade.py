@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+import json
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 import stat
@@ -33,11 +35,26 @@ class FakeTarget:
         self.commit_pending = False
         self.tx_state = "applied"
         self.stage_fields: dict[str, str] = {}
+        self.apps = {"enabled": {"calendar": "5.5.14", "contacts": "7.3.13"}, "disabled": {}}
 
     def ssh(self, command: str, **_kwargs: object) -> str:
         self.calls.append("ssh " + command)
         if command.startswith("docker info"):
             return '{"driver":"overlay2","status":[]}'
+        if "occ app:list --output=json" in command:
+            return json.dumps(self.apps)
+        if "php -r " in command:
+            app = command.rsplit(" ", 1)[1]
+            if self.fail == "noncustom":
+                raise a.r.RecoveryError("Not a custom app")
+            return json.dumps({"version": self.apps["enabled"][app], "manifest_sha256": "9" * 64})
+        if "occ app:disable " in command:
+            app = command.rsplit(" ", 1)[1]
+            if self.fail == "disable" and app == "contacts":
+                raise a.r.RecoveryError("injected partial disable failure")
+            if self.fail != "disable-noop":
+                self.apps["disabled"][app] = self.apps["enabled"].pop(app)
+            return "disabled"
         if command.startswith("docker image inspect"):
             return "sha256:" + "1" * 64
         if command == "hostname":
@@ -371,6 +388,114 @@ class ActivationTests(unittest.TestCase):
         with self.assertRaisesRegex(a.r.RecoveryError, "clean-directory cutover"):
             a.stage_apply(target, base, {"fingerprint": "f" * 64}, self.candidate, self.source)
         self.assertEqual(target.calls, [])
+
+    def disable_base(self, target: FakeTarget) -> dict[str, object]:
+        return dict(self.base, disable_apps=a.app_disable_evidence(target, ["calendar", "contacts"]),
+                    actions=a.DISABLE_ACTIONS, source_running={"APP": "6" * 64})
+
+    def test_disable_ids_are_explicit_safe_unique_and_app_only(self) -> None:
+        self.assertEqual(a.disable_app_ids(["contacts", "calendar"], "app"), ["calendar", "contacts"])
+        for ids, target in [(["calendar"], "db"), (["calendar"], "caddy"),
+                            (["calendar", "calendar"], "app"), (["../calendar"], "app"),
+                            (["--all"], "app"), (["calendar;id"], "app")]:
+            with self.subTest(ids=ids, target=target), self.assertRaises(a.r.RecoveryError):
+                a.disable_app_ids(ids, target)
+
+    def test_disable_flag_rejected_outside_plan_apply_before_remote_access(self) -> None:
+        with mock.patch("sys.argv", ["activate", "--accept", "a", "b", "c", "d", "e", "--disable-app", "calendar"]), \
+             mock.patch.object(a.r, "Target") as target, mock.patch("sys.stderr"):
+            with self.assertRaises(SystemExit):
+                a.main()
+        target.assert_not_called()
+
+    def test_disable_evidence_rejects_disabled_noncustom_and_version_mismatch(self) -> None:
+        for failure in ("disabled", "noncustom", "version"):
+            target = FakeTarget(fail=failure)
+            if failure == "disabled":
+                target.apps["disabled"]["calendar"] = target.apps["enabled"].pop("calendar")
+            with self.subTest(failure=failure):
+                if failure == "version":
+                    with mock.patch.object(target, "ssh", side_effect=[json.dumps(target.apps),
+                                           json.dumps({"version": "0", "manifest_sha256": "9" * 64})]):
+                        with self.assertRaises(a.r.RecoveryError):
+                            a.app_disable_evidence(target, ["calendar"])
+                else:
+                    with self.assertRaises(a.r.RecoveryError):
+                        a.app_disable_evidence(target, ["calendar"])
+
+    def test_manifest_probe_enters_console_mode_before_nextcloud_bootstrap(self) -> None:
+        target = FakeTarget()
+        a.app_disable_evidence(target, ["calendar"])
+        command = next(call for call in target.calls if "php -r " in call)
+        # Without console mode, lib/base.php can write cronErrors during a plan.
+        args = shlex.split(command)
+        program = args[args.index("-r") + 1]
+        self.assertLess(program.index("define('OC_CONSOLE', 1)"), program.index("require '/var/www/html/lib/base.php'"))
+        # Nextcloud's XML entity-loader policy blocks simplexml_load_file.
+        self.assertIn("simplexml_load_string(file_get_contents($file))", program)
+
+    def test_disable_list_manifest_and_version_drift_reject_approval(self) -> None:
+        target = FakeTarget()
+        base = self.disable_base(target)
+        artifact = a.approval_plan(self.root, base, 1000, "stage")
+        for field, value in (("id", "mail"), ("version", "6.0.0"), ("manifest_sha256", "8" * 64)):
+            changed = dict(base, disable_apps=[dict(base["disable_apps"][0], **{field: value})])
+            with self.subTest(field=field), self.assertRaisesRegex(a.r.RecoveryError, "evidence changed"):
+                a.approval_consume(artifact, self.root, changed, 1001, "stage")
+        self.assertEqual(json.loads(artifact.read_text())["state"], "unused")
+
+    def test_source_app_drift_rejects_before_root_consumption(self) -> None:
+        target = FakeTarget()
+        base = self.disable_base(target)
+        target.calls.clear()
+        changed = [dict(item, manifest_sha256="8" * 64) for item in base["disable_apps"]]
+        with mock.patch.object(a, "app_disable_evidence", return_value=changed):
+            with self.assertRaisesRegex(a.r.RecoveryError, "source app evidence changed"):
+                a.stage_apply(target, base, {"fingerprint": "f" * 64}, self.candidate, self.source)
+        self.assertEqual(target.calls, [])
+
+    def test_disable_happens_after_boundary_before_restart_on_source_container(self) -> None:
+        target = FakeTarget()
+        base = self.disable_base(target)
+        with mock.patch.object(a.r, "run", return_value=""), \
+             mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash), \
+             mock.patch.object(a, "running", return_value=base["source_running"]):
+            a.stage_apply(target, base, {"fingerprint": "f" * 64, "expires": 1000}, self.candidate, self.source)
+        boundary = next(i for i, c in enumerate(target.calls) if c.startswith("ops upgrade-stage boundary"))
+        disables = [i for i, c in enumerate(target.calls) if "occ app:disable" in c]
+        restart = target.calls.index("ops service restart")
+        self.assertEqual(len(disables), 2)
+        self.assertTrue(boundary < min(disables) <= max(disables) < restart)
+        self.assertTrue(all("docker exec --user www-data " + "6" * 64 in target.calls[i] for i in disables))
+        self.assertEqual(target.apps["enabled"], {})
+        self.assertEqual(a.approved_app_disables(base), base["disable_apps"])
+
+    def test_disable_failure_or_ambiguous_boundary_never_restarts_or_rolls_back(self) -> None:
+        for failure in ("disable", "disable-noop", "boundary-response", "source-container-drift", "source-app-drift"):
+            target = FakeTarget(fail=failure)
+            base = self.disable_base(target)
+            running = {"APP": "7" * 64} if failure == "source-container-drift" else base["source_running"]
+            evidence = [base["disable_apps"], []] if failure == "source-app-drift" else [base["disable_apps"]] * 2
+            with self.subTest(failure=failure), mock.patch.object(a.r, "run", return_value=""), \
+                 mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash), \
+                 mock.patch.object(a, "running", return_value=running), \
+                 mock.patch.object(a, "app_disable_evidence", side_effect=evidence):
+                with self.assertRaisesRegex(a.r.RecoveryError, "full runtime restore"):
+                    a.stage_apply(target, base, {"fingerprint": "f" * 64, "expires": 1000}, self.candidate, self.source)
+            self.assertEqual(target.phase, "runtime-may-have-changed")
+            self.assertFalse(any(c.startswith(("ops service restart", "ops active-record rollback", "ops upgrade-stage abort",
+                                               "ops upgrade-stage accept", "ops upgrade-freeze release")) for c in target.calls))
+            if failure == "disable":
+                self.assertIn("calendar", target.apps["disabled"])
+                self.assertIn("contacts", target.apps["enabled"])
+
+    def test_disable_approval_schema_requires_matching_actions(self) -> None:
+        base = self.disable_base(FakeTarget())
+        for changed in (dict(base, actions=a.STAGE_ACTIONS), dict(base, target="caddy"),
+                        dict(base, disable_apps=[]), dict(base, disable_apps=list(reversed(base["disable_apps"]))),
+                        dict(base, disable_apps=[{"id": "calendar"}])):
+            with self.subTest(changed=changed), self.assertRaises(a.r.RecoveryError):
+                a.approved_app_disables(changed)
 
 
 if __name__ == "__main__":
