@@ -115,6 +115,13 @@ and verify application health before accepting the stage or releasing ingress. D
 services registered before migration repair steps. Rehearse the target release's
 official download, bootstrap registration and app upgrade path with exact signed
 packages; require clean migration logs as well as successful command exit codes.
+Preserve recorded disabled shipped-app settings when a new release changes its
+defaults; bind any restoration to the reviewed app and exact image evidence.
+A recurring migration job can remain scheduled after completion. Require its
+exact release's completion flag, a fresh unreserved run and clean scoped logs;
+unknown required jobs still block acceptance. Before deleting a synthetic test
+account, pause and drain the scheduler, execute its pending metadata jobs and
+verify their logs, then restore the prior scheduler state on every exit.
 The root stage-consumption action and Compose launcher share a protected
 startup-selection lock through the launch, so a launcher that passed its guard
 cannot select a newly installed candidate before the runtime boundary.
