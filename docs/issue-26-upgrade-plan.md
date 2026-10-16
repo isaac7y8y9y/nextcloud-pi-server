@@ -1,5 +1,11 @@
 # Issue 26: Nextcloud upgrade plan
 
+October 15 checkpoint: the initial clean MariaDB 11.4.13 cutover completed while
+Nextcloud remained on 30. See the [dated stage result](issue-26-mariadb-stage-result.md)
+for the proven baseline and scope; the inventory and candidates below retain
+their original checkpoint dates.
+
+
 Proposed 2026-09-23 for [issue #26](https://github.com/isaac7y8y9y/nextcloud-pi-server/issues/26). This plans items 4 and 5. It authorizes no live change. Refresh time-sensitive evidence before each approved stage.
 
 ## Baseline and target

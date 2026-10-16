@@ -1,5 +1,11 @@
 # Image upgrade candidate preparation
 
+The [October 15 MariaDB stage result](issue-26-mariadb-stage-result.md) records
+the first completed live clean-database cutover. Historical development and
+rehearsal checkpoints below are superseded only by that dated evidence; later
+stages retain their separate operational gates.
+
+
 Upgrade fetch and full-runtime recovery require a v2 exact-source image archive
 and isolated reload attestation, with the same Docker image store as the
 candidate. Export using `scripts/export-image-recovery.sh --exact-source`.
