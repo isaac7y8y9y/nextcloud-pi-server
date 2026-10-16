@@ -1,5 +1,20 @@
 # Issue 26: Nextcloud upgrade plan
 
+October 16 checkpoint: **Nextcloud 32.0.15 / PHP 8.3.35 is accepted and open**.
+The separate 31→32 stage passed fresh source recovery and isolated rehearsals,
+protected ingress/drain and held backup, required migrations, integrity,
+scoped error checks and preservation of a pre-upgrade synthetic file. Candidate
+conformance recorded 68 passes with no warnings, failures, unknowns or drift.
+Both trusted LAN routes passed file operations after guarded reopening.
+MariaDB 11.4.13 and Caddy remain unchanged. The accepted 32 baseline is a separate
+checkpoint before the requested, independently validated 32→33 stage.
+
+Compatible enabled apps at 32: Calendar 6.6.2, Contacts 8.3.20, Mail 5.12.4,
+Notes 5.0.2 (retained), Office 9.2.3 and Talk 22.0.19. Updating disabled Mail
+required registering the newly downloaded app's services before its migration;
+the official download, bootstrap-registration and upgrade methods passed a new
+complete rehearsal with no scoped errors before production use.
+
 October 15 checkpoint: **Nextcloud 31.0.14 / PHP 8.3.30 is accepted and open**.
 The tracked application image and lock now match the accepted ARM64 candidate;
 MariaDB 11.4.13 and Caddy 2.10.2 remain unchanged. The earlier

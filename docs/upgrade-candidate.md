@@ -111,7 +111,10 @@ abort is no longer permitted. DB/Caddy stages and other modes reject this
 option. Existing invocations without it retain their previous behavior.
 This step does not update or re-enable apps. Rehearse exact signed compatible
 app installation, restore the required enabled state, finish migrations/jobs,
-and verify application health before accepting the stage or releasing ingress.
+and verify application health before accepting the stage or releasing ingress. Disabled apps can need their newly downloaded
+services registered before migration repair steps. Rehearse the target release's
+official download, bootstrap registration and app upgrade path with exact signed
+packages; require clean migration logs as well as successful command exit codes.
 The root stage-consumption action and Compose launcher share a protected
 startup-selection lock through the launch, so a launcher that passed its guard
 cannot select a newly installed candidate before the runtime boundary.
