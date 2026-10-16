@@ -102,7 +102,9 @@ upgrade. The approval binds the sorted list, installed versions and resolved
 custom-app manifest hashes. Changed evidence or flags invalidate the approval.
 The driver records the protected runtime boundary, verifies the original
 containers and app evidence again, disables only those apps on the original
-app container, and verifies their disabled state before restarting. A partial
+app container, and verifies their disabled state and approved code/installed
+versions before restarting. Both plain versions and OCC’s
+`version (installed version)` output must match the approval exactly. A partial
 disable, failed check or ambiguous boundary response requires full-runtime
 recovery or approved forward repair with ingress held; configuration-only
 abort is no longer permitted. DB/Caddy stages and other modes reject this

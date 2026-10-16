@@ -15,9 +15,9 @@ import stat
 import subprocess
 import sys
 import time
-from lib import db_cutover as db
 
 sys.dont_write_bytecode = True
+from lib import db_cutover as db
 HERE = Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("restore_live_runtime", HERE / "restore-live-runtime.py")
 assert SPEC and SPEC.loader
@@ -600,7 +600,9 @@ def stage_apply(target: r.Target, base: dict[str, object], approval: dict[str, o
                 target.ssh("docker exec --user www-data " + r.q(container) +
                            " php /var/www/html/occ app:disable " + r.q(item["id"]))
             apps = app_list(target, container)
-            if any(item["id"] in apps["enabled"] or apps["disabled"].get(item["id"]) != item["version"] for item in disables):
+            # OCC can include both code and installed versions for disabled apps.
+            if any(item["id"] in apps["enabled"] or apps["disabled"].get(item["id"]) not in
+                   (item["version"], f'{item["version"]} (installed {item["version"]})') for item in disables):
                 r.reject("approved apps were not disabled at their original versions")
         target.ops("service", "restart", timeout=600)
         running(target, candidate / "active-images.env")
