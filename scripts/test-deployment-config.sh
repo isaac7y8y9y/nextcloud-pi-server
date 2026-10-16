@@ -62,7 +62,7 @@ if grep -Fq 'ExecStop=/usr/bin/docker compose down' "$TEST_DIR/rendered/systemd/
 fi
 grep -Fq 'NEXTCLOUD_ACTIVE_IMAGES_MODE=source' "$TEST_DIR/rendered/active-images/active-images.env"
 grep -Fq 'NEXTCLOUD_ACTIVE_IMAGES_HOST=pi-test' "$TEST_DIR/rendered/active-images/active-images.env"
-grep -Fq 'NEXTCLOUD_ACTIVE_IMAGES_APP_TAG=nextcloud:32.0.15-apache' "$TEST_DIR/rendered/active-images/active-images.env"
+grep -Fq 'NEXTCLOUD_ACTIVE_IMAGES_APP_TAG=nextcloud:33.0.10-apache' "$TEST_DIR/rendered/active-images/active-images.env"
 bash -n "$TEST_DIR/rendered/launcher/nextcloud-pi-compose-start"
 bash -n "$TEST_DIR/rendered/launcher/nextcloud-pi-background-jobs"
 grep -Fq 'nextcloud-pi-validate-active-images' "$TEST_DIR/rendered/launcher/nextcloud-pi-compose-start"

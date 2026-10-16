@@ -18,7 +18,7 @@ services:
       retries: 12
 
   app:
-    image: nextcloud:32.0.15-apache
+    image: nextcloud:33.0.10-apache
     depends_on:
       db:
         condition: service_healthy

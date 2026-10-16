@@ -1,6 +1,27 @@
 # Issue 26: Nextcloud upgrade plan
 
-October 16 checkpoint: **Nextcloud 32.0.15 / PHP 8.3.35 is accepted and open**.
+October 16 checkpoint: **Nextcloud 33.0.10 / PHP 8.4.26 is accepted and open** after
+separate 31→32 and 32→33 stages. Each stage passed fresh recovery and isolated
+rehearsal, its own protected ingress/drain proof and held backup, required work,
+core/app/database integrity and preservation of a pre-upgrade synthetic file.
+Each candidate recorded 68 passes with zero warnings, failures, unknowns or
+drift. Both trusted LAN routes passed file operations after guarded reopening.
+Fresh configuration/runtime backups and exact-source image recovery passed
+verification, including isolated image restore readiness and cleanup. MariaDB
+11.4.13 and Caddy remain unchanged. Browser integration, Office/Talk, reachable
+LAN IPv6 and reboot checks remain later roadmap work.
+
+Compatible enabled apps at 33: Calendar 6.6.2 and Mail 5.12.4 (retained),
+Contacts 8.9.1, Notes 6.1.0, Office 10.3.2 and Talk 23.0.12. Source app groups
+were preserved, including enabled `app_api`/`profile` and disabled
+`richdocumentscode`/`twofactor_totp`. The optional TOTP app's changed default was
+corrected through the reviewed normal disable command. The recurring preview
+migration remains scheduled; its exact-release completion flag, fresh unreserved
+execution and clean scoped logs prove completion. Unknown required jobs still
+block. Synthetic metadata jobs are drained and logs checked under a paused
+scheduler before deleting the test account.
+
+Earlier October 16 checkpoint: **Nextcloud 32.0.15 / PHP 8.3.35 is accepted and open**.
 The separate 31→32 stage passed fresh source recovery and isolated rehearsals,
 protected ingress/drain and held backup, required migrations, integrity,
 scoped error checks and preservation of a pre-upgrade synthetic file. Candidate
@@ -36,9 +57,10 @@ including enabled `app_api` and disabled `richdocumentscode`; the new shipped
 resolved through reviewed guarded continuation under the same held freeze;
 the driver now checks the exact code and installed versions before restart.
 
-Later stages remain pending. Refresh compatibility and recovery material before
-any separately authorized 31→32 stage. The inventory and candidate tables below
-retain their original research dates and must not be treated as current approvals.
+The forward MariaDB stage, Nextcloud 34, Caddy/host maintenance and final client
+checks remain pending. Refresh compatibility and recovery before each separately
+authorized stage. The inventory and candidate tables below retain their original
+research dates and must not be treated as current approvals.
 
 Proposed 2026-09-23 for [issue #26](https://github.com/isaac7y8y9y/nextcloud-pi-server/issues/26). This plans items 4 and 5. It authorizes no live change. Refresh time-sensitive evidence before each approved stage.
 
@@ -64,11 +86,11 @@ Nextcloud [allows administrators to choose a maintained major](https://docs.next
 
 Proposed route: rehearse a logical export of the application database into a **separate, clean MariaDB 11.4.13** data directory. Import only application schema/data, create credentials and grants using 11.4 system tables, and verify schema counts, table integrity, collations, Nextcloud 30 status and file operations, and a 30→31 rehearsal. Never mount the existing 11.8 data directory with 11.4. Preserve its original state and the full verified backup. [MariaDB does not officially support major downgrades](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/downgrading-between-major-versions-of-mariadb), though it documents a clean-target logical restore as a fallback. This is a risky cross-version migration, not a routine package downgrade. The isolated rehearsal is a hard gate: if it fails, stop before any live cutover and revise the plan. Do not silently accept an out-of-range 31 stage.
 
-Once 33.0.9 and all required background migrations are healthy, use MariaDB's [forward major-upgrade procedure](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/upgrading/platform-specific-upgrade-guides/upgrading-on-linux/upgrading-between-major-mariadb-versions) to reach 11.8.9. Check on-disk compatibility, `mariadb-upgrade`, tables, and Nextcloud health before 33→34. A return to 11.4 after that point requires full runtime restoration to a matching earlier state, never an older binary against newer files.
+Once 33.0.10 and all required background migrations are healthy, use MariaDB's [forward major-upgrade procedure](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/upgrading/platform-specific-upgrade-guides/upgrading-on-linux/upgrading-between-major-mariadb-versions) to reach 11.8.9. Check on-disk compatibility, `mariadb-upgrade`, tables, and Nextcloud health before 33→34. A return to 11.4 after that point requires full runtime restoration to a matching earlier state, never an older binary against newer files.
 
 ## Major and app matrix
 
-[Nextcloud requires the latest patch before each adjacent major hop and completed background migrations before the next](https://docs.nextcloud.com/server/stable/admin_manual/maintenance/upgrade.html). The candidate path is **30.0.17 → 31.0.14 → 32.0.15 → 33.0.9 → 34.0.4**. Use the [official Docker image's one-major startup migration](https://github.com/nextcloud/docker/blob/master/README.md#update-to-a-newer-version), not the web updater. Confirm `occ upgrade`/repair status, apps, maintenance state, required jobs, browser and file checks at each destination.
+[Nextcloud requires the latest patch before each adjacent major hop and completed background migrations before the next](https://docs.nextcloud.com/server/stable/admin_manual/maintenance/upgrade.html). The candidate path is **30.0.17 → 31.0.14 → 32.0.15 → 33.0.10 → 34.0.4**. Use the [official Docker image's one-major startup migration](https://github.com/nextcloud/docker/blob/master/README.md#update-to-a-newer-version), not the web updater. Confirm `occ upgrade`/repair status, apps, maintenance state, required jobs, browser and file checks at each destination.
 
 Seven custom-app directories were inspected. Six are enabled: Calendar, Contacts, Mail, Notes, Office (`richdocuments`), and Talk (`spreed`). `richdocumentscode` is disabled and stays so unless separately validated. The table gives stable versions available in the [official App Store API](https://apps.nextcloud.com/api/v1/apps.json) on September 23 and compatible with the listed server and PHP major. They are compatibility candidates, not mandatory updates. Refresh `occ app:list`, app manifests, release availability, and PHP constraints before each hop. Disable third-party apps for the core migration as [Nextcloud directs](https://docs.nextcloud.com/server/stable/admin_manual/maintenance/upgrade.html), then install/re-enable compatible versions without force-enabling incompatible apps. Verify shipped apps, including `app_api`, after each image change.
 

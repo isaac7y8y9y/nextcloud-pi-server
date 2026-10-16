@@ -100,8 +100,8 @@ else: sys.exit('Unexpected transport: '+command)
         self.readiness(archive)
         self.run_script('verify-image-recovery.sh', '--require-exact-source', archive)
         proof = (archive / 'restore-attestation.tsv').read_text()
-        self.assertIn('platform_image\tnextcloud:32.0.15-apache\tsha256:' + 'b'*64, proof)
-        self.assertIn('image\tnextcloud:32.0.15-apache\t' + self.ids['nextcloud:32.0.15-apache'], proof)
+        self.assertIn('platform_image\tnextcloud:33.0.10-apache\tsha256:' + 'b'*64, proof)
+        self.assertIn('image\tnextcloud:33.0.10-apache\t' + self.ids['nextcloud:33.0.10-apache'], proof)
 
     def test_legacy_export_still_filters_and_is_ineligible_for_cutover(self):
         archive = self.export(False)
@@ -134,14 +134,14 @@ else: sys.exit('Unexpected transport: '+command)
         manifest = archive / 'manifest.tsv'
         proof = archive / 'restore-attestation.tsv'
         changes = [(manifest, b'unknown\tx\n'), (manifest, b'image_store\tcontainerd\n'),
-                   (proof, b'platform_image\tnextcloud:32.0.15-apache\t' + BAD.encode() + b'\n'),
+                   (proof, b'platform_image\tnextcloud:33.0.10-apache\t' + BAD.encode() + b'\n'),
                    (proof, b'image_store\tclassic\n')]
         for path, extra in changes:
             with self.subTest(extra=extra):
                 path.write_bytes(originals[path] + extra)
                 self.run_script('verify-image-recovery.sh', '--require-exact-source', archive, ok=False)
                 path.write_bytes(originals[path])
-        proof.write_text(proof.read_text().replace('image\tnextcloud:32.0.15-apache\t' + self.ids['nextcloud:32.0.15-apache'] + '\n', 'image\tnextcloud:32.0.15-apache\t' + BAD + '\n'))
+        proof.write_text(proof.read_text().replace('image\tnextcloud:33.0.10-apache\t' + self.ids['nextcloud:33.0.10-apache'] + '\n', 'image\tnextcloud:33.0.10-apache\t' + BAD + '\n'))
         self.run_script('verify-image-recovery.sh', '--require-exact-source', archive, ok=False)
         proof.write_bytes(originals[proof])
         (archive / 'images.tar').write_bytes(b'changed archive')
