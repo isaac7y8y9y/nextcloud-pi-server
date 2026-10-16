@@ -65,7 +65,7 @@ write_attestation yes
 bash "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery" >/dev/null
 
 write_attestation no
-sed -i.bak 's/^source_image\tnextcloud:30\t.*/source_image\tnextcloud:30\tsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$recovery/restore-attestation.tsv"
+sed -i.bak 's/^source_image\tnextcloud:31.0.14-apache\t.*/source_image\tnextcloud:31.0.14-apache\tsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$recovery/restore-attestation.tsv"
 rm -f "$recovery/restore-attestation.tsv.bak"
 if bash "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery" >/dev/null 2>&1; then
   echo 'expected a source-image binding mismatch to be rejected' >&2
@@ -73,7 +73,7 @@ if bash "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery"
 fi
 
 write_attestation no
-printf 'image\tnextcloud:30\tsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\textra\n' >>"$recovery/restore-attestation.tsv"
+printf 'image\tnextcloud:31.0.14-apache\tsha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\textra\n' >>"$recovery/restore-attestation.tsv"
 if bash "$SCRIPT_DIR/verify-image-recovery.sh" --require-attestation "$recovery" >/dev/null 2>&1; then
   echo 'expected an extra attestation image field to be rejected' >&2
   exit 1

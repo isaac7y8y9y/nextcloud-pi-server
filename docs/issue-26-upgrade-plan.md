@@ -1,10 +1,29 @@
 # Issue 26: Nextcloud upgrade plan
 
-October 15 checkpoint: the initial clean MariaDB 11.4.13 cutover completed while
-Nextcloud remained on 30. See the [dated stage result](issue-26-mariadb-stage-result.md)
-for the proven baseline and scope; the inventory and candidates below retain
-their original checkpoint dates.
+October 15 checkpoint: **Nextcloud 31.0.14 / PHP 8.3.30 is accepted and open**.
+The tracked application image and lock now match the accepted ARM64 candidate;
+MariaDB 11.4.13 and Caddy 2.10.2 remain unchanged. The earlier
+[clean MariaDB cutover](issue-26-mariadb-stage-result.md) remains complete.
 
+The 30→31 stage passed isolated core and signed-app rehearsal, disposable runtime
+recovery and exact-source image recovery checks, protected ingress/drain proof,
+and a fresh held backup. Candidate acceptance recorded 68 passes with no
+warnings, failures, unknowns or drift. Core/app integrity, required migration
+jobs, scoped error checks, preserved synthetic files and loopback WebDAV passed
+before acceptance. LAN WebDAV and final health passed after guarded reopening.
+Maintenance is off and jobs are active. Browser, Office integration, Talk calls, reachable LAN IPv6 and reboot
+checks are not established by this stage.
+
+The six enabled custom apps are Calendar 5.5.24, Contacts 7.3.19, Mail 5.6.21,
+Notes 5.0.2, Office 8.8.3 and Talk 21.1.11. Original app states were preserved,
+including enabled `app_api` and disabled `richdocumentscode`; the new shipped
+`profile` app is enabled. A false disabled-version formatting rejection was
+resolved through reviewed guarded continuation under the same held freeze;
+the driver now checks the exact code and installed versions before restart.
+
+Later stages remain pending. Refresh compatibility and recovery material before
+any separately authorized 31→32 stage. The inventory and candidate tables below
+retain their original research dates and must not be treated as current approvals.
 
 Proposed 2026-09-23 for [issue #26](https://github.com/isaac7y8y9y/nextcloud-pi-server/issues/26). This plans items 4 and 5. It authorizes no live change. Refresh time-sensitive evidence before each approved stage.
 

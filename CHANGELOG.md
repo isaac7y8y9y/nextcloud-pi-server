@@ -2,11 +2,15 @@
 
 This changelog records major engineering phases rather than individual commits.
 
-## Unreleased — Nextcloud upgrade preparation
+## 2026-10 — First live Nextcloud stage
 
-- Added opt-in, approval-bound custom-app disabling after the protected runtime
-  boundary and before the core-image restart, with drift and partial-failure
-  guards. No Nextcloud production version change is included.
+- Promoted accepted Nextcloud 31.0.14 / PHP 8.3.30 with six exact signed custom-app
+  updates, preserving the MariaDB 11.4.13 and Caddy baseline.
+- Verified protected ingress/drain, held recovery, integrity, required migration
+  jobs, candidate conformance and synthetic files before guarded reopening.
+- Corrected approval-bound app disabling to accept matching OCC code/installed
+  version output while rejecting mismatches; prevent activation CLI bytecode
+  artifacts from blocking publication checks.
 
 ## 2026-10 — First live database stage
 

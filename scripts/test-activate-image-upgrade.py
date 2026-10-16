@@ -6,7 +6,11 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 import shlex
+import shutil
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 import stat
@@ -53,7 +57,14 @@ class FakeTarget:
             if self.fail == "disable" and app == "contacts":
                 raise a.r.RecoveryError("injected partial disable failure")
             if self.fail != "disable-noop":
-                self.apps["disabled"][app] = self.apps["enabled"].pop(app)
+                version = self.apps["enabled"].pop(app)
+                if self.fail == "disable-decorated":
+                    version = f"{version} (installed {version})"
+                elif self.fail == "disable-code-mismatch":
+                    version = f"99.0.0 (installed {version})"
+                elif self.fail == "disable-installed-mismatch":
+                    version = f"{version} (installed 99.0.0)"
+                self.apps["disabled"][app] = version
             return "disabled"
         if command.startswith("docker image inspect"):
             return "sha256:" + "1" * 64
@@ -470,8 +481,36 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(target.apps["enabled"], {})
         self.assertEqual(a.approved_app_disables(base), base["disable_apps"])
 
+    def test_disabled_code_and_installed_version_format_reaches_restart(self) -> None:
+        target = FakeTarget(fail="disable-decorated")
+        base = self.disable_base(target)
+        with mock.patch.object(a.r, "run", return_value=""), \
+             mock.patch.object(a.r, "remote_hash", side_effect=self.remote_hash), \
+             mock.patch.object(a, "running", return_value=base["source_running"]):
+            a.stage_apply(target, base, {"fingerprint": "f" * 64, "expires": 1000}, self.candidate, self.source)
+        self.assertEqual(target.apps["disabled"]["calendar"], "5.5.14 (installed 5.5.14)")
+        boundary = next(i for i, c in enumerate(target.calls) if c.startswith("ops upgrade-stage boundary"))
+        disables = [i for i, c in enumerate(target.calls) if "occ app:disable" in c]
+        self.assertTrue(boundary < min(disables) <= max(disables) < target.calls.index("ops service restart"))
+
+    def test_cli_help_does_not_create_bytecode_without_environment_override(self) -> None:
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        for name in ("activate-image-upgrade.py", "restore-live-runtime.py"):
+            shutil.copy2(HERE / name, scripts / name)
+        shutil.copytree(HERE / "lib", scripts / "lib", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        env = dict(os.environ)
+        for key in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "PYTHONPATH"):
+            env.pop(key, None)
+        result = subprocess.run([sys.executable, str(scripts / "activate-image-upgrade.py"), "--help"],
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--disable-app", result.stdout)
+        self.assertEqual(list(scripts.rglob("__pycache__")), [])
+
     def test_disable_failure_or_ambiguous_boundary_never_restarts_or_rolls_back(self) -> None:
-        for failure in ("disable", "disable-noop", "boundary-response", "source-container-drift", "source-app-drift"):
+        for failure in ("disable", "disable-noop", "disable-code-mismatch", "disable-installed-mismatch",
+                        "boundary-response", "source-container-drift", "source-app-drift"):
             target = FakeTarget(fail=failure)
             base = self.disable_base(target)
             running = {"APP": "7" * 64} if failure == "source-container-drift" else base["source_running"]
