@@ -2,6 +2,13 @@
 
 This changelog records major engineering phases rather than individual commits.
 
+## 2026-10 — First live database stage
+
+- Promoted a verified clean MariaDB 11.4.13 import while retaining Nextcloud 30
+  and Caddy images, with the original database and held recovery point preserved.
+- Recorded measured ingress/drain protection, inventory/integrity checks,
+  candidate acceptance, guarded reopening, and synthetic file verification.
+
 ## 1.1.0 — 2026-09-16
 
 - Added operational deployment and recovery runbooks with expanded regression

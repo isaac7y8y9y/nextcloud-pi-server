@@ -32,7 +32,8 @@ printf 'NEXTCLOUD_PI_HOST=pi-%s.example.invalid\nNEXTCLOUD_PI_SYSTEM_HOSTNAME=pi
   "$test_id" "$test_id" "$test_id" "$test_id" >"$TEST_DIR/deployment.env"
 chmod 600 "$TEST_DIR/deployment.env"
 NEXTCLOUD_DEPLOYMENT_ENV_FILE="$TEST_DIR/deployment.env" "$REPOSITORY_ROOT/scripts/render-deployment-config.sh" --output-dir "$TEST_DIR/rendered"
-printf 'format\tnextcloud-upgrade-image-v1\nimage\tmariadb\ntag\tmariadb:11.4.13\nplatform\tlinux/arm64/v8\nindex_digest\tsha256:%064d\nmanifest_digest\tsha256:%064d\nconfig_digest\tsha256:%064d\n' 0 0 0 >"$TEST_DIR/metadata.tsv"
+# Synthetic patch identity, deliberately distinct from the deployed baseline.
+printf 'format\tnextcloud-upgrade-image-v1\nimage\tmariadb\ntag\tmariadb:11.4.14\nplatform\tlinux/arm64/v8\nindex_digest\tsha256:%064d\nmanifest_digest\tsha256:%064d\nconfig_digest\tsha256:%064d\n' 0 0 0 >"$TEST_DIR/metadata.tsv"
 NEXTCLOUD_DEPLOYMENT_ENV_FILE="$TEST_DIR/deployment.env" python3 "$REPOSITORY_ROOT/scripts/prepare-image-upgrade.py" \
   --image-store classic --target db --metadata "$TEST_DIR/metadata.tsv" --image-lock "$REPOSITORY_ROOT/config/image-lock.env" \
   --rendered "$TEST_DIR/rendered" --output-dir "$TEST_DIR/candidate" >/dev/null
