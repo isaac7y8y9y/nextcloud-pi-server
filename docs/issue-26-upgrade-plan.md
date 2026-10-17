@@ -1,5 +1,41 @@
 # Issue 26: Nextcloud upgrade plan
 
+October 16 checkpoint: **Nextcloud 33.0.10 / PHP 8.4.26 is accepted and open** after
+separate 31→32 and 32→33 stages. Each stage passed fresh recovery and isolated
+rehearsal, its own protected ingress/drain proof and held backup, required work,
+core/app/database integrity and preservation of a pre-upgrade synthetic file.
+Each candidate recorded 68 passes with zero warnings, failures, unknowns or
+drift. Both trusted LAN routes passed file operations after guarded reopening.
+Fresh configuration/runtime backups and exact-source image recovery passed
+verification, including isolated image restore readiness and cleanup. MariaDB
+11.4.13 and Caddy remain unchanged. Browser integration, Office/Talk, reachable
+LAN IPv6 and reboot checks remain later roadmap work.
+
+Compatible enabled apps at 33: Calendar 6.6.2 and Mail 5.12.4 (retained),
+Contacts 8.9.1, Notes 6.1.0, Office 10.3.2 and Talk 23.0.12. Source app groups
+were preserved, including enabled `app_api`/`profile` and disabled
+`richdocumentscode`/`twofactor_totp`. The optional TOTP app's changed default was
+corrected through the reviewed normal disable command. The recurring preview
+migration remains scheduled; its exact-release completion flag, fresh unreserved
+execution and clean scoped logs prove completion. Unknown required jobs still
+block. Synthetic metadata jobs are drained and logs checked under a paused
+scheduler before deleting the test account.
+
+Earlier October 16 checkpoint: **Nextcloud 32.0.15 / PHP 8.3.35 is accepted and open**.
+The separate 31→32 stage passed fresh source recovery and isolated rehearsals,
+protected ingress/drain and held backup, required migrations, integrity,
+scoped error checks and preservation of a pre-upgrade synthetic file. Candidate
+conformance recorded 68 passes with no warnings, failures, unknowns or drift.
+Both trusted LAN routes passed file operations after guarded reopening.
+MariaDB 11.4.13 and Caddy remain unchanged. The accepted 32 baseline is a separate
+checkpoint before the requested, independently validated 32→33 stage.
+
+Compatible enabled apps at 32: Calendar 6.6.2, Contacts 8.3.20, Mail 5.12.4,
+Notes 5.0.2 (retained), Office 9.2.3 and Talk 22.0.19. Updating disabled Mail
+required registering the newly downloaded app's services before its migration;
+the official download, bootstrap-registration and upgrade methods passed a new
+complete rehearsal with no scoped errors before production use.
+
 October 15 checkpoint: **Nextcloud 31.0.14 / PHP 8.3.30 is accepted and open**.
 The tracked application image and lock now match the accepted ARM64 candidate;
 MariaDB 11.4.13 and Caddy 2.10.2 remain unchanged. The earlier
@@ -21,9 +57,10 @@ including enabled `app_api` and disabled `richdocumentscode`; the new shipped
 resolved through reviewed guarded continuation under the same held freeze;
 the driver now checks the exact code and installed versions before restart.
 
-Later stages remain pending. Refresh compatibility and recovery material before
-any separately authorized 31→32 stage. The inventory and candidate tables below
-retain their original research dates and must not be treated as current approvals.
+The forward MariaDB stage, Nextcloud 34, Caddy/host maintenance and final client
+checks remain pending. Refresh compatibility and recovery before each separately
+authorized stage. The inventory and candidate tables below retain their original
+research dates and must not be treated as current approvals.
 
 Proposed 2026-09-23 for [issue #26](https://github.com/isaac7y8y9y/nextcloud-pi-server/issues/26). This plans items 4 and 5. It authorizes no live change. Refresh time-sensitive evidence before each approved stage.
 
@@ -49,11 +86,11 @@ Nextcloud [allows administrators to choose a maintained major](https://docs.next
 
 Proposed route: rehearse a logical export of the application database into a **separate, clean MariaDB 11.4.13** data directory. Import only application schema/data, create credentials and grants using 11.4 system tables, and verify schema counts, table integrity, collations, Nextcloud 30 status and file operations, and a 30→31 rehearsal. Never mount the existing 11.8 data directory with 11.4. Preserve its original state and the full verified backup. [MariaDB does not officially support major downgrades](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/downgrading-between-major-versions-of-mariadb), though it documents a clean-target logical restore as a fallback. This is a risky cross-version migration, not a routine package downgrade. The isolated rehearsal is a hard gate: if it fails, stop before any live cutover and revise the plan. Do not silently accept an out-of-range 31 stage.
 
-Once 33.0.9 and all required background migrations are healthy, use MariaDB's [forward major-upgrade procedure](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/upgrading/platform-specific-upgrade-guides/upgrading-on-linux/upgrading-between-major-mariadb-versions) to reach 11.8.9. Check on-disk compatibility, `mariadb-upgrade`, tables, and Nextcloud health before 33→34. A return to 11.4 after that point requires full runtime restoration to a matching earlier state, never an older binary against newer files.
+Once 33.0.10 and all required background migrations are healthy, use MariaDB's [forward major-upgrade procedure](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/upgrading/platform-specific-upgrade-guides/upgrading-on-linux/upgrading-between-major-mariadb-versions) to reach 11.8.9. Check on-disk compatibility, `mariadb-upgrade`, tables, and Nextcloud health before 33→34. A return to 11.4 after that point requires full runtime restoration to a matching earlier state, never an older binary against newer files.
 
 ## Major and app matrix
 
-[Nextcloud requires the latest patch before each adjacent major hop and completed background migrations before the next](https://docs.nextcloud.com/server/stable/admin_manual/maintenance/upgrade.html). The candidate path is **30.0.17 → 31.0.14 → 32.0.15 → 33.0.9 → 34.0.4**. Use the [official Docker image's one-major startup migration](https://github.com/nextcloud/docker/blob/master/README.md#update-to-a-newer-version), not the web updater. Confirm `occ upgrade`/repair status, apps, maintenance state, required jobs, browser and file checks at each destination.
+[Nextcloud requires the latest patch before each adjacent major hop and completed background migrations before the next](https://docs.nextcloud.com/server/stable/admin_manual/maintenance/upgrade.html). The candidate path is **30.0.17 → 31.0.14 → 32.0.15 → 33.0.10 → 34.0.4**. Use the [official Docker image's one-major startup migration](https://github.com/nextcloud/docker/blob/master/README.md#update-to-a-newer-version), not the web updater. Confirm `occ upgrade`/repair status, apps, maintenance state, required jobs, browser and file checks at each destination.
 
 Seven custom-app directories were inspected. Six are enabled: Calendar, Contacts, Mail, Notes, Office (`richdocuments`), and Talk (`spreed`). `richdocumentscode` is disabled and stays so unless separately validated. The table gives stable versions available in the [official App Store API](https://apps.nextcloud.com/api/v1/apps.json) on September 23 and compatible with the listed server and PHP major. They are compatibility candidates, not mandatory updates. Refresh `occ app:list`, app manifests, release availability, and PHP constraints before each hop. Disable third-party apps for the core migration as [Nextcloud directs](https://docs.nextcloud.com/server/stable/admin_manual/maintenance/upgrade.html), then install/re-enable compatible versions without force-enabling incompatible apps. Verify shipped apps, including `app_api`, after each image change.
 
@@ -97,7 +134,7 @@ start. Its implementation and operational proof remain item-4 work.
 
 The final snapshot workflow needs a protected **ingress freeze** owned by the root-only privileged dispatcher. Before capture, pause the background-job timer, put Nextcloud in maintenance mode, and block **all** non-loopback traffic to Caddy's published TCP 80/443 ports at the actual Docker forwarding/firewall boundary, including already-established IPv4/IPv6 connections and keep-alive sessions. Close or drain existing external flows and wait for in-flight application writes and DB transactions to finish; refuse capture if quiescence cannot be proved. Preserve SSH and unrelated NAS ports. From a separate LAN client, prove both new and pre-existing connections cannot send an application write over either available IP family; on the Pi, prove loopback HTTPS still works. Only then take and verify the final snapshot. The freeze remains installed while Nextcloud maintenance mode is off for migration checks: `scripts/health-check.sh` probes HTTPS from the Pi via `127.0.0.1`, and `scripts/preflight.sh --conformance` checks Compose/ports over SSH, so they can run without reopening LAN writes. Test the chosen nftables/iptables/Docker path on the deployed network backend; do not assume a rule is effective merely because it installed. Bind rule identity and prior firewall state to the transaction. On failure or interruption, leave the ingress freeze in place until verified full recovery or forward repair and a separately approved release. On successful pre-open acceptance, release it exactly once, restore the timer state, then test LAN browser upload/download. Tests must prove activation, old/new-flow denial, in-flight drain, loopback health, IPv4/IPv6 coverage, interruption retention, and exact release without leaving a permanent firewall change.
 
-Merge generic machinery before the first live version change. Do **not** merge a final `config/image-lock.env` ahead of production: its normal startup would reject the still-running old baseline. For each item-5 stage, create a reviewed candidate with that stage's Compose and metadata-derived expected image IDs; approve and fetch exact digests, verify actual loaded IDs, apply and prove the stage, then merge that stage's baseline. Keep the stage worktree and recovery evidence until resolved.
+Merge generic machinery before the first live version change. Do **not** merge a final `config/image-lock.env` ahead of production: its normal startup would reject the still-running old baseline. For each item-5 stage, create a reviewed candidate with that stage's Compose and metadata-derived expected image IDs; approve and fetch exact digests, verify actual loaded IDs, apply and prove the stage, then merge that stage's baseline. Keep the stage worktree and recovery evidence until resolved. When the operator explicitly requests consecutive stages, each accepted baseline may instead be recorded as a clean checkpoint commit in the same task worktree, followed by a fresh, independently approved stage. Preserve separate stage evidence and bind the next stage to that checkpoint's source lock and live record. Publish the final baseline PR after the requested stages; this does not waive any recovery, rehearsal, acceptance or review gate.
 
 ## Item 5: bounded rollout and acceptance
 

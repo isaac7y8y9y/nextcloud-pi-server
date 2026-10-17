@@ -2,6 +2,17 @@
 
 This changelog records major engineering phases rather than individual commits.
 
+## 2026-10 — Nextcloud 32 and 33 checkpoints
+
+- Accepted Nextcloud 32.0.15 / PHP 8.3.35, then 33.0.10 / PHP 8.4.26 as
+  separate protected stages, preserving MariaDB 11.4.13 and Caddy.
+- Verified exact signed app updates and retained compatible versions, required
+  work, integrity, synthetic file preservation and clean candidate conformance.
+- Preserved disabled shipped-app settings and verified the recurring preview
+  migration's completion flag against the exact release.
+- Rehearsed official disabled-app service registration and safe synthetic-account
+  metadata-job cleanup before production use.
+
 ## 2026-10 — First live Nextcloud stage
 
 - Promoted accepted Nextcloud 31.0.14 / PHP 8.3.30 with six exact signed custom-app
