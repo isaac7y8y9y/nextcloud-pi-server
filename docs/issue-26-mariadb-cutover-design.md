@@ -1,4 +1,4 @@
-# Issue 26: clean MariaDB cutover design
+# Issue 26: prepared MariaDB cutover design
 
 Design checkpoint: September 26, 2026, against PR #37 implementation head
 `d29ea6f`. This supplements the [upgrade plan](issue-26-upgrade-plan.md) for
@@ -10,6 +10,90 @@ with no material findings or required changes, after inspecting issue #26,
 the parent plan, and the relevant implementation. This verdict covers only
 design readiness for the initial clean cutover, not implementation, Pi
 rehearsal, or rollout approval.
+
+## Forward 11.4-to-11.8 preparation on Nextcloud 33
+
+The forward stage reuses prepared-directory promotion and full-runtime
+recovery below. This section is the implementation plan for that extension;
+it does not record production acceptance. Keep the tracked 11.4 baseline until
+the separately rehearsed live stage passes. Merge this machinery before
+installing it or changing the live version.
+
+1. Extend `scripts/activate-image-upgrade.py` with only the additional pair
+   **source MariaDB 11.4 / frozen healthy Nextcloud 33 → target MariaDB 11.8**.
+   Bind the exact source database image ID, Nextcloud version and enabled and
+   disabled app versions into preparation and activation approvals. Preserve
+   the original 11.8-to-clean-11.4 / Nextcloud-30 behavior. Reject other pairs
+   and pending Nextcloud database upgrades.
+2. Extend `scripts/lib/db_cutover.py` to initialize a separate directory with
+   the protected source 11.4 image, import the held application SQL and verify
+   the full frozen inventory, application account and all tables. Cleanly stop
+   it before starting the approved 11.8 image against the **same isolated
+   directory**. Production 11.4 files remain untouched during preparation.
+3. Add optional `preparation_mode=forward-114-118`, `source_image_id` and
+   `forward_step` fields to the root `db-cutover-v1` journal. Preserve legacy
+   journals and status output. `begin` binds the source ID to the protected
+   active record and running container, requiring 11.4 and Nextcloud 33 source
+   tags. The `temp-start` source/target selector permits only those bound
+   images with the existing mount, network and restart restrictions.
+4. Root `temp-ready source` verifies the recorded stopped source container,
+   image/mount/isolation, exit zero without OOM, and 11.4 upgrade marker. Only
+   then may the driver remove it and start the target. Root `temp-upgrade`
+   verifies the recorded running target identity and server 11.8, executes the
+   fixed full `mariadb-upgrade --force` command and records success durably.
+   Accept no caller SQL or upgrade options. A lost response may repeat the
+   full upgrade on that same verified target. A marker alone is insufficient.
+5. Verify full inventory, application login and table integrity under 11.8,
+   then stop, restart and verify again. Reject unsafe shutdown settings or
+   nonzero exits. Root `temp-ready target` requires successful upgrade, stopped
+   target identity and the 11.8 marker. Remove the exact container before the
+   existing file-digest/inode attestation. Permit 11.8 activation only with
+   completed forward evidence.
+6. Resume and pre-boundary abort select only the recorded preparation leg for
+   identity-checked temporary cleanup. Reset discards only disposable isolated
+   data after proving no consumers remain, returning the checkpoint to
+   `initial`. Unknown state or foreign containers stop with the freeze held.
+   Reuse existing promotion/startup/recovery boundaries. Preserve the current
+   11.4 directory as another cold source, retaining the historical 11.8 copy.
+7. Acceptance requires 11.8, unchanged exact Nextcloud 33 and app versions,
+   core integrity, application login, all-table checking and existing candidate
+   conformance. Fresh recovery, full isolated application/file/job rehearsal,
+   held backup, measured ingress denial/drain and post-stage backup remain
+   separate live gates under the parent plan. Reopening and baseline promotion
+   are separate operations; an image-only downgrade is never recovery.
+
+Preparation checkpoints are `initial → source-started → source-stopped →
+target-started → upgraded → complete`, followed by existing phase `prepared`.
+Container ID and preparation leg are recorded together before container start.
+Completion checks may repeat against the same stopped object; reset is allowed
+only while preparing. Tests must cover wrong pairs, unhealthy Nextcloud,
+source binding, omitted/failed/retried upgrade, wrong container/image/path,
+unclean/OOM exits, missing markers, restart verification, inventory drift,
+both cleanup legs and unchanged promotion/recovery behavior.
+
+Historical accepted journals retain their original cold-source checks. Before
+creating a forward journal, validate all existing directory authority. During
+the new transition, a protected forward journal for the same source database
+ID may own the canonical path: source and stable-target phases require their
+recorded inode; detached switch/recovery phases permit Docker inspection while
+the existing stack-start gate remains closed. This prevents the old accepted
+11.4 journal from blocking Docker during the first rename or prior-record
+restoration. Validate every journal independently; unknown states still stop.
+
+After all four full-runtime recovery datasets are promoted, root records
+`restored_source_inode` durably in the forward journal before publishing
+`promoted` and before the driver restores the source active record. A retry
+checks that saved inode and cannot rebind replaced data. `source-ready` verifies
+the proof and prior configuration before allowing stack start. Completed
+recovery ownership requires that exact restored inode and the preserved forward
+source directory. Keep the proof through `recovered` and recovery cleanup;
+historical journals are retained unchanged. Two-journal tests cover both reboot
+windows, proof-publication interruption, completed recovery and invalid proofs.
+
+The upstream [11.4-to-11.8 guide](https://mariadb.com/docs/server/server-management/install-and-upgrade-mariadb/upgrading/mariadb-community-server-upgrade-paths/upgrading-from-mariadb-11-4-to-mariadb-11-8)
+requires backup, a stopped transition and `mariadb-upgrade`. Its removed Galera
+option is absent here. Preserve READ-COMMITTED/ROW settings. Nextcloud 33
+explicitly [supports MariaDB 11.8](https://docs.nextcloud.com/server/33/admin_manual/installation/system_requirements.html).
 
 ## Decision and boundaries
 
@@ -31,9 +115,9 @@ This design imports only application schema/data into freshly initialized
 11.8 directory and the complete held backup remain recovery evidence.
 
 Retain the DB activation refusal in `activate-image-upgrade.py` and the root
-dispatcher until the specialized workflow and recovery tests pass. The later
-11.4-to-11.8 forward upgrade is a separate stage after Nextcloud 33; this
-design does not enable the generic DB restart path or declare item 4 complete.
+dispatcher until the specialized workflow and recovery tests pass. The forward
+upgrade remains separate after Nextcloud 33 using the preparation above; this
+does not enable an unprepared DB restart or declare item 4 complete.
 
 ## Reuse and proposed interface
 

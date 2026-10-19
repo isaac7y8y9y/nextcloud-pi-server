@@ -2,6 +2,17 @@
 
 This changelog records major engineering phases rather than individual commits.
 
+## 2026-10 — Guarded forward database preparation
+
+- Add isolated MariaDB 11.4-to-11.8 preparation on healthy Nextcloud 33, reusing
+  attested directory promotion and full-runtime recovery.
+- Require root-observed full `mariadb-upgrade`, ordered clean-stop checkpoints,
+  restart verification and unchanged Nextcloud/app acceptance.
+- Keep historical database journals compatible with interrupted forward
+  promotion and full recovery, using protected restored-directory evidence.
+- Preserve legacy cutover journals and the production 11.4 baseline pending
+  separate live rehearsal, execution and acceptance.
+
 ## 2026-10 — Nextcloud 32 and 33 checkpoints
 
 - Accepted Nextcloud 32.0.15 / PHP 8.3.35, then 33.0.10 / PHP 8.4.26 as

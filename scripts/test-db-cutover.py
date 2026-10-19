@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -22,6 +24,149 @@ SPEC.loader.exec_module(a)
 
 
 class DatabaseCutoverTests(unittest.TestCase):
+    def test_forward_abort_uses_source_or_target_identity_without_releasing_freeze(self) -> None:
+        stage_id = "20261019T000000Z-12"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / "prepare.json"
+            artifact.write_text(json.dumps({"stage_id": stage_id}))
+            artifact.chmod(0o600)
+            base = {"stage_id": stage_id, "fingerprint": "a" * 64, "preparation_mode": "forward-114-118",
+                    "source_image_id": "source", "expected_id": "target"}
+            target = mock.Mock()
+            target.config = {"NEXTCLOUD_STORAGE_MOUNT": "/mnt/storage"}
+            target.ssh.return_value = str(int(time.time()))
+            for step, image in (("source-started", "source"), ("target-started", "target")):
+                status = {"phase": "preparing", "prepare_fingerprint": "a" * 64, "preparation_mode": "forward-114-118",
+                          "source_image_id": "source", "forward_step": step}
+                target.ops.reset_mock()
+                target.ops.return_value = status
+                with (mock.patch.object(a.sys, "argv", ["activate", "--abort-db", *([str(root)] * 5), "--prepare-approval", str(artifact)]),
+                      mock.patch.object(a.r, "deployment_config", return_value={}),
+                      mock.patch.object(a.r, "Target", return_value=target),
+                      mock.patch.object(a, "approval_root", return_value=root),
+                      mock.patch.object(a, "consumed_prepare", return_value=base),
+                      mock.patch.object(db, "remove_temporary") as remove):
+                    self.assertEqual(a.main(), 0)
+                    self.assertEqual(remove.call_args.args[-1], image)
+                self.assertIn(mock.call("db-cutover", "abort", stage_id, "a" * 64), target.ops.call_args_list)
+                self.assertFalse(any(call.args[:2] == ("upgrade-freeze", "release") for call in target.ops.call_args_list))
+
+    def test_forward_preparation_binds_healthy_nc33_and_source_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "compose").mkdir()
+            (root / "compose/.env").write_text("MYSQL_ROOT_PASSWORD='root'\nMYSQL_PASSWORD='app'\nMYSQL_DATABASE='nextcloud'\nMYSQL_USER='nextcloud'\n")
+            status = {"installed": True, "version": "33.0.10", "maintenance": True, "needsDbUpgrade": False}
+            base = {"target": "db", "tag": "mariadb:11.8.9", "evidence": {"old_ids": {"DB": "sha256:" + "b" * 64}}}
+            target = mock.Mock()
+            target.ssh.side_effect = lambda command: json.dumps(status) if "--output=json" in command else "maintenance: true"
+            apps = {"enabled": {"calendar": "6.6.2"}, "disabled": {}}
+            with (mock.patch.object(a, "stage_evidence", side_effect=lambda *args, **kwargs: dict(base)),
+                  mock.patch.object(a.db, "database_query", return_value="11.4.13") as version,
+                  mock.patch.object(a.db, "source_inventory", return_value={}),
+                  mock.patch.object(a, "app_list", return_value=apps)):
+                prepared, _ = a.prepare_db_evidence(target, root, root, root, root, root, root, 1, root, "stage")
+                self.assertEqual(prepared["preparation_mode"], "forward-114-118")
+                self.assertEqual(prepared["source_image_id"], base["evidence"]["old_ids"]["DB"])
+                self.assertEqual(prepared["source_app_version"], "33.0.10")
+                self.assertEqual(prepared["source_apps"], apps)
+                for key, bad in (("version", "32.0.15"), ("maintenance", False), ("needsDbUpgrade", True), ("installed", False)):
+                    original = status[key]
+                    status[key] = bad
+                    with self.subTest(key=key), self.assertRaisesRegex(a.r.RecoveryError, "healthy frozen Nextcloud 33"):
+                        a.prepare_db_evidence(target, root, root, root, root, root, root, 1, root, "stage")
+                    status[key] = original
+                for wrong_version in ("11.8.9", "10.11.13", "11.5.0"):
+                    version.return_value = wrong_version
+                    with self.subTest(version=wrong_version), self.assertRaises(a.r.RecoveryError):
+                        a.prepare_db_evidence(target, root, root, root, root, root, root, 1, root, "stage")
+
+    def test_forward_cleanup_selects_only_the_recorded_preparation_leg(self) -> None:
+        base = {"preparation_mode": "forward-114-118", "source_image_id": "source", "expected_id": "target"}
+        status = {"preparation_mode": "forward-114-118", "source_image_id": "source"}
+        for step in ("initial", "source-started", "source-stopped", "target-started", "upgraded", "complete"):
+            status["forward_step"] = step
+            self.assertEqual(db.preparing_image(base, status, a.r), "source" if step.startswith("source") or step == "initial" else "target")
+        for key, bad in (("source_image_id", "foreign"), ("preparation_mode", "foreign"), ("forward_step", "unknown")):
+            invalid = dict(status, **{key: bad})
+            with self.subTest(key=key), self.assertRaises(a.r.RecoveryError):
+                db.preparing_image(base, invalid, a.r)
+        self.assertEqual(db.preparing_image({"expected_id": "legacy"}, {}, a.r), "legacy")
+
+    def test_forward_prepare_orders_upgrade_restart_and_attestation(self) -> None:
+        stage_id = "20260927T000000Z-12"
+        source = {"prefix": "oc_", "rows": {"oc_filecache": 1}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "compose").mkdir()
+            (root / "compose/.env").write_text("MYSQL_ROOT_PASSWORD='root'\nMYSQL_PASSWORD='app'\nMYSQL_DATABASE='nextcloud'\nMYSQL_USER='nextcloud'\n")
+            (root / "database").mkdir()
+            (root / "database/nextcloud.sql").write_text("SELECT 1;\n")
+            env = root / f"db-env-{stage_id}"
+            db.restricted_env(root / "compose/.env", env, a.r)
+            base = {"preparation_mode": "forward-114-118", "source_image_id": "sha256:" + "1" * 64,
+                    "expected_id": "sha256:" + "2" * 64, "project": "/srv/project",
+                    "freeze": {"id": stage_id, "table_sha256": "3" * 64},
+                    "restricted_env_sha256": a.r.digest(env), "inventory_sha256": db.inventory_hash(source),
+                    "evidence": {key: "4" * 64 for key in ("source_record", "source_compose", "candidate_record", "candidate_compose", "env_sha256", "sql_sha256")}}
+            calls: list[str] = []
+            target = mock.Mock()
+            target.config = {"NEXTCLOUD_STORAGE_MOUNT": "/mnt/storage"}
+            phase = "source"
+            fault = ""
+
+            def ops(*args: str, **kwargs: object) -> dict[str, str]:
+                nonlocal phase
+                action = " ".join(args[:2]) + (" " + args[-1] if args[1] in ("temp-start", "temp-ready") else "")
+                calls.append(action)
+                if action == fault:
+                    raise a.r.RecoveryError("injected " + action)
+                if args[1] == "begin":
+                    self.assertEqual(args[-2:], ("forward-114-118", base["source_image_id"]))
+                    return {"phase": "preparing", "id": stage_id, "data": "/mnt/storage/.db-cutover-" + stage_id + "/data"}
+                if args[1] == "temp-start":
+                    phase = args[-1]
+                    return {"container_id": "a" * 64}
+                if args[1] == "attest":
+                    return {"phase": "prepared", "id": stage_id}
+                return {}
+
+            def ssh(command: str, **kwargs: object) -> str:
+                calls.append(command)
+                if command.startswith("docker start") and fault == "restart":
+                    raise a.r.RecoveryError("injected restart")
+                if "State.ExitCode" in command:
+                    return "137" if fault == "unclean" else "0"
+                return ""
+
+            def query(_target: object, _name: str, sql: str, _r: object, **kwargs: object) -> str:
+                if sql == "SELECT VERSION()":
+                    return "11.4.13" if phase == "source" else "11.8.9"
+                if "innodb_fast_shutdown" in sql:
+                    return "2\t0" if fault == "shutdown-settings" else "1\t0"
+                return "1"
+
+            target.ops.side_effect = ops
+            target.ssh.side_effect = ssh
+            with (mock.patch.object(db, "temporary_container", return_value="temporary"),
+                  mock.patch.object(db, "database_query", side_effect=query),
+                  mock.patch.object(db, "inventory", return_value=source) as inv):
+                db.prepare(target, a.r, stage_id, "a" * 64, base, root, root, root, root, source)
+                ordered = ["db-cutover temp-start source", "db-cutover temp-ready source", "db-cutover temp-start target",
+                           "db-cutover temp-upgrade", "db-cutover temp-ready target", "db-cutover attest"]
+                indices = [calls.index(item) for item in ordered]
+                self.assertEqual(indices, sorted(indices))
+                self.assertEqual(inv.call_count, 3)
+                self.assertEqual(len([item for item in calls if item.startswith("docker start ")]), 1)
+                for fault in ("db-cutover temp-ready source", "db-cutover temp-start target", "db-cutover temp-upgrade",
+                              "restart", "unclean", "shutdown-settings", "db-cutover temp-ready target"):
+                    calls.clear()
+                    with self.subTest(fault=fault), self.assertRaises(a.r.RecoveryError):
+                        db.prepare(target, a.r, stage_id, "a" * 64, base, root, root, root, root, source)
+                    self.assertNotIn("db-cutover attest", calls)
+                    self.assertNotIn("db-cutover detach", calls)
+
     def test_db_acceptance_requires_candidate_conformance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -62,7 +207,9 @@ class DatabaseCutoverTests(unittest.TestCase):
                     if args[:2] == ("db-cutover", "status"):
                         return {"phase": "running", "prepare_fingerprint": "8" * 64,
                                 "candidate_digest": "9" * 64, "inventory_sha256": "a" * 64,
-                                "candidate_inode": "1:2", "source_inode": "1:3"}
+                                "candidate_inode": "1:2", "source_inode": "1:3",
+                                **({"preparation_mode": "forward-114-118", "forward_step": "complete", "source_image_id": "source"}
+                                   if base.get("preparation_mode") else {})}
                     return {"sha256": local["candidate_record"]}
 
                 def ssh(self, command: str, **_kwargs: object) -> str:
@@ -71,7 +218,13 @@ class DatabaseCutoverTests(unittest.TestCase):
                     if "stat -c" in command:
                         return "1:2"
                     if "occ status" in command:
+                        if "--output=json" in command:
+                            return json.dumps({"version": "33.0.10", "installed": True, "needsDbUpgrade": False})
+                        if base.get("preparation_mode"):
+                            return "version: 33.0.10\nneedsDbUpgrade: false\nmaintenance: false"
                         return "version: 30.0.17\nneedsDbUpgrade: false\nmaintenance: false"
+                    if "integrity:check-core" in command:
+                        return "[]"
                     return ""
 
             candidate = root / "candidate"
@@ -86,6 +239,28 @@ class DatabaseCutoverTests(unittest.TestCase):
                     a.accept_evidence(Target(), candidate, root, root, root, root, artifact, 1002)
             self.assertEqual(checked.call_args.args[0],
                              ["bash", str(HERE / "preflight.sh"), "--conformance", "--candidate", str(candidate)])
+            apps = {"enabled": {"calendar": "6.6.2"}, "disabled": {}}
+            base.update(preparation_mode="forward-114-118", source_image_id="source", source_app_version="33.0.10", source_apps=apps)
+            metadata["tag"] = base["tag"] = "mariadb:11.8.9"
+            artifact = a.approval_plan(root, base, 2000, "stage")
+            stage = a.approval_consume(artifact, root, base, 2001, "stage")
+            with (mock.patch.object(a, "common", return_value=(local, metadata)),
+                  mock.patch.object(a, "approval_root", return_value=root),
+                  mock.patch.object(a.r, "remote_hash", side_effect=lambda _target, path: (
+                      local["source_caddy"] if path.endswith("Caddyfile") else local["candidate_compose"])),
+                  mock.patch.object(a.db, "database_query", side_effect=lambda _target, _name, sql, _r, **kwargs: "11.8.9" if sql == "SELECT VERSION()" else "1") as query,
+                  mock.patch.object(a, "app_list", return_value=apps) as app_list,
+                  mock.patch.object(a, "running", return_value={}),
+                  mock.patch.object(a.r, "run", return_value="")):
+                a.accept_evidence(Target(), candidate, root, root, root, root, artifact, 2002)
+                app_list.return_value = {"enabled": {"calendar": "different"}, "disabled": {}}
+                with self.assertRaisesRegex(a.r.RecoveryError, "changed the Nextcloud 33 baseline"):
+                    a.accept_evidence(Target(), candidate, root, root, root, root, artifact, 2002)
+                app_list.return_value = apps
+                query.side_effect = None
+                query.return_value = "1"
+                with self.assertRaisesRegex(a.r.RecoveryError, "changed the Nextcloud 33 baseline"):
+                    a.accept_evidence(Target(), candidate, root, root, root, root, artifact, 2002)
 
     def test_stage_approval_marker_survives_lost_artifact_replace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
