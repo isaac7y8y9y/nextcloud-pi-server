@@ -30,6 +30,7 @@ for function in db_cutover_file db_cutover_field db_cutover_flush db_cutover_rew
   first_line="${text%%$'\n'*}"
   if [[ "$first_line" == *'}' ]]; then text="$first_line"; fi
   text="${text//\/usr\/bin\/docker/docker_fake}"
+  text="${text//\/usr\/bin\/install/install_fake}"
   eval "$text"
 done
 die() { printf '%s\n' "$1" >&2; exit 1; }
@@ -50,6 +51,13 @@ upgrade_stage_compose_hash() { printf '%s' "$fingerprint"; }
 available() { printf 99999999; }; db_cutover_space_required() { printf 0; }
 ensure_parent() { :; }; safe_dir() { [[ -d "$1" && ! -L "$1" ]]; }
 protected_file() { [[ -f "$1" && ! -L "$1" && "$(stat -c '%a' "$1")" == "${2#0}" ]] || die 'unsafe fixture file'; }
+install_fake() {
+  local arguments=()
+  while (( $# )); do
+    case "$1" in -o|-g) shift 2;; *) arguments+=("$1"); shift;; esac
+  done
+  /usr/bin/install "${arguments[@]}"
+}
 no_nested_mounts() { :; }; db_cutover_source_consumers() { :; }
 db_cutover_no_consumers() { [[ ! -e "$fixture/temp.present" ]] || die 'consumer remains'; }
 out() { :; }
@@ -152,6 +160,7 @@ for function in recovery_promote_pair cmd_recovery_promote db_cutover_restored_i
   text="$(sed -n "/^$function() {/,/^}/p" "$root/privileged/nextcloud-pi-ops")"
   text="${text//\/usr\/bin\/docker/docker_fake}"
   text="${text//\/usr\/bin\/systemctl/systemctl_fake}"
+  text="${text//\/usr\/bin\/install/install_fake}"
   eval "$text"
 done
 P[NEXTCLOUD_PI_SERVICE_NAME]=nextcloud.service
