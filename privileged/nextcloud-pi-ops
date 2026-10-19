@@ -737,10 +737,10 @@ db_cutover_temp_identity() {
   [[ "$actual" == "$container_id $id $image no none 0 1 $(db_cutover_path "$id") $state 0 false" ]] || die "temporary database identity, isolation or clean state differs"
 }
 db_cutover_upgrade_marker() {
-  local id="$1" major="$2" marker="$(db_cutover_path "$1")/mysql_upgrade_info" value pattern
+  local id="$1" major="$2" marker="$(db_cutover_path "$1")/mariadb_upgrade_info" value pattern
   [[ -f "$marker" && ! -L "$marker" ]] || die "database upgrade marker is missing or unsafe"
   value="$(/usr/bin/cat "$marker")"
-  case "$major" in 11.4) pattern='^11\.4\.[0-9]+(-MariaDB.*)?$';; 11.8) pattern='^11\.8\.[0-9]+(-MariaDB.*)?$';; *) invalid;; esac
+  case "$major" in 11.8) pattern='^11\.8\.[0-9]+(-MariaDB.*)?$';; *) invalid;; esac
   [[ "$value" =~ $pattern ]] || die "database upgrade marker version differs"
 }
 db_cutover_source_data() {

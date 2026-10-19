@@ -48,7 +48,8 @@ installing it or changing the live version.
 5. Verify full inventory, application login and table integrity under 11.8,
    then stop, restart and verify again. Reject unsafe shutdown settings or
    nonzero exits. Root `temp-ready target` requires successful upgrade, stopped
-   target identity and the 11.8 marker. Remove the exact container before the
+   target identity and the 11.8 `mariadb_upgrade_info` marker produced by the
+   pinned image's upgrade tool. Remove the exact container before the
    existing file-digest/inode attestation. Permit 11.8 activation only with
    completed forward evidence.
 6. Resume and pre-boundary abort select only the recorded preparation leg for

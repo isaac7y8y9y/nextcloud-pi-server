@@ -85,7 +85,7 @@ docker_fake() {
       if [[ "$*" == *'SELECT VERSION()'* ]]; then printf '%s' "${fixture_version:-11.8.9-MariaDB}"; return; fi
       [[ "$5" == 'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mariadb-upgrade --protocol=tcp --host=127.0.0.1 -uroot --force' ]] || return 2
       [[ ! -e "$fixture/fail-upgrade" ]] || return 1
-      printf '11.8.9-MariaDB\n' >"$(db_cutover_path "$stage")/mysql_upgrade_info"
+      printf '11.8.9-MariaDB\n' >"$(db_cutover_path "$stage")/mariadb_upgrade_info"
       printf 'upgraded\n' >>"$fixture/upgrade.calls" ;;
     *) return 2 ;;
   esac
@@ -116,7 +116,7 @@ printf false >"$fixture/temp.running"
 must_fail cmd_db_cutover_temp_ready "$stage" "$fingerprint" source
 mkdir "$(db_cutover_path "$stage")/mysql"
 printf 'initialized-source\n' >"$(db_cutover_path "$stage")/ibdata1"
-[[ ! -e "$(db_cutover_path "$stage")/mysql_upgrade_info" ]] # Fresh initialization has no upgrade marker.
+[[ ! -e "$(db_cutover_path "$stage")/mariadb_upgrade_info" ]] # Fresh initialization has no upgrade marker.
 touch "$fixture/nested-mount"
 must_fail cmd_db_cutover_temp_ready "$stage" "$fingerprint" source
 rm "$fixture/nested-mount"
@@ -155,19 +155,19 @@ cmd_db_cutover_temp_upgrade "$stage" "$fingerprint"
 cmd_db_cutover_temp_upgrade "$stage" "$fingerprint" # Safe full retry after a lost response.
 [[ "$(wc -l <"$fixture/upgrade.calls")" == 2 ]]
 printf false >"$fixture/temp.running"
-mv "$(db_cutover_path "$stage")/mysql_upgrade_info" "$fixture/target-marker"
+mv "$(db_cutover_path "$stage")/mariadb_upgrade_info" "$fixture/target-marker"
 must_fail cmd_db_cutover_temp_ready "$stage" "$fingerprint" target
-mv "$fixture/target-marker" "$(db_cutover_path "$stage")/mysql_upgrade_info"
-printf '11x8.9-MariaDB\n' >"$(db_cutover_path "$stage")/mysql_upgrade_info"
+mv "$fixture/target-marker" "$(db_cutover_path "$stage")/mariadb_upgrade_info"
+printf '11x8.9-MariaDB\n' >"$(db_cutover_path "$stage")/mariadb_upgrade_info"
 must_fail cmd_db_cutover_temp_ready "$stage" "$fingerprint" target
-printf '11.8.9-MariaDB\n' >"$(db_cutover_path "$stage")/mysql_upgrade_info"
+printf '11.8.9-MariaDB\n' >"$(db_cutover_path "$stage")/mariadb_upgrade_info"
 cmd_db_cutover_temp_ready "$stage" "$fingerprint" target
 must_fail cmd_db_cutover_attest "$stage" "$fingerprint"
 rm "$fixture/temp.present"
 cmd_db_cutover_reset_preparing "$stage" "$fingerprint"
 [[ "$(db_cutover_field "$stage" forward_step)" == initial && -z "$(find "$(db_cutover_path "$stage")" -mindepth 1 -print -quit)" ]]
 must_fail cmd_db_cutover_temp_upgrade "$stage" "$fingerprint"
-printf '11.8.9-MariaDB\n' >"$(db_cutover_path "$stage")/mysql_upgrade_info"
+printf '11.8.9-MariaDB\n' >"$(db_cutover_path "$stage")/mariadb_upgrade_info"
 db_cutover_forward_step "$stage" complete
 cmd_db_cutover_attest "$stage" "$fingerprint"
 [[ "$(db_cutover_field "$stage" phase)" == prepared ]]
