@@ -37,7 +37,9 @@ installing it or changing the live version.
    tags. The `temp-start` source/target selector permits only those bound
    images with the existing mount, network and restart restrictions.
 4. Root `temp-ready source` verifies the recorded stopped source container,
-   image/mount/isolation, exit zero without OOM, and 11.4 upgrade marker. Only
+   image/mount/isolation, exit zero without OOM, and initialized InnoDB files
+   (regular nonempty `ibdata1` and a `mysql` directory, without links or nested
+   mounts). A fresh source initialization need not have an upgrade marker. Only
    then may the driver remove it and start the target. Root `temp-upgrade`
    verifies the recorded running target identity and server 11.8, executes the
    fixed full `mariadb-upgrade --force` command and records success durably.

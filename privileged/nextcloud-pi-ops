@@ -715,7 +715,7 @@ cmd_db_cutover_temp_start() {
       source:initial)
         [[ -z "$(/usr/bin/find "$data" -mindepth 1 -print -quit)" ]] || die "isolated source directory is not empty"
         image="$(db_cutover_field "$id" source_image_id)"; step=source-started ;;
-      target:source-stopped) db_cutover_upgrade_marker "$id" 11.4; step=target-started ;;
+      target:source-stopped) db_cutover_source_data "$id"; step=target-started ;;
       *) die "forward database start is out of order" ;;
     esac
   else
@@ -742,6 +742,11 @@ db_cutover_upgrade_marker() {
   value="$(/usr/bin/cat "$marker")"
   case "$major" in 11.4) pattern='^11\.4\.[0-9]+(-MariaDB.*)?$';; 11.8) pattern='^11\.8\.[0-9]+(-MariaDB.*)?$';; *) invalid;; esac
   [[ "$value" =~ $pattern ]] || die "database upgrade marker version differs"
+}
+db_cutover_source_data() {
+  local data="$(db_cutover_path "$1")"
+  [[ -d "$data" && ! -L "$data" && -d "$data/mysql" && ! -L "$data/mysql" && -f "$data/ibdata1" && ! -L "$data/ibdata1" && -s "$data/ibdata1" ]] || die "isolated source database is not initialized"
+  no_nested_mounts "$data" || die "isolated source database contains a nested mount"
 }
 cmd_db_cutover_temp_upgrade() {
   [[ $# == 2 ]] || invalid; reject_stdin
@@ -770,7 +775,7 @@ cmd_db_cutover_temp_ready() {
     *) die "forward database completion is out of order" ;;
   esac
   db_cutover_temp_identity "$id" "$image" false
-  db_cutover_upgrade_marker "$id" "$major"
+  if [[ "$selector" == source ]]; then db_cutover_source_data "$id"; else db_cutover_upgrade_marker "$id" "$major"; fi
   db_cutover_forward_step "$id" "$next"
   out state "$next"; out id "$id"
 }

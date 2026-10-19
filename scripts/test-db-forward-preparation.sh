@@ -24,7 +24,7 @@ printf 'MYSQL_DATABASE=nextcloud\n' >"$fixture/state/$stage.env"
 env_hash="$(sha256sum "$fixture/project/.env" | awk '{print $1}')"
 restricted_hash="$(sha256sum "$fixture/state/$stage.env" | awk '{print $1}')"
 
-for function in db_cutover_file db_cutover_field db_cutover_flush db_cutover_rewrite db_cutover_temp_record db_cutover_forward_step db_cutover_forward db_cutover_path db_cutover_inode db_cutover_digest cmd_db_cutover_begin cmd_db_cutover_temp_start db_cutover_temp_identity db_cutover_upgrade_marker cmd_db_cutover_temp_upgrade cmd_db_cutover_temp_ready cmd_db_cutover_attest cmd_db_cutover_reset_preparing; do
+for function in db_cutover_file db_cutover_field db_cutover_flush db_cutover_rewrite db_cutover_temp_record db_cutover_forward_step db_cutover_forward db_cutover_path db_cutover_inode db_cutover_digest cmd_db_cutover_begin cmd_db_cutover_temp_start db_cutover_temp_identity db_cutover_upgrade_marker db_cutover_source_data cmd_db_cutover_temp_upgrade cmd_db_cutover_temp_ready cmd_db_cutover_attest cmd_db_cutover_reset_preparing; do
   text="$(sed -n "/^$function() {/,/^}/p" "$root/privileged/nextcloud-pi-ops")"
   # One-line helpers end on their first line.
   first_line="${text%%$'\n'*}"
@@ -58,7 +58,7 @@ install_fake() {
   done
   /usr/bin/install "${arguments[@]}"
 }
-no_nested_mounts() { :; }; db_cutover_source_consumers() { :; }
+no_nested_mounts() { [[ ! -e "$fixture/nested-mount" ]]; }; db_cutover_source_consumers() { :; }
 db_cutover_no_consumers() { [[ ! -e "$fixture/temp.present" ]] || die 'consumer remains'; }
 out() { :; }
 
@@ -113,7 +113,18 @@ must_fail cmd_db_cutover_attest "$stage" "$fingerprint"
 cmd_db_cutover_temp_start "$stage" "$fingerprint" source
 must_fail cmd_db_cutover_temp_ready "$stage" "$fingerprint" source
 printf false >"$fixture/temp.running"
-printf '11.4.13-MariaDB\n' >"$(db_cutover_path "$stage")/mysql_upgrade_info"
+must_fail cmd_db_cutover_temp_ready "$stage" "$fingerprint" source
+mkdir "$(db_cutover_path "$stage")/mysql"
+printf 'initialized-source\n' >"$(db_cutover_path "$stage")/ibdata1"
+[[ ! -e "$(db_cutover_path "$stage")/mysql_upgrade_info" ]] # Fresh initialization has no upgrade marker.
+touch "$fixture/nested-mount"
+must_fail cmd_db_cutover_temp_ready "$stage" "$fingerprint" source
+rm "$fixture/nested-mount"
+mv "$(db_cutover_path "$stage")/mysql" "$fixture/source-system-tables"
+ln -s "$fixture/source-system-tables" "$(db_cutover_path "$stage")/mysql"
+must_fail cmd_db_cutover_temp_ready "$stage" "$fingerprint" source
+rm "$(db_cutover_path "$stage")/mysql"
+mv "$fixture/source-system-tables" "$(db_cutover_path "$stage")/mysql"
 for field in id image path exit oom; do
   cp "$fixture/temp.$field" "$fixture/saved"
   printf foreign >"$fixture/temp.$field"
@@ -123,6 +134,12 @@ done
 cmd_db_cutover_temp_ready "$stage" "$fingerprint" source
 must_fail cmd_db_cutover_temp_start "$stage" "$fingerprint" target
 rm "$fixture/temp.present"
+mv "$(db_cutover_path "$stage")/ibdata1" "$fixture/source-ibdata1"
+must_fail cmd_db_cutover_temp_start "$stage" "$fingerprint" target
+ln -s "$fixture/source-ibdata1" "$(db_cutover_path "$stage")/ibdata1"
+must_fail cmd_db_cutover_temp_start "$stage" "$fingerprint" target
+rm "$(db_cutover_path "$stage")/ibdata1"
+mv "$fixture/source-ibdata1" "$(db_cutover_path "$stage")/ibdata1"
 cmd_db_cutover_temp_start "$stage" "$fingerprint" target
 printf false >"$fixture/temp.running"
 must_fail cmd_db_cutover_temp_ready "$stage" "$fingerprint" target
@@ -138,6 +155,9 @@ cmd_db_cutover_temp_upgrade "$stage" "$fingerprint"
 cmd_db_cutover_temp_upgrade "$stage" "$fingerprint" # Safe full retry after a lost response.
 [[ "$(wc -l <"$fixture/upgrade.calls")" == 2 ]]
 printf false >"$fixture/temp.running"
+mv "$(db_cutover_path "$stage")/mysql_upgrade_info" "$fixture/target-marker"
+must_fail cmd_db_cutover_temp_ready "$stage" "$fingerprint" target
+mv "$fixture/target-marker" "$(db_cutover_path "$stage")/mysql_upgrade_info"
 printf '11x8.9-MariaDB\n' >"$(db_cutover_path "$stage")/mysql_upgrade_info"
 must_fail cmd_db_cutover_temp_ready "$stage" "$fingerprint" target
 printf '11.8.9-MariaDB\n' >"$(db_cutover_path "$stage")/mysql_upgrade_info"
