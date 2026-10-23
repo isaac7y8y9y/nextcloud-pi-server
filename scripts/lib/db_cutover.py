@@ -128,6 +128,50 @@ def remove_temporary(target: Any, r: Any, stage_id: str, data: str, expected_id:
     target.ssh("docker rm " + r.q(name) + " >/dev/null")
 
 
+def preparing_image(base: dict[str, object], status: dict[str, str], r: Any) -> str:
+    if base.get("preparation_mode") == "forward-114-118":
+        if (status.get("preparation_mode") != "forward-114-118" or
+                status.get("source_image_id") != base.get("source_image_id")):
+            r.reject("protected forward preparation identity differs")
+        step = status.get("forward_step")
+        if step in ("initial", "source-started", "source-stopped"):
+            return str(base["source_image_id"])
+        if step not in ("target-started", "upgraded", "complete"):
+            r.reject("protected forward preparation checkpoint is unknown")
+    elif base.get("preparation_mode") is not None:
+        r.reject("database preparation mode is unknown")
+    return str(base["expected_id"])
+
+
+def wait_ready(target: Any, name: str, r: Any) -> None:
+    for _ in range(90):
+        try:
+            if database_query(target, name, "SELECT 1", r) == "1":
+                return
+        except r.RecoveryError:
+            time.sleep(2)
+    r.reject("isolated MariaDB container did not become ready")
+
+
+def verify_import(target: Any, name: str, r: Any, source: dict[str, object]) -> None:
+    if inventory(target, name, r, str(source["prefix"])) != source:
+        r.reject("clean MariaDB inventory differs from the frozen source")
+    table, rows = next(iter(source["rows"].items()))
+    if database_query(target, name, "SELECT COUNT(*) FROM `" + table + "`", r, user=True) != str(rows):
+        r.reject("application database account cannot read the imported schema")
+    target.ssh("docker exec " + r.q(name) + " sh -eu -c " +
+               r.q('export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mariadb-check --protocol=tcp --host=127.0.0.1 -uroot --all-databases --silent'), timeout=900)
+
+
+def clean_stop(target: Any, name: str, r: Any) -> None:
+    if database_query(target, name, "SELECT @@GLOBAL.innodb_fast_shutdown,@@GLOBAL.innodb_force_recovery", r) not in (
+            "0\t0", "1\t0"):
+        r.reject("database shutdown or recovery settings are unsafe for an upgrade")
+    target.ssh("docker stop --time 120 " + r.q(name) + " >/dev/null", timeout=180)
+    if target.ssh("docker inspect --format '{{.State.ExitCode}}' " + r.q(name)) != "0":
+        r.reject("clean MariaDB shutdown was not graceful")
+
+
 def prepare(target: Any, r: Any, stage_id: str, fingerprint: str, base: dict[str, object],
             candidate: Path, config_backup: Path, runtime: Path, root: Path,
             source: dict[str, object], *, resume: bool = False) -> dict[str, str]:
@@ -139,53 +183,59 @@ def prepare(target: Any, r: Any, stage_id: str, fingerprint: str, base: dict[str
         restricted_env(config_backup / "compose/.env", env, r)
     elif r.digest(env) != base["restricted_env_sha256"]:
         r.reject("restricted database environment changed")
+    forward = base.get("preparation_mode") == "forward-114-118"
+    extra = ("forward-114-118", str(base["source_image_id"])) if forward else ()
     result = target.ops("db-cutover", "begin", stage_id, fingerprint,
                         str(base["freeze"]["id"]), str(base["freeze"]["table_sha256"]),
                         str(local["source_record"]), str(local["source_compose"]),
                         str(local["candidate_record"]), str(local["candidate_compose"]),
                         str(base["expected_id"]), str(local["env_sha256"]),
                         str(base["restricted_env_sha256"]),
-                        str(local["sql_sha256"]), str(base["inventory_sha256"]))
+                        str(local["sql_sha256"]), str(base["inventory_sha256"]), *extra)
     data = target.config["NEXTCLOUD_STORAGE_MOUNT"] + "/.db-cutover-" + stage_id + "/data"
     if result != {"phase": "preparing", "id": stage_id, "data": data}:
         r.reject("protected database preparation differs")
     if resume:
-        remove_temporary(target, r, stage_id, data, str(base["expected_id"]))
+        status = target.ops("db-cutover", "status", stage_id)
+        remove_temporary(target, r, stage_id, data, preparing_image(base, status, r))
         target.ops("db-cutover", "reset-preparing", stage_id, fingerprint)
     target.ops("db-cutover", "env-install", stage_id, fingerprint,
                str(base["restricted_env_sha256"]), str(env.stat().st_size), input_file=env)
     name = "nextcloud-cutover-db-" + stage_id
-    started = target.ops("db-cutover", "temp-start", stage_id, fingerprint)
+    started = target.ops("db-cutover", "temp-start", stage_id, fingerprint, *(("source",) if forward else ()))
     if not re.fullmatch(r"[0-9a-f]{64}", started.get("container_id", "")):
         r.reject("temporary database container ID was not recorded")
-    temporary_container(target, r, stage_id, data, str(base["expected_id"]), started["container_id"])
-    ready = False
-    for _ in range(90):
-        try:
-            if database_query(target, name, "SELECT 1", r) == "1":
-                ready = True
-                break
-        except r.RecoveryError:
-            time.sleep(2)
-    if not ready:
-        r.reject("clean MariaDB container did not become ready")
+    first_image = str(base["source_image_id"] if forward else base["expected_id"])
+    temporary_container(target, r, stage_id, data, first_image, started["container_id"])
+    wait_ready(target, name, r)
+    if forward and not database_query(target, name, "SELECT VERSION()", r).startswith("11.4."):
+        r.reject("isolated source database is not MariaDB 11.4")
     sql = runtime / "database/nextcloud.sql"
     target.ssh("docker exec -i " + r.q(name) + " sh -eu -c " +
                r.q('export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mariadb --protocol=tcp --host=127.0.0.1 -uroot "$MYSQL_DATABASE"'),
                input_file=sql, timeout=3600)
-    imported = inventory(target, name, r, str(source["prefix"]))
-    if imported != source:
-        r.reject("clean MariaDB inventory differs from the frozen source")
-    table, rows = next(iter(source["rows"].items()))
-    if database_query(target, name, "SELECT COUNT(*) FROM `" + table + "`", r, user=True) != str(rows):
-        r.reject("application database account cannot read the imported schema")
-    target.ssh("docker exec " + r.q(name) + " sh -eu -c " +
-               r.q('export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mariadb-check --protocol=tcp --host=127.0.0.1 -uroot --all-databases --silent'), timeout=900)
-    target.ssh("docker stop --time 120 " + r.q(name) + " >/dev/null", timeout=180)
-    if target.ssh("docker inspect --format '{{.State.ExitCode}}' " + r.q(name)) != "0":
-        r.reject("clean MariaDB shutdown was not graceful")
-    temporary_container(target, r, stage_id, data, str(base["expected_id"]), started["container_id"])
+    verify_import(target, name, r, source)
+    clean_stop(target, name, r)
+    temporary_container(target, r, stage_id, data, first_image, started["container_id"])
+    if forward:
+        target.ops("db-cutover", "temp-ready", stage_id, fingerprint, "source")
     target.ssh("docker rm " + r.q(name) + " >/dev/null")
+    if forward:
+        started = target.ops("db-cutover", "temp-start", stage_id, fingerprint, "target")
+        temporary_container(target, r, stage_id, data, str(base["expected_id"]), started.get("container_id", ""))
+        wait_ready(target, name, r)
+        target.ops("db-cutover", "temp-upgrade", stage_id, fingerprint, timeout=1800)
+        verify_import(target, name, r, source)
+        clean_stop(target, name, r)
+        target.ssh("docker start " + r.q(name) + " >/dev/null")
+        wait_ready(target, name, r)
+        temporary_container(target, r, stage_id, data, str(base["expected_id"]), started["container_id"])
+        if not database_query(target, name, "SELECT VERSION()", r).startswith("11.8."):
+            r.reject("restarted target database is not MariaDB 11.8")
+        verify_import(target, name, r, source)
+        clean_stop(target, name, r)
+        target.ops("db-cutover", "temp-ready", stage_id, fingerprint, "target")
+        target.ssh("docker rm " + r.q(name) + " >/dev/null")
     result = target.ops("db-cutover", "attest", stage_id, fingerprint, timeout=3600)
     if result.get("phase") != "prepared" or result.get("id") != stage_id:
         r.reject("protected database attestation differs")

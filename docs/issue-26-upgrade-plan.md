@@ -138,6 +138,11 @@ Merge generic machinery before the first live version change. Do **not** merge a
 
 ## Item 5: bounded rollout and acceptance
 
+The [forward database preparation design](issue-26-mariadb-cutover-design.md#forward-114-to-118-preparation-on-nextcloud-33)
+extends the existing guarded directory cutover for 11.4→11.8 on healthy 33.
+Its machinery and tests must merge before installation or live activation;
+implementation alone does not advance the production 11.4 baseline.
+
 1. Refresh the read-only Pi inventory, installed apps, mount UUID/space, scheduler, live images/IDs, DB state, clock, and package candidates. Recreate and verify fresh configuration, runtime, and prior-image recovery material within repository freshness limits. Run the existing isolated image and runtime restore-readiness checks. Immediately before each stage, install and prove the protected ingress freeze, pause background jobs, capture and verify a **final quiesced runtime recovery point**, and keep the freeze in place until migration and loopback/SSH pre-open health are accepted. The old backup helper's normal reopening behavior cannot serve this role by itself. Each mutation has its own exact approval and stop point.
 2. Only after a successful isolated rehearsal, cut over a clean MariaDB 11.4.13 database while Nextcloud remains at 30.0.17. Preserve the original 11.8 state. Verify DB, `occ`, HTTPS and read-only application access while writes remain blocked. On failure, recover the complete pre-cutover runtime before accepting new writes.
 3. Upgrade 30→31, 31→32, and 32→33, each as a separate approved stage with its own final quiesced recovery point and MariaDB 11.4.13. Install compatible apps at each endpoint and complete required DB/app migrations and background jobs. Check maintenance off when appropriate, `scripts/health-check.sh`, `scripts/preflight.sh --conformance`, and no direct app host port before reopening. Stop on failure; recurring jobs need not make the total queue zero.

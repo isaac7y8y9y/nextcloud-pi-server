@@ -283,11 +283,21 @@ def prepare_db_evidence(target: r.Target, candidate: Path, source: Path, config_
                         *, resume: bool = False) -> tuple[dict[str, object], dict[str, object]]:
     base = stage_evidence(target, candidate, source, config_backup, runtime, images, fetch_path, now,
                           before_stage=not resume)
-    if base["target"] != "db" or not str(base["tag"]).startswith("mariadb:11.4."):
-        r.reject("clean database preparation requires an approved MariaDB 11.4 candidate")
+    if base["target"] != "db":
+        r.reject("database preparation requires a MariaDB candidate")
     source_version = db.database_query(target, CONTAINERS["DB"], "SELECT VERSION()", r)
     app_status = target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status")
-    if not source_version.startswith("11.8.") or "version: 30." not in app_status or "maintenance: true" not in app_status:
+    forward = str(base["tag"]).startswith("mariadb:11.8.")
+    if forward:
+        status = json.loads(target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status --output=json"))
+        if (not source_version.startswith("11.4.") or not str(status.get("version", "")).startswith("33.") or
+                status.get("installed") is not True or status.get("maintenance") is not True or
+                status.get("needsDbUpgrade") is not False):
+            r.reject("forward cutover requires healthy frozen Nextcloud 33 with source MariaDB 11.4")
+        base.update(preparation_mode="forward-114-118", source_image_id=base["evidence"]["old_ids"]["DB"],
+                    source_app_version=status["version"], source_apps=app_list(target, CONTAINERS["APP"]))
+    elif (not str(base["tag"]).startswith("mariadb:11.4.") or not source_version.startswith("11.8.") or
+          "version: 30." not in app_status or "maintenance: true" not in app_status):
         r.reject("clean cutover requires frozen Nextcloud 30 with source MariaDB 11.8")
     base["stage_id"] = stage_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + str(os.getpid())
     source_inventory = db.source_inventory(target, r)
@@ -300,6 +310,8 @@ def prepare_db_evidence(target: r.Target, candidate: Path, source: Path, config_
         r.reject("restricted database environment differs from the bound backup")
     base["restricted_env_sha256"] = r.digest(env)
     base["actions"] = "initialize-clean-mariadb,import-held-sql,verify-inventory,attest-stopped-directory"
+    if forward:
+        base["actions"] = "initialize-source-11.4,import-held-sql,verify-inventory,clean-stop,forward-11.8,full-mariadb-upgrade,restart-verify,attest-stopped-directory"
     base["exclusions"] = "source-database-move,source-container-stop,compose-change,active-record-change,freeze-release"
     return base, source_inventory
 
@@ -375,6 +387,17 @@ def db_stage_evidence(target: r.Target, base: dict[str, object], preparation: Pa
     base["db_prepare_sha256"] = r.digest(preparation)
     base["db_candidate_digest"] = status["candidate_digest"]
     base["db_inventory_sha256"] = prepared["inventory_sha256"]
+    if prepared.get("preparation_mode") == "forward-114-118":
+        if (status.get("preparation_mode") != "forward-114-118" or status.get("forward_step") != "complete" or
+                status.get("source_image_id") != prepared["source_image_id"]):
+            r.reject("protected forward database preparation differs")
+        app_status = json.loads(target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status --output=json"))
+        if (app_status.get("version") != prepared["source_app_version"] or
+                app_status.get("maintenance") is not True or app_status.get("needsDbUpgrade") is not False or
+                app_list(target, CONTAINERS["APP"]) != prepared["source_apps"]):
+            r.reject("Nextcloud baseline changed during forward database preparation")
+        for key in ("preparation_mode", "source_image_id", "source_app_version", "source_apps"):
+            base[key] = prepared[key]
     base["actions"] = "detach-source-containers,promote-attested-database,install-candidate,start,stage-maintenance-off"
     base["exclusions"] = "pull,prune,image-removal,source-lock-write,freeze-release,config-only-rollback"
     return base
@@ -785,6 +808,10 @@ def accept_evidence(target: r.Target, candidate: Path, source: Path, config_back
                 cutover.get("candidate_digest") != stage.get("db_candidate_digest") or
                 cutover.get("inventory_sha256") != stage.get("db_inventory_sha256")):
             r.reject("protected database cutover is not running on the attested directory")
+        if stage.get("preparation_mode") == "forward-114-118" and (
+                cutover.get("preparation_mode") != "forward-114-118" or cutover.get("forward_step") != "complete" or
+                cutover.get("source_image_id") != stage.get("source_image_id")):
+            r.reject("protected forward database completion differs")
         mount = target.config["NEXTCLOUD_STORAGE_MOUNT"]
         for path, expected_inode in ((mount + "/nextcloud_db", cutover["candidate_inode"]),
                                      (mount + "/.nextcloud-db-before-" + stage_id, cutover["source_inode"])):
@@ -806,8 +833,20 @@ def accept_evidence(target: r.Target, candidate: Path, source: Path, config_back
     identities = running(target, candidate / "active-images.env")
     target.ssh("! docker port nextcloud-docker-app-1 80/tcp >/dev/null 2>&1")
     status = target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status")
-    if stage.get("target") == "db" and ("needsDbUpgrade: false" not in status or "version: 30." not in status):
-        r.reject("Nextcloud 30 status reports an unexpected database upgrade")
+    if stage.get("target") == "db":
+        if stage.get("preparation_mode") == "forward-114-118":
+            app_status = json.loads(target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ status --output=json"))
+            if (app_status.get("version") != stage.get("source_app_version") or
+                    not str(app_status.get("version", "")).startswith("33.") or
+                    app_status.get("installed") is not True or app_status.get("needsDbUpgrade") is not False or
+                    app_list(target, CONTAINERS["APP"]) != stage.get("source_apps") or
+                    not db.database_query(target, CONTAINERS["DB"], "SELECT VERSION()", r).startswith("11.8.")):
+                r.reject("forward database acceptance changed the Nextcloud 33 baseline")
+            integrity = json.loads(target.ssh("docker exec --user www-data nextcloud-docker-app-1 php /var/www/html/occ integrity:check-core --output=json"))
+            if integrity not in ({}, []):
+                r.reject("Nextcloud core integrity check failed after forward database upgrade")
+        elif "needsDbUpgrade: false" not in status or "version: 30." not in status:
+            r.reject("Nextcloud 30 status reports an unexpected database upgrade")
     if "maintenance: false" in status:
         r.run([str(HERE / "health-check.sh"), "--caddyfile", str(candidate / "Caddyfile")], timeout=300)
     elif not allow_maintenance_on or "maintenance: true" not in status:
@@ -879,7 +918,7 @@ def main() -> int:
                 r.reject("database cutover cannot be aborted before the recovery boundary")
             db.remove_temporary(target, r, stage_id,
                                 target.config["NEXTCLOUD_STORAGE_MOUNT"] + "/.db-cutover-" + stage_id + "/data",
-                                str(prep["expected_id"]))
+                                db.preparing_image(prep, status, r))
             if args.stage_approval is not None:
                 stage = consumed_stage(args.stage_approval, root)
                 if stage.get("stage_id") != stage_id or stage.get("db_prepare_fingerprint") != prep["fingerprint"]:

@@ -25,12 +25,14 @@ ACTIVE_RECORD="$fixture/active-images.env"
 printf 'NEXTCLOUD_ACTIVE_IMAGES_DB_ID=%s\n' "$expected_id" >"$ACTIVE_RECORD"
 chmod 0600 "$ACTIVE_RECORD"
 
-for function_name in db_cutover_scan db_cutover_startup_guard; do
+for function_name in db_cutover_scan db_cutover_startup_guard db_cutover_forward_owner db_cutover_restored_identity; do
   function_text="$(sed -n "/^${function_name}() {/,/^}/p" "$root/privileged/nextcloud-pi-ops")"
   [[ -n "$function_text" ]] || exit 1
   eval "$function_text"
 done
 db_cutover_root() { printf '%s/state/db-cutover' "$fixture"; }
+db_cutover_field() { metadata "$(db_cutover_root)/$1.tsv" "$2"; }
+db_cutover_forward() { [[ "$(db_cutover_field "$1" preparation_mode 2>/dev/null || true)" == forward-114-118 ]]; }
 metadata() { awk -F '\t' -v wanted="$2" '$1 == wanted {print $2; found=1; exit} END {if (!found) exit 1}' "$1"; }
 valid_id() { [[ "$1" =~ ^[A-Za-z0-9-]+$ ]]; }
 safe_dir() { [[ -d "$1" && ! -L "$1" ]]; }
@@ -67,6 +69,66 @@ compose_hash=candidate-compose
 write_journal candidate-ready
 permit
 write_journal accepted
+permit
+
+# Historical accepted 11.4 authority must coexist with a later forward stage.
+forward_id=20261019T000000Z-12
+forward_file="$fixture/state/db-cutover/$forward_id.tsv"
+mkdir -p "$fixture/storage/.db-cutover-$forward_id/data"
+printf 'forward-target\n' >"$fixture/storage/.db-cutover-$forward_id/data/identity"
+forward_inode="$(stat -c '%d:%i' "$fixture/storage/.db-cutover-$forward_id/data")"
+write_forward() {
+  printf 'format\tdb-cutover-v1\nid\t%s\nphase\t%s\npreparation_mode\tforward-114-118\nsource_image_id\t%s\nsource_inode\t%s\ncandidate_inode\t%s\nobjects_removed\tyes\npre_record_sha256\tcandidate-record\npre_compose_sha256\tcandidate-compose\ncandidate_record_sha256\tforward-record\ncandidate_compose_sha256\tforward-compose\nexpected_id\tsha256:%064d\n' \
+    "$forward_id" "$1" "$expected_id" "$candidate_inode" "$forward_inode" 1 >"$forward_file"
+  chmod 0600 "$forward_file"
+}
+boot_permit() { db_cutover_scan >/dev/null; }
+boot_deny() { if (db_cutover_scan) >/dev/null 2>&1; then printf 'unsafe Docker boot was permitted\n' >&2; exit 1; fi; }
+write_forward switching
+mv -T -- "$fixture/storage/nextcloud_db" "$fixture/storage/.nextcloud-db-before-$forward_id"
+boot_permit # First rename completed, source active record still selects 11.4.
+deny
+mv -T -- "$fixture/storage/.db-cutover-$forward_id/data" "$fixture/storage/nextcloud_db"
+boot_permit # Candidate directory, before target active-record installation.
+deny
+write_forward recovering
+mv -T -- "$fixture/storage/nextcloud_db" "$fixture/storage/.forward-failed"
+mkdir "$fixture/storage/nextcloud_db"
+printf 'restored-source\n' >"$fixture/storage/nextcloud_db/identity"
+restored_inode="$(stat -c '%d:%i' "$fixture/storage/nextcloud_db")"
+printf 'restored_source_inode\t%s\n' "$restored_inode" >>"$forward_file"
+boot_permit # Full promotion and source record restored, before source-ready.
+deny
+write_forward source-ready
+printf 'restored_source_inode\t%s\n' "$restored_inode" >>"$forward_file"
+permit
+write_forward recovered
+printf 'restored_source_inode\t%s\n' "$restored_inode" >>"$forward_file"
+permit
+cp "$forward_file" "$fixture/forward-good"
+for replacement in missing-proof wrong-proof wrong-source no-checkpoint; do
+  cp "$fixture/forward-good" "$forward_file"
+  case "$replacement" in
+    missing-proof) sed -i '/^restored_source_inode/d' "$forward_file" ;;
+    wrong-proof) sed -i 's/^restored_source_inode.*/restored_source_inode\t0:0/' "$forward_file" ;;
+    wrong-source) sed -i 's/^source_image_id.*/source_image_id\tforeign/' "$forward_file" ;;
+    no-checkpoint) sed -i 's/^phase.*/phase\tinitial/' "$forward_file" ;;
+  esac
+  boot_deny
+done
+cp "$fixture/forward-good" "$forward_file"
+mv "$fixture/storage/.nextcloud-db-before-$forward_id" "$fixture/storage/.missing-forward-source"
+boot_deny
+mv "$fixture/storage/.missing-forward-source" "$fixture/storage/.nextcloud-db-before-$forward_id"
+mv "$fixture/storage/.nextcloud-db-before-$stage_id" "$fixture/storage/.missing-original-source"
+boot_deny
+mv "$fixture/storage/.missing-original-source" "$fixture/storage/.nextcloud-db-before-$stage_id"
+mv "$fixture/storage/nextcloud_db" "$fixture/storage/.restored-held"
+mkdir "$fixture/storage/nextcloud_db"
+boot_deny
+rmdir "$fixture/storage/nextcloud_db"
+mv "$fixture/storage/.nextcloud-db-before-$forward_id" "$fixture/storage/nextcloud_db"
+rm "$forward_file"
 permit
 
 mv -T -- "$fixture/storage/nextcloud_db" "$fixture/storage/.unexpected-candidate"
