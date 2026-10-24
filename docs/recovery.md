@@ -37,6 +37,53 @@ and command output as sensitive. Keep them outside Git and do not publish them.
 
 ## Runtime recovery drill
 
+### Held firewall identity after reboot
+
+Kernel-assigned nftables handles can change when the boot guard reconstructs
+the upgrade table. New freezes compare policy against their protected original
+snapshot and keep the original raw hash as transaction identity. Unknown policy
+or a missing/unsafe snapshot fails closed. A legacy freeze without a snapshot
+continues to require the original raw hash until explicit adoption.
+
+For a legacy held stage whose only firewall differences are handles or nft
+metadata, preserve the current journals, held backup, candidate database and
+cold source directories. Prove the stack is closed and retain the exact original
+table JSON outside Git. Its SHA-256 must equal the protected freeze hash; a new
+snapshot of the current table cannot substitute for those original bytes.
+
+After the repair code is reviewed and merged, prepare a separate repair plan
+from the merged source. All paths below are private operator inputs:
+
+```sh
+scripts/manage-pi-privileged-interface.sh --plan-held-freeze-repair \
+  "$ORIGINAL_FREEZE_JSON" "$FREEZE_ID" "$CURRENT_RAW_TABLE_SHA256"
+```
+
+Review the resulting package fingerprint and exact held-stage binding before
+the already authorized administrator operation:
+
+```sh
+scripts/manage-pi-privileged-interface.sh --apply-held-freeze-repair "$REPAIR_APPROVAL"
+```
+
+The 15-minute, single-use artifact binds the original bytes, current raw hash,
+freeze ID, installed manifest and new bundle. Repair verifies the closed stack
+and paused scheduler, snapshots and replaces only helper/manifest, then commits
+the fixed bundle before adopting the original proof and starting guarded
+Docker/Nextcloud. It releases the operations lock before child helpers and
+Docker's boot guard acquire it. Before commitment, failure restores only those
+two files. After commitment, failure retains the fixed helper/proof and attempts
+to stop the timer and stack; independently inspect containment before retrying.
+No database directory, image record, approval or stage journal is rewritten.
+
+Successful repair still leaves ingress and scheduler held. Re-prove external
+denial, drain and candidate health before resuming the existing consumed stage.
+Acceptance, active-record commitment and release remain separate operations.
+Do not delete freeze records, reinstall through the normal installer, substitute
+a new freeze hash, or blindly restore a pre-upgrade database.
+
+### Disposable recovery verification
+
 The runtime recovery drill proves a verified backup against disposable Pi paths
 and a disposable MariaDB container. It never writes to live Nextcloud, MariaDB,
 or Caddy state.

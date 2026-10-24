@@ -2,6 +2,16 @@
 
 This changelog records major engineering phases rather than individual commits.
 
+## 2026-10 — Preserve held ingress across reboot
+
+- Compare the complete upgrade firewall policy against a protected original
+  snapshot while ignoring kernel handles and nft library metadata.
+- Preserve the original freeze hash and consumed upgrade/backup authority.
+- Add separately authenticated held-freeze repair limited to the helper and
+  manifest, with closed-stack proof, original-snapshot adoption and guarded
+  startup. Ingress and scheduler remain held for separate stage validation.
+- Keep the MariaDB 11.4 tracked baseline pending live 11.8 acceptance.
+
 ## 2026-10 — Guarded forward database preparation
 
 - Add isolated MariaDB 11.4-to-11.8 preparation on healthy Nextcloud 33, reusing

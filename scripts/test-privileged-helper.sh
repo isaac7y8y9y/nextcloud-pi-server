@@ -284,7 +284,9 @@ case "\${1:-}:\${2:-}" in
   -f:-)
     cat >/dev/null
     [[ ! -e "\$state" ]] || exit 1
-    printf '{"table":"nextcloud_pi_upgrade"}\n' >"\$state"
+    cat >"\$state" <<'NFT_JSON'
+{"nftables":[{"metainfo":{"version":"1.1.3","release_name":"test","json_schema_version":1}},{"table":{"family":"inet","name":"nextcloud_pi_upgrade","handle":7}},{"chain":{"family":"inet","table":"nextcloud_pi_upgrade","name":"ingress","handle":1,"type":"filter","hook":"prerouting","prio":-300,"policy":"accept"}},{"rule":{"family":"inet","table":"nextcloud_pi_upgrade","chain":"ingress","handle":3,"expr":[{"match":{"op":"!=","left":{"meta":{"key":"iifname"}},"right":"lo"}},{"match":{"op":"==","left":{"fib":{"result":"type","flags":["daddr"]}},"right":"local"}},{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":{"set":[80,443]}}},{"drop":null}]}}]}
+NFT_JSON
     ;;
   -j:list) [[ -f "\$state" ]] || exit 1; cat "\$state" ;;
   list:table) [[ -f "\$state" ]] || exit 1 ;;
@@ -439,8 +441,38 @@ PY
   sudo test -f "$FIXTURE/state/upgrade-freeze/timer-held"
   sudo "$FIXTURE/ops" upgrade-freeze status | grep -Fx $'state\tactive' >/dev/null
   sudo rm -- "$FIXTURE/nft-table"
+  sudo sed -i 's/"handle":7/"handle":4/' "$FIXTURE/bin/nft"
   sudo env -u SUDO_USER "$FIXTURE/ops" upgrade-freeze-boot-guard
   sudo test -f "$FIXTURE/nft-table" || { printf 'boot guard did not restore ingress freeze\n' >&2; exit 1; }
+  # An older held transaction has only the original raw hash. Its original
+  # snapshot may be adopted, but the transaction record must remain identical.
+  snapshot="$FIXTURE/state/upgrade-freeze/table-$freeze_id.json"
+  sudo cp "$snapshot" "$FIXTURE/original-freeze.json"
+  original="$(sudo sha256sum "$snapshot" | awk '{print $1}')"
+  observed="$(sudo sha256sum "$FIXTURE/nft-table" | awk '{print $1}')"
+  original_size="$(sudo stat -c %s "$snapshot")"
+  freeze_before="$(sudo sha256sum "$FIXTURE/state/upgrade-freeze/current.tsv")"
+  [[ "$original" != "$observed" ]]
+  sudo rm "$snapshot"
+  if sudo "$FIXTURE/ops" upgrade-freeze status >/dev/null 2>&1; then
+    printf 'legacy freeze accepted new raw identity without original proof\n' >&2; exit 1
+  fi
+  if sudo cat "$FIXTURE/nft-table" | sudo "$FIXTURE/ops" upgrade-freeze adopt-snapshot "$freeze_id" "$original" "$observed" "$(sudo stat -c %s "$FIXTURE/nft-table")" >/dev/null 2>&1; then
+    printf 'new bytes replaced original snapshot authority\n' >&2; exit 1
+  fi
+  sudo cat "$FIXTURE/original-freeze.json" | sudo flock -w 1 "$FIXTURE/lock-root/operations.lock" "$FIXTURE/ops" upgrade-freeze verify-snapshot "$freeze_id" "$original" "$observed" "$original_size" >/dev/null
+  sudo test ! -e "$snapshot"
+  for attempt in 1 2; do
+    sudo cat "$FIXTURE/original-freeze.json" | sudo "$FIXTURE/ops" upgrade-freeze adopt-snapshot "$freeze_id" "$original" "$observed" "$original_size" >/dev/null
+  done
+  [[ "$(sudo sha256sum "$FIXTURE/state/upgrade-freeze/current.tsv")" == "$freeze_before" ]]
+  sudo cmp "$snapshot" "$FIXTURE/original-freeze.json"
+  sudo cp "$FIXTURE/nft-table" "$FIXTURE/current-freeze.json"
+  sudo sed -i 's/\[80,443\]/[80,444]/' "$FIXTURE/nft-table"
+  if sudo "$FIXTURE/ops" upgrade-freeze status >/dev/null 2>&1; then
+    printf 'changed packet policy accepted\n' >&2; exit 1
+  fi
+  sudo cp "$FIXTURE/current-freeze.json" "$FIXTURE/nft-table"
   sudo "$FIXTURE/ops" upgrade-freeze quiescence "$freeze_id" | grep -Fx $'state\tquiescent' >/dev/null
   sudo touch "$FIXTURE/quiescence-busy"
   if sudo "$FIXTURE/ops" upgrade-freeze quiescence "$freeze_id" >/dev/null 2>&1; then

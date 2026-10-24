@@ -47,6 +47,22 @@ uses its own dispatcher-generated socket and readiness-ID-bound containerd
 image and plugin namespaces. It never accesses the live Docker socket or the
 live daemon's default containerd namespaces.
 
+Normal bundle installation and rollback refuse a held upgrade freeze. The
+separate administrator `repair-held-freeze` action requires Docker, Nextcloud
+and background jobs to be inactive or failed, no stack processes, the approved
+installed manifest, and the original firewall bytes matching the protected
+freeze hash. It replaces only the helper and manifest; policy, sudoers, units
+and launchers must be unchanged. Its approval includes the original snapshot,
+current raw firewall hash and freeze ID. It does not accept or release a stage.
+
+New freezes retain a root-owned mode-`0600` original table snapshot. Policy
+comparison ignores only validated nft metadata and kernel handles, and accepts
+either ordering of the exact HTTP/HTTPS port set. All other table, chain and
+rule fields must match the fixed policy. The original raw snapshot hash remains
+the identity used by existing backup and stage records. Legacy adoption accepts
+bounded original bytes only when their hash matches that existing authority
+and their policy matches the exact current table; it never replaces authority.
+
 Removal is fail-closed. In addition to prior revocation and service migration,
 the installer requires every active-record, runtime-recovery, image-readiness,
 socket, storage, and deployment-drill lifecycle namespace to be absent or
