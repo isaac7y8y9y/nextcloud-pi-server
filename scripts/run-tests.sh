@@ -11,6 +11,8 @@ readonly REPOSITORY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 readonly -a PR_COMMANDS=(
   'bash -n scripts/*.sh scripts/lib/*.sh privileged/nextcloud-pi-ops privileged/nextcloud-pi-bundle-installer systemd/nextcloud-pi-validate-active-images'
   'bash scripts/test-privileged-helper.sh'
+  'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-freeze-policy.py'
+  'PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-held-freeze-repair-manager.py'
   'bash scripts/test-privileged-installer.sh'
   'bash scripts/test-privileged-locks.sh'
   'bash scripts/test-privileged-sudoers.sh'

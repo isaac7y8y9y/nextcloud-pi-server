@@ -10,6 +10,13 @@ This procedure does not authorize image import or runtime recovery. Follow it
 from the repository root in a clean linked worktree containing the exact
 reviewed candidate.
 
+Normal privileged-bundle installation and rollback also refuse an active
+upgrade freeze. For a held legacy transaction stopped by changed nftables
+handles after reboot, use the separately authenticated
+[held-firewall repair procedure](recovery.md#held-firewall-identity-after-reboot).
+That repair installs only the helper and manifest and leaves stage acceptance,
+ingress release and scheduler restoration to their existing gates.
+
 ## 1. Prepare the private deployment environment
 
 For a new operator checkout, copy the sanitized example into the ignored local

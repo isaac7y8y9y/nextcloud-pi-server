@@ -8,6 +8,15 @@ are complete and the exact downtime window and recovery path are approved.
 The test temporarily changes live ingress and background jobs without upgrading
 an image. Item 5 retains its separate fresh-evidence and approval gates.
 
+The boot guard now checks the complete expected policy against an immutable
+original table snapshot, preserving its raw hash for held-backup and stage
+bindings. Kernel handles and validated nft metadata may change after reboot;
+packet-policy changes fail closed. Legacy snapshots require the separate
+[held repair procedure](recovery.md#held-firewall-identity-after-reboot).
+After any repair, repeat applicable external-denial, retained-connection,
+loopback and drain proof before continuing the held stage. This implementation
+does not by itself establish a new live reboot checkpoint.
+
 ## Measured checkpoint — October 1, 2026
 
 The reviewed correction at `040979a` was installed and its bundle manifest

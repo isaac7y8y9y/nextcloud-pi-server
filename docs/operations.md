@@ -56,6 +56,12 @@ to proceed while active-record, runtime-recovery, image-readiness, isolated
 daemon/socket, or disposable deployment-drill state remains. Complete those
 lifecycles through their supported cleanup commands before retrying removal.
 
+Normal install and rollback refuse a held upgrade freeze. A legacy freeze
+stopped by changed nftables handles after reboot has a separate
+[administrator repair procedure](recovery.md#held-firewall-identity-after-reboot).
+It binds the original proof, replaces only helper/manifest, and starts the
+guarded runtime with ingress and scheduler still held for stage validation.
+
 ## Focused local validation
 
 Run the complete pull-request-safe repository test tier without contacting the

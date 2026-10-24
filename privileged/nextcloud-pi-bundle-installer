@@ -160,12 +160,12 @@ require_no_lifecycles() {
   done
 }
 validate_stage() {
-  local stage="$1" expected="$2" user="$3" host="$4" mount="$5" uuid="$6" platform="$7" project="$8" kind name digest extra logical source installed mode row_hash
+  local stage="$1" expected="$2" user="$3" host="$4" mount="$5" uuid="$6" platform="$7" project="$8" package_mode="${9:-normal}" kind name digest extra logical source installed mode row_hash
   [[ -d "$stage" && ! -L "$stage" && "$(sha256 "$stage/package-manifest.tsv")" == "$expected" ]] || return 1
-  awk -F '\t' '$1 == "format" && $2 == "nextcloud-pi-package-manifest-v1" && NF == 2 { f++; next } $1 == "file" && ($2 == "bundle-manifest.tsv" || $2 == "privileged-policy.conf" || $2 == "nextcloud-pi-automation.sudoers" || $2 == "nextcloud-pi-bundle-installer") && $3 ~ /^[0-9a-f]{64}$/ && NF == 3 { c[$2]++; next } { bad=1 } END { exit !(f == 1 && c["bundle-manifest.tsv"] == 1 && c["privileged-policy.conf"] == 1 && c["nextcloud-pi-automation.sudoers"] == 1 && c["nextcloud-pi-bundle-installer"] == 1 && !bad) }' "$stage/package-manifest.tsv" || return 1
+  awk -F '\t' -v repair="$package_mode" '$1 == "format" && $2 == "nextcloud-pi-package-manifest-v1" && NF == 2 { f++; next } $1 == "file" && ($2 == "bundle-manifest.tsv" || $2 == "privileged-policy.conf" || $2 == "nextcloud-pi-automation.sudoers" || $2 == "nextcloud-pi-bundle-installer" || (repair == "repair" && ($2 == "repair-binding.tsv" || $2 == "original-freeze.json"))) && $3 ~ /^[0-9a-f]{64}$/ && NF == 3 { c[$2]++; next } { bad=1 } END { exit !(f == 1 && c["bundle-manifest.tsv"] == 1 && c["privileged-policy.conf"] == 1 && c["nextcloud-pi-automation.sudoers"] == 1 && c["nextcloud-pi-bundle-installer"] == 1 && (repair != "repair" || (c["repair-binding.tsv"] == 1 && c["original-freeze.json"] == 1)) && !bad) }' "$stage/package-manifest.tsv" || return 1
   while IFS=$'\t' read -r kind name digest extra; do
     [[ "$kind" == format ]] && continue
-    [[ -z "${extra:-}" && "$(sha256 "$stage/$name")" == "$digest" ]] || return 1
+    [[ -z "${extra:-}" && -f "$stage/$name" && ! -L "$stage/$name" && "$(sha256 "$stage/$name")" == "$digest" ]] || return 1
   done <"$stage/package-manifest.tsv"
   [[ "$(policy_value NEXTCLOUD_PI_POLICY_FORMAT "$stage/privileged-policy.conf")" == nextcloud-pi-privileged-policy-v1 && "$(policy_value NEXTCLOUD_PI_DEPLOYMENT_USER "$stage/privileged-policy.conf")" == "$user" && "$(policy_value NEXTCLOUD_PI_SYSTEM_HOSTNAME "$stage/privileged-policy.conf")" == "$host" && "$(policy_value NEXTCLOUD_PI_PROJECT_DIR "$stage/privileged-policy.conf")" == "$project" && "$(policy_value NEXTCLOUD_PI_STORAGE_MOUNT "$stage/privileged-policy.conf")" == "$mount" && "$(policy_value NEXTCLOUD_PI_STORAGE_UUID "$stage/privileged-policy.conf")" == "$uuid" && "$(policy_value NEXTCLOUD_PI_IMAGE_PLATFORM "$stage/privileged-policy.conf")" == "$platform" ]] || return 1
   [[ "$(grep -Fxc "$user ALL=(root) NOPASSWD: /usr/local/libexec/nextcloud-pi-ops" "$stage/nextcloud-pi-automation.sudoers")" == 1 ]] || return 1
@@ -181,6 +181,67 @@ validate_stage() {
   sed "s|^ExecStart=/usr/local/libexec/nextcloud-pi-background-jobs$|ExecStart=$stage/files/background-jobs-runner|" "$stage/files/background-jobs-unit" >"$stage/systemd-verify/nextcloud-background-jobs.service"
   cp "$stage/files/background-jobs-timer" "$stage/systemd-verify/nextcloud-background-jobs.timer"
   systemd-analyze verify "$stage/systemd-verify/nextcloud.service" "$stage/systemd-verify/nextcloud-background-jobs.service" "$stage/systemd-verify/nextcloud-background-jobs.timer"
+}
+
+repair_value() { awk -F '\t' -v key="$2" '$1 == key { n++; v=$2 } END { if (n == 1) print v; else exit 1 }' "$1"; }
+repair_closed() {
+  local service command_line comm
+  # PID 1 and unrestricted procfs make the independent no-process proof useful
+  # even when Docker's API is unavailable.
+  [[ "$(cat /proc/1/comm)" == systemd ]] || die "repair requires host systemd"
+  [[ "$(findmnt -rn --target /proc -o OPTIONS)" != *hidepid=* ]] || die "repair requires process visibility"
+  for service in docker.service nextcloud.service "$BACKGROUND_JOBS_TIMER" "$BACKGROUND_JOBS_SERVICE"; do
+    [[ "$(systemctl is-active "$service" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "repair requires the closed stack and held scheduler"
+  done
+  for command_line in /proc/[0-9]*/comm; do
+    [[ -r "$command_line" ]] || continue
+    comm="$(cat "$command_line" 2>/dev/null || true)"
+    case "$comm" in caddy|apache2|mariadbd|mysqld|dockerd|containerd-shim*) die "repair found a running stack process";; esac
+  done
+}
+repair_same_bundle() {
+  local stage="$1" kind logical source installed mode digest old
+  protected_file /etc/nextcloud-pi/bundle-manifest.tsv 0600 || die "installed manifest is unsafe"
+  SUDO_USER="$user" /usr/local/libexec/nextcloud-pi-ops check >/dev/null
+  cmp -s "$stage/privileged-policy.conf" /etc/nextcloud-pi/privileged-policy.conf || die "repair cannot change policy"
+  cmp -s "$stage/nextcloud-pi-automation.sudoers" /etc/sudoers.d/nextcloud-pi-automation || die "repair cannot change sudoers"
+  # All manifest columns except the helper digest must remain identical.
+  old="$stage/old-manifest-normalized.tsv"
+  awk -F '\t' 'BEGIN {OFS="\t"} $1 == "file" && $2 == "privileged-helper" {$6="helper"} $1 !~ /^#/ {print}' /etc/nextcloud-pi/bundle-manifest.tsv >"$old"
+  awk -F '\t' 'BEGIN {OFS="\t"} $1 == "file" && $2 == "privileged-helper" {$6="helper"} $1 !~ /^#/ {print}' "$stage/bundle-manifest.tsv" >"$stage/new-manifest-normalized.tsv"
+  cmp -s "$old" "$stage/new-manifest-normalized.tsv" || die "repair cannot change other bundle entries"
+  while IFS=$'\t' read -r kind logical source installed mode digest; do
+    [[ "$kind" == file && "$logical" != privileged-helper ]] || continue
+    cmp -s "$stage/files/$logical" "$installed" || die "repair cannot change other managed files"
+  done <"$stage/bundle-manifest.tsv"
+}
+repair_lineage() {
+  # Hash journals/configuration and inode identities, never database contents.
+  python3 -I - "$STATE" "$mount" "$project" <<'PY_REPAIR_LINEAGE'
+import hashlib
+import json
+from pathlib import Path
+import stat
+import sys
+root, mount, project = map(Path, sys.argv[1:])
+result = {}
+paths = [root / 'upgrade-freeze/current.tsv', root / 'upgrade-freeze/timer-held',
+         Path('/etc/nextcloud-pi/active-images.env'), project / 'docker-compose.yml', root / 'active-record-current']
+for namespace in ('db-cutover', 'upgrade-stage', 'upgrade-fetch'):
+    paths.extend(sorted((root / namespace).glob('*.tsv')))
+paths.extend(sorted((root / 'active-record').glob('*/metadata.tsv')))
+for path in paths:
+    st = path.lstat()
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or (path != project / 'docker-compose.yml' and st.st_uid != 0):
+        sys.exit('unsafe repair lineage')
+    result[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+for path in [mount / 'nextcloud_db', *sorted(mount.glob('.nextcloud-db-before-*'))]:
+    st = path.lstat()
+    if not stat.S_ISDIR(st.st_mode):
+        sys.exit('unsafe repair database placement')
+    result[str(path)] = [st.st_dev, st.st_ino]
+print(json.dumps(result, sort_keys=True))
+PY_REPAIR_LINEAGE
 }
 
 action="${1:-}"; shift || true
@@ -218,6 +279,67 @@ case "$action" in
     systemctl enable --now "$BACKGROUND_JOBS_TIMER"
     sudo -u "$user" sudo -n /usr/local/libexec/nextcloud-pi-ops check >/dev/null
     rollback=0; trap - EXIT HUP INT TERM; rm -rf -- "$root_stage"; printf 'Installed privileged interface; rollback ID: %s\n' "$backup_id"
+    ;;
+  repair-held-freeze)
+    [[ $# == 9 ]] || die "invalid repair arguments"
+    source_stage="$1"; backup_id="$2"; expected="$3"; user="$4"; host="$5"; mount="$6"; uuid="$7"; platform="$8"; project="$9"
+    [[ "$backup_id" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9]+$ && "$expected" =~ ^[0-9a-f]{64}$ && "$user" =~ ^[A-Za-z_][A-Za-z0-9_.-]*$ && "$project" =~ ^/[A-Za-z0-9._/-]+$ && "${project##*/}" == nextcloud-docker ]] || die "unsafe repair arguments"
+    [[ "$(hostname)" == "$host" && "$(id -un "$user")" == "$user" && "$(findmnt -rn --target "$mount" -o TARGET)" == "$mount" && "$(findmnt -rn --target "$mount" -o FSTYPE)" == ext4 && "$(findmnt -rn --target "$mount" -o UUID | tr '[:upper:]' '[:lower:]')" == "${uuid,,}" ]] || die "host policy does not match"
+    protected_directory "$STATE" 0700 && protected_directory "$BACKUPS" 0700 || die "repair state root is unsafe"
+    repair_closed
+    root_stage="$(mktemp -d "$STATE/.installer.XXXXXX")"
+    cleanup_repair_stage() { local status=$?; trap - EXIT HUP INT TERM; rm -rf -- "$root_stage"; exit "$status"; }
+    trap cleanup_repair_stage EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+    [[ -d "$source_stage" && ! -L "$source_stage" && "$(stat -c '%U' "$source_stage")" == "$user" ]] || die "administrator stage is unsafe"
+    cp -a "$source_stage/." "$root_stage/"; chown -R root:root "$root_stage"; chmod -R go-rwx "$root_stage"
+    validate_stage "$root_stage" "$expected" "$user" "$host" "$mount" "$uuid" "$platform" "$project" repair || die "approved repair bundle validation failed"
+    binding="$root_stage/repair-binding.tsv"
+    awk -F '\t' 'BEGIN {split("format freeze_id original_sha256 current_raw_sha256 size installed_manifest_sha256", a, " "); for (i in a) keys[a[i]]=1} NF != 2 || !($1 in keys) || seen[$1]++ {bad=1} END {for (key in keys) if (seen[key] != 1) bad=1; exit bad}' "$binding" || die "repair binding schema is invalid"
+    [[ "$(repair_value "$binding" format)" == held-freeze-repair-v1 ]] || die "repair format differs"
+    freeze_id="$(repair_value "$binding" freeze_id)"; original="$(repair_value "$binding" original_sha256)"; observed="$(repair_value "$binding" current_raw_sha256)"; size="$(repair_value "$binding" size)"; installed_manifest="$(repair_value "$binding" installed_manifest_sha256)"
+    [[ "$installed_manifest" =~ ^[0-9a-f]{64}$ && "$(sha256 /etc/nextcloud-pi/bundle-manifest.tsv)" == "$installed_manifest" ]] || die "installed bundle changed since approval"
+    repair_same_bundle "$root_stage"
+    SUDO_USER="$user" "$root_stage/files/privileged-helper" upgrade-freeze verify-snapshot "$freeze_id" "$original" "$observed" "$size" <"$root_stage/original-freeze.json" >/dev/null
+    repair_lineage >"$root_stage/lineage-before.json"
+    backup="$BACKUPS/$backup_id"; [[ ! -e "$backup" && ! -L "$backup" ]] || die "backup identifier already exists"
+    mkdir -m 700 "$backup"
+    cp -p /usr/local/libexec/nextcloud-pi-ops "$backup/ops"
+    cp -p /etc/nextcloud-pi/bundle-manifest.tsv "$backup/manifest"
+    committed=0
+    rollback_repair() {
+      local status=$?; trap - EXIT HUP INT TERM
+      if (( ! committed )); then
+        atomic_install "$backup/ops" /usr/local/libexec/nextcloud-pi-ops 0700 && atomic_install "$backup/manifest" /etc/nextcloud-pi/bundle-manifest.tsv 0600 || printf 'Repair rollback failed; stack must remain held\n' >&2
+      else
+        # Fixed boot guard and adopted proof remain authoritative after commit.
+        systemctl stop "$BACKGROUND_JOBS_TIMER" nextcloud.service docker.service || true
+        printf 'Repair incomplete after bundle commit; fixed helper and all data retained; inspect containment before continuing\n' >&2
+      fi
+      rm -rf -- "$root_stage"; exit "$status"
+    }
+    trap rollback_repair EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+    repair_closed
+    atomic_install "$root_stage/files/privileged-helper" /usr/local/libexec/nextcloud-pi-ops 0700
+    atomic_install "$root_stage/bundle-manifest.tsv" /etc/nextcloud-pi/bundle-manifest.tsv 0600
+    SUDO_USER="$user" /usr/local/libexec/nextcloud-pi-ops check >/dev/null
+    committed=1
+    # Child adoption and Docker's ExecStartPre each acquire operations.lock.
+    flock -u 8; exec 8>&-
+    SUDO_USER="$user" /usr/local/libexec/nextcloud-pi-ops upgrade-freeze adopt-snapshot "$freeze_id" "$original" "$observed" "$size" <"$root_stage/original-freeze.json" >/dev/null
+    SUDO_USER="$user" /usr/local/libexec/nextcloud-pi-ops upgrade-freeze status >"$root_stage/freeze-after.tsv"
+    [[ "$(repair_value "$root_stage/freeze-after.tsv" id)" == "$freeze_id" && "$(repair_value "$root_stage/freeze-after.tsv" table_sha256)" == "$original" ]] || die "repair freeze identity differs"
+    repair_closed
+    systemctl reset-failed docker.service
+    systemctl start docker.service
+    SUDO_USER="$user" /usr/local/libexec/nextcloud-pi-ops service start >/dev/null
+    SUDO_USER="$user" /usr/local/libexec/nextcloud-pi-ops upgrade-freeze status >/dev/null
+    for service in "$BACKGROUND_JOBS_TIMER" "$BACKGROUND_JOBS_SERVICE"; do
+      [[ "$(systemctl is-active "$service" 2>/dev/null || true)" =~ ^(inactive|failed)$ ]] || die "scheduler resumed during repair"
+    done
+    repair_lineage >"$root_stage/lineage-after.json"
+    cmp -s "$root_stage/lineage-before.json" "$root_stage/lineage-after.json" || die "protected upgrade lineage changed during repair"
+    trap - EXIT HUP INT TERM; rm -rf -- "$root_stage"
+    printf 'Repaired held freeze and started guarded runtime; ingress and scheduler remain held; no stage acceptance or release. Repair backup: %s\n' "$backup_id"
     ;;
   rollback)
     [[ ! -e "$STATE/upgrade-freeze/current.tsv" && ! -L "$STATE/upgrade-freeze/current.tsv" ]] || die "release upgrade freeze before replacing the boot guard"

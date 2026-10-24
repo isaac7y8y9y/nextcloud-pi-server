@@ -17,6 +17,8 @@ TIERS = {"PR-direct", "PR-transitive", "Operator-only"}
 EXPECTED_PR_COMMANDS = (
     "bash -n scripts/*.sh scripts/lib/*.sh privileged/nextcloud-pi-ops privileged/nextcloud-pi-bundle-installer systemd/nextcloud-pi-validate-active-images",
     "bash scripts/test-privileged-helper.sh",
+    "PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-freeze-policy.py",
+    "PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-held-freeze-repair-manager.py",
     "bash scripts/test-privileged-installer.sh",
     "bash scripts/test-privileged-locks.sh",
     "bash scripts/test-privileged-sudoers.sh",
@@ -174,8 +176,8 @@ def verify_testing_governance() -> None:
         raise AssertionError(f"runner exposes PR-transitive scripts: {sorted(transitive & set(counts))}")
     if operator_only & set(counts):
         raise AssertionError(f"runner exposes operator-only scripts: {sorted(operator_only & set(counts))}")
-    if len(direct) != 48 or len(transitive) != 1 or len(operator_only) != 4:
-        raise AssertionError("inventory tier counts differ from the approved 48/1/4 split")
+    if len(direct) != 50 or len(transitive) != 1 or len(operator_only) != 4:
+        raise AssertionError("inventory tier counts differ from the approved 50/1/4 split")
 
     for value in (
         "scripts/run-tests.sh pr",

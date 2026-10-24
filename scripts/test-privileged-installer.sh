@@ -219,6 +219,93 @@ EOF
   package "$PACKAGE_ROOT/version-mismatch" 0 2
   expect_install_failure "$PACKAGE_ROOT/version-mismatch" 20260910T000000Z-7 TEST_UNUSED 1
 
+  # Replace host observations only; package validation, file replacement,
+  # operations locks, rollback and lineage comparisons execute unchanged.
+  sed -i -e 's|cat /proc/1/comm|printf systemd|' -e "s|/proc/\[0-9\]\*/comm|$TEST_DIR/proc/[0-9]*/comm|" -e "s|/etc/nextcloud-pi/active-images.env|$TEST_LIVE/etc/nextcloud-pi/active-images.env|g" "$TEST_DIR/installer"
+  sudo install -d -m 0700 "$TEST_STATE/upgrade-freeze" "$TEST_STATE/active-record/20260910T000000Z-100" "$TEST_MOUNT/nextcloud_db" "$TEST_DIR/proc/2"
+  printf 'held\n' | sudo tee "$TEST_STATE/upgrade-freeze/current.tsv" >/dev/null
+  printf 'candidate\n' | sudo tee "$TEST_LIVE/etc/nextcloud-pi/active-images.env" >/dev/null
+  printf 'candidate\n' | sudo tee "$TEST_PROJECT/docker-compose.yml" >/dev/null
+  printf 'applied\n' | sudo tee "$TEST_STATE/active-record/20260910T000000Z-100/metadata.tsv" >/dev/null
+  printf '20260910T000000Z-100\n' | sudo tee "$TEST_STATE/active-record-current" >/dev/null
+  sudo install -m 0600 /dev/null "$TEST_STATE/upgrade-freeze/timer-held"
+  sudo chmod 600 "$TEST_STATE/upgrade-freeze/current.tsv" "$TEST_LIVE/etc/nextcloud-pi/active-images.env" "$TEST_PROJECT/docker-compose.yml" "$TEST_STATE/active-record/20260910T000000Z-100/metadata.tsv" "$TEST_STATE/active-record-current"
+  cat >"$TEST_BIN/systemctl" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >>'$TEST_DIR/repair-systemctl.log'
+case "\$1" in
+  is-active) if [[ "\${TEST_REPAIR_ACTIVE:-}" == 1 ]]; then printf 'active\n'; exit 0; fi; printf 'inactive\n'; exit 3;;
+  start) [[ "\$2" == docker.service ]] || exit 1; flock -w 1 '$TEST_LOCK_ROOT/operations.lock' true;;
+  stop|reset-failed) exit 0;;
+  *) exit 2;;
+esac
+EOF
+  chmod 755 "$TEST_BIN/systemctl"
+  cat >"$TEST_BIN/findmnt" <<EOF
+#!/bin/bash
+case "\${*: -1}" in TARGET) printf '%s\n' '$TEST_MOUNT';; FSTYPE) printf 'ext4\n';; UUID) printf '%s\n' '$TEST_UUID';; OPTIONS) printf 'rw,relatime\n';; *) exit 2;; esac
+EOF
+  make_repair() {
+    local directory="$1" source
+    package "$directory" 0
+    cp "$PACKAGE_ROOT/v1/bundle-manifest.tsv" "$directory/bundle-manifest.tsv"
+    cat >"$directory/files/privileged-helper" <<EOF
+#!/bin/bash
+set -eu
+[[ "\${SUDO_USER:-}" == '$TEST_USER' ]] || exit 1
+case "\${1:-}:\${2:-}" in
+  check:) [[ "\${TEST_REPAIR_CHECK_FAIL:-}" != 1 ]];;
+  upgrade-freeze:verify-snapshot) cat >/dev/null; [[ "\${TEST_REPAIR_PROOF_FAIL:-}" != 1 ]];;
+  upgrade-freeze:adopt-snapshot) cat >/dev/null; flock -w 1 '$TEST_LOCK_ROOT/operations.lock' true; printf adopted >'$TEST_DIR/adopted';;
+  upgrade-freeze:status) printf 'state\tactive\nid\t20260910T000000Z-100\ntable_sha256\t%s\n' '$(printf original | sha256sum | awk '{print $1}')';;
+  service:start) [[ -f '$TEST_DIR/adopted' ]]; flock -w 1 '$TEST_LOCK_ROOT/operations.lock' true; [[ "\${TEST_REPAIR_START_FAIL:-}" != 1 ]];;
+  *) exit 2;;
+esac
+EOF
+    printf '# repair package %s\n' "${directory##*/}" >>"$directory/files/privileged-helper"
+    chmod 700 "$directory/files/privileged-helper"
+    source="$(sha256sum "$directory/files/privileged-helper" | awk '{print $1}')"
+    sed -i "s|\(file[[:space:]]privileged-helper[[:space:]].*[[:space:]]\)[0-9a-f]\{64\}$|\1$source|" "$directory/bundle-manifest.tsv"
+    printf original >"$directory/original-freeze.json"
+    printf 'format\theld-freeze-repair-v1\nfreeze_id\t20260910T000000Z-100\noriginal_sha256\t%s\ncurrent_raw_sha256\t%s\nsize\t8\ninstalled_manifest_sha256\t%s\n' "$(sha256sum "$directory/original-freeze.json" | awk '{print $1}')" "$(printf current | sha256sum | awk '{print $1}')" "$(sudo sha256sum "$LIVE_MANIFEST" | awk '{print $1}')" >"$directory/repair-binding.tsv"
+    { printf 'format\tnextcloud-pi-package-manifest-v1\n'; for source in bundle-manifest.tsv privileged-policy.conf nextcloud-pi-automation.sudoers nextcloud-pi-bundle-installer repair-binding.tsv original-freeze.json; do printf 'file\t%s\t%s\n' "$source" "$(sha256sum "$directory/$source" | awk '{print $1}')"; done; } >"$directory/package-manifest.tsv"
+  }
+  run_repair() {
+    local directory="$1" identifier="$2" fault="${3:-TEST_UNUSED}" flag="${4:-0}" expected
+    expected="$(sha256sum "$directory/package-manifest.tsv" | awk '{print $1}')"
+    sudo env TEST_MV_LOG="$TEST_LOG" "$fault=$flag" PATH="$TEST_BIN:/usr/sbin:/usr/bin:/sbin:/bin" bash "$TEST_DIR/installer" repair-held-freeze "$directory" "$identifier" "$expected" "$TEST_USER" "$TEST_HOST" "$TEST_MOUNT" "$TEST_UUID" linux/arm64/v8 "$TEST_PROJECT"
+  }
+  make_repair "$PACKAGE_ROOT/repair"
+  before="$(sudo sha256sum "$LIVE_HELPER")"
+  before_manifest="$(sudo sha256sum "$LIVE_MANIFEST")"
+  for fault in TEST_REPAIR_ACTIVE TEST_REPAIR_PROOF_FAIL TEST_REPAIR_CHECK_FAIL; do
+    : >"$TEST_LOG"
+    if run_repair "$PACKAGE_ROOT/repair" "20260910T000000Z-$((100 + ${#fault}))" "$fault" 1 >/dev/null 2>&1; then printf 'unsafe repair accepted: %s\n' "$fault" >&2; exit 1; fi
+    [[ "$(sudo sha256sum "$LIVE_HELPER")" == "$before" ]]
+    [[ "$(sudo sha256sum "$LIVE_MANIFEST")" == "$before_manifest" ]]
+    awk -v helper="$LIVE_HELPER" -v manifest="$LIVE_MANIFEST" '$0 != helper && $0 != manifest {bad=1} END {exit bad}' "$TEST_LOG"
+  done
+  printf dockerd | sudo tee "$TEST_DIR/proc/2/comm" >/dev/null
+  if run_repair "$PACKAGE_ROOT/repair" 20260910T000000Z-150 >/dev/null 2>&1; then printf 'running daemon accepted\n' >&2; exit 1; fi
+  sudo rm "$TEST_DIR/proc/2/comm"
+  printf '# drift\n' | sudo tee -a "$LIVE_UNIT" >/dev/null
+  if run_repair "$PACKAGE_ROOT/repair" 20260910T000000Z-151 >/dev/null 2>&1; then printf 'unrelated bundle drift accepted\n' >&2; exit 1; fi
+  sudo install -m 0644 "$PACKAGE_ROOT/v1/files/nextcloud-unit" "$LIVE_UNIT"
+  : >"$TEST_LOG"
+  run_repair "$PACKAGE_ROOT/repair" 20260910T000000Z-152 >/dev/null
+  [[ "$(wc -l <"$TEST_LOG")" -eq 2 ]]
+  grep -Fxq "$LIVE_HELPER" "$TEST_LOG"; grep -Fxq "$LIVE_MANIFEST" "$TEST_LOG"
+  ! sudo grep -Eq 'enable|daemon-reload|start nextcloud-background' "$TEST_DIR/repair-systemctl.log"
+  sudo test -f "$TEST_STATE/upgrade-freeze/current.tsv"
+  make_repair "$PACKAGE_ROOT/repair-failed-start"
+  if run_repair "$PACKAGE_ROOT/repair-failed-start" 20260910T000000Z-153 TEST_REPAIR_START_FAIL 1 >/dev/null 2>&1; then printf 'runtime start failure ignored\n' >&2; exit 1; fi
+  sudo cmp -s "$PACKAGE_ROOT/repair-failed-start/files/privileged-helper" "$LIVE_HELPER"
+  sudo grep -Fq 'stop nextcloud-background-jobs.timer nextcloud.service docker.service' "$TEST_DIR/repair-systemctl.log"
+  if run_install "$PACKAGE_ROOT/repair" 20260910T000000Z-154 >/dev/null 2>&1; then printf 'normal install bypassed held freeze\n' >&2; exit 1; fi
+  if sudo env TEST_MV_LOG="$TEST_LOG" PATH="$TEST_BIN:/usr/sbin:/usr/bin:/sbin:/bin" bash "$TEST_DIR/installer" rollback 20260910T000000Z-2 >/dev/null 2>&1; then printf 'normal rollback bypassed held freeze\n' >&2; exit 1; fi
+  sudo rm -r "$TEST_STATE/upgrade-freeze" "$TEST_STATE/active-record" "$TEST_STATE/active-record-current"
+  printf '#!/bin/bash\nexit 0\n' >"$TEST_BIN/systemctl"; chmod 755 "$TEST_BIN/systemctl"
+
   sudo env TEST_MV_LOG="$TEST_LOG" PATH="$TEST_BIN:/usr/sbin:/usr/bin:/sbin:/bin" bash "$TEST_DIR/installer" revoke >/dev/null
   sudo test ! -e "$LIVE_SUDOERS"
   if sudo env TEST_MV_LOG="$TEST_LOG" PATH="$TEST_BIN:/usr/sbin:/usr/bin:/sbin:/bin" bash "$TEST_DIR/installer" remove >/dev/null 2>&1; then
