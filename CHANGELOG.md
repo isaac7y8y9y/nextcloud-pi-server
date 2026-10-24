@@ -2,6 +2,19 @@
 
 This changelog records major engineering phases rather than individual commits.
 
+## 2026-10 — Accepted MariaDB 11.8 baseline
+
+- Promote MariaDB 11.8.9 after isolated clean preparation and guarded acceptance
+  on unchanged Nextcloud 33.0.10, PHP 8.4.26, apps and Caddy.
+- Pass integrity, required work, preserved-file checks and 68 clean candidate
+  conformance checks, then guarded release and both trusted LAN file roundtrips.
+- Preserve original freeze authority through the reviewed reboot repair and
+  continuation, retaining the cold source databases and all recovery material.
+- Verify fresh configuration/runtime/exact-image recovery, empty image reload
+  and a disposable 187-table runtime restore, with protected cleanup and final
+  live health/conformance checks.
+- Update the database image lock and baseline-dependent launcher fixtures.
+
 ## 2026-10 — Preserve held ingress across reboot
 
 - Compare the complete upgrade firewall policy against a protected original
