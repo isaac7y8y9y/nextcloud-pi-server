@@ -1,6 +1,42 @@
 # Issue 26: Nextcloud upgrade plan
 
-October 16 checkpoint: **Nextcloud 33.0.10 / PHP 8.4.26 is accepted and open** after
+October 24 checkpoint: **MariaDB 11.8.9 is accepted and open on unchanged
+Nextcloud 33.0.10 / PHP 8.4.26 and Caddy 2.10.2**. The tracked database tag and
+image ID now match that accepted ARM64 candidate. App versions and enabled/disabled
+groups remain unchanged.
+
+The clean 11.4→11.8 preparation passed application-only import, root-observed
+`mariadb-upgrade`, full inventory comparison, clean restart, all-table checks and
+application login. Fresh source recovery and isolated rehearsal preceded the
+protected ingress/drain proof, held backup and attested directory promotion.
+The candidate passed core/app integrity, required work, preserved files and
+68 conformance checks with no warnings, failures, unknowns or drift. An exact
+historical interrupted-upload test event was classified while its raw evidence
+remained preserved; every unexplained scoped error continued to block.
+
+A reboot exposed a kernel-handle-dependent firewall hash before acceptance.
+The separately reviewed held-freeze repair restored guarded startup while
+preserving original freeze/backup/approval authority. Fresh published-port checks,
+external denial, trusted dual-stack loopback and read-only zero-activity samples
+passed before the same consumed stage continued. No activation or database
+restoration was replayed. Both trusted LAN routes passed file operations after
+guarded release. Maintenance is off, jobs are active, and synthetic credentials
+and the test account were removed. Both preserved source database directories and
+all earlier recovery material remain retained. Fresh poststage configuration and
+runtime backups and exact-source images passed verification, empty-daemon image
+restore, and a disposable runtime restore with 187 tables passing `mariadb-check`.
+All disposable targets were removed. Final live health and 67 baseline conformance
+checks passed with zero warnings, failures, unknowns or drift.
+
+An interim Docker management-API health check timed out during the large disposable
+restore. Trusted HTTPS remained available; the owned transfer was paused/resumed,
+and full health recovered without restarting production. The failed check and
+recovery evidence remain retained privately.
+
+Browser integrations, Office/Talk calls, reachable LAN IPv6, a new successful Pi
+reboot and production full-runtime restoration remain later verification work.
+
+Earlier October 16 checkpoint: **Nextcloud 33.0.10 / PHP 8.4.26 is accepted and open** after
 separate 31→32 and 32→33 stages. Each stage passed fresh recovery and isolated
 rehearsal, its own protected ingress/drain proof and held backup, required work,
 core/app/database integrity and preservation of a pre-upgrade synthetic file.
@@ -57,8 +93,8 @@ including enabled `app_api` and disabled `richdocumentscode`; the new shipped
 resolved through reviewed guarded continuation under the same held freeze;
 the driver now checks the exact code and installed versions before restart.
 
-The forward MariaDB stage, Nextcloud 34, Caddy/host maintenance and final client
-checks remain pending. Refresh compatibility and recovery before each separately
+The forward MariaDB stage is accepted. Nextcloud 34, Caddy/host maintenance and
+final client checks remain pending. Refresh compatibility and recovery before each separately
 authorized stage. The inventory and candidate tables below retain their original
 research dates and must not be treated as current approvals.
 
