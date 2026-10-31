@@ -237,6 +237,13 @@ remain supported. Select other exact tags with `--mariadb-tag`, `--source-tag`
 and `--target-tag`, and use `--source-metadata` and `--target-metadata` for their
 resolver TSV files. A mismatched backup or skipped major is rejected.
 
+If source patch tags have been rebuilt since the accepted checkpoint, supply
+`--source-index` and `--mariadb-index` with the accepted immutable index digests.
+The matching source metadata must describe those exact immutable chains. These
+explicit pins and their resolution mode are bound into the approval; changed
+flags invalidate it. The target always requires freshly queried tag metadata.
+Never substitute a rebuilt source image for the accepted recovery baseline.
+
 The approval binds the local context, Unix endpoint and daemon ID. Docker target
 overrides and remote endpoints are refused. Apply rechecks that identity and
 uses the pinned endpoint for every Docker operation, including failure cleanup.

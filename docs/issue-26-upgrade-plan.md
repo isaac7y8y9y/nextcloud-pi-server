@@ -127,6 +127,10 @@ Nextcloud 34, Caddy, host-maintenance and final-client stages retain their order
    Unix endpoint and daemon identity into the approval, and route every Docker
    operation, including failure cleanup, through that pinned endpoint. Test
    remote-target rejection and endpoint/daemon drift between plan and apply.
+   If accepted source patch tags have been rebuilt, require explicit source and
+   database index pins, verify their immutable registry chains against those
+   pins, and bind them into rehearsal authority. The target must still match
+   fresh tag metadata. Test changed source pins and mismatched immutable chains.
    Preserve private copies, no published ports, internal networking and failure
    retention. This helper proves the core hop only; it must not claim signed-app
    restoration, required-job completion or full live-stage acceptance.

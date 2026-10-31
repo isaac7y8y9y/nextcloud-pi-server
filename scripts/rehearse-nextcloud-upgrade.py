@@ -75,6 +75,8 @@ def options() -> argparse.Namespace:
     parser.add_argument("--mariadb-tag", default=TAGS[0])
     parser.add_argument("--source-tag", default=TAGS[1])
     parser.add_argument("--target-tag", default=TAGS[2])
+    parser.add_argument("--source-index", help="immutable accepted source index when its patch tag was rebuilt")
+    parser.add_argument("--mariadb-index", help="immutable accepted database index when its patch tag was rebuilt")
     parser.add_argument("--output-root", required=True, type=Path)
     return parser.parse_args()
 
@@ -129,7 +131,8 @@ def pinned_daemon(evidence: dict[str, str]):
 
 
 def inputs(backup: Path, metadata: tuple[Path, Path, Path], root: Path,
-           tags: tuple[str, str, str] = TAGS) -> dict[str, str]:
+           tags: tuple[str, str, str] = TAGS,
+           source_pins: tuple[str | None, str | None] = (None, None)) -> dict[str, str]:
     source, target = versions(tags)
     base.safe_root(root)
     base.execute([str(HERE / "verify-runtime-backup.sh"), str(backup)], capture=False, timeout=180)
@@ -149,9 +152,11 @@ def inputs(backup: Path, metadata: tuple[Path, Path, Path], root: Path,
         raise base.RehearsalError("backup is not the selected source Nextcloud version")
     evidence = {"backup_manifest_sha256": base.digest(backup / "manifest.tsv"),
                 "sql_sha256": base.digest(sql), "dbtableprefix": prefix,
-                "source_version": source, "target_version": target, "db_tag": tags[0], **daemon}
-    for key, path, tag in zip(("db", "source", "target"), metadata, tags, strict=True):
-        record, checksum = base.verify_metadata(path, tag)
+                "source_version": source, "target_version": target, "db_tag": tags[0], **daemon,
+                "source_index_pin": source_pins[0] or "", "db_index_pin": source_pins[1] or ""}
+    for key, path, tag, pin in zip(("db", "source", "target"), metadata, tags,
+                                   (source_pins[1], source_pins[0], None), strict=True):
+        record, checksum = base.verify_metadata(path, tag, expected_index=pin)
         evidence[f"{key}_metadata_sha256"] = checksum
         for field in ("index_digest", "manifest_digest", "config_digest"):
             evidence[f"{key}_{field}"] = record[field]
@@ -169,8 +174,9 @@ def authority(identifier: str, created: int, evidence: dict[str, str]) -> dict[s
 
 
 def plan(backup: Path, metadata: tuple[Path, Path, Path], root: Path,
-         tags: tuple[str, str, str] = TAGS) -> None:
-    evidence = inputs(backup, metadata, root, tags)
+         tags: tuple[str, str, str] = TAGS,
+         source_pins: tuple[str | None, str | None] = (None, None)) -> None:
+    evidence = inputs(backup, metadata, root, tags, source_pins)
     now = int(time.time())
     identifier = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now)) + "-" + secrets.token_hex(6)
     record = authority(identifier, now, evidence)
@@ -183,8 +189,9 @@ def plan(backup: Path, metadata: tuple[Path, Path, Path], root: Path,
 
 
 def apply(artifact: Path, backup: Path, metadata: tuple[Path, Path, Path], root: Path,
-          tags: tuple[str, str, str] = TAGS) -> None:
-    evidence = inputs(backup, metadata, root, tags)
+          tags: tuple[str, str, str] = TAGS,
+          source_pins: tuple[str | None, str | None] = (None, None)) -> None:
+    evidence = inputs(backup, metadata, root, tags, source_pins)
     record = json.loads(base.private_file(artifact))
     if not isinstance(record, dict) or set(record) != set(authority("", 0, evidence)) | {"fingerprint"}:
         raise base.RehearsalError("approval schema is invalid")
@@ -343,11 +350,12 @@ def main() -> int:
     args = options()
     metadata = (args.mariadb_metadata, args.source_metadata, args.target_metadata)
     tags = (args.mariadb_tag, args.source_tag, args.target_tag)
+    source_pins = (args.source_index, args.mariadb_index)
     try:
         if args.plan:
-            plan(args.runtime_backup, metadata, args.output_root, tags)
+            plan(args.runtime_backup, metadata, args.output_root, tags, source_pins)
         else:
-            apply(args.apply, args.runtime_backup, metadata, args.output_root, tags)
+            apply(args.apply, args.runtime_backup, metadata, args.output_root, tags, source_pins)
     except (base.RehearsalError, OSError, ValueError, UnicodeError, base.resolver.MetadataError) as exc:
         print(f"Nextcloud rehearsal rejected: {exc}", file=sys.stderr)
         return 1

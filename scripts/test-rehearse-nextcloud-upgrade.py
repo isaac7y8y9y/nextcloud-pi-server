@@ -156,7 +156,7 @@ class NextcloudRehearsalTests(unittest.TestCase):
         with mock.patch.object(app, "inputs", return_value=self.evidence):
             app.plan(self.backup, self.metadata, self.root)
         artifact = next(self.root.glob("approval-*.json"))
-        for key in ("source_version", "target_version", "docker_context", "docker_endpoint", "docker_id"):
+        for key in ("source_version", "target_version", "docker_context", "docker_endpoint", "docker_id", "source_index_pin", "db_index_pin"):
             with mock.patch.object(app, "inputs", return_value=dict(self.evidence, **{key: "changed"})), \
                  mock.patch.object(app, "rehearse") as run:
                 with self.assertRaises(app.base.RehearsalError):
@@ -207,14 +207,17 @@ class NextcloudRehearsalTests(unittest.TestCase):
         fields = {name: "sha256:" + "a" * 64 for name in ("index_digest", "manifest_digest", "config_digest")}
         with mock.patch.object(app.base, "safe_root"), \
              mock.patch.object(app, "local_daemon", return_value={}), \
-             mock.patch.object(app.base, "verify_metadata", return_value=(fields, "a" * 64)):
+             mock.patch.object(app.base, "verify_metadata", return_value=(fields, "a" * 64)) as verify:
             with mock.patch.object(app.base, "execute", return_value="$OC_VersionString = '30.0.17';"):
                 with self.assertRaises(app.base.RehearsalError):
                     app.inputs(self.backup, self.metadata, self.root, tags)
             with mock.patch.object(app.base, "execute", return_value="$OC_VersionString = '33.0.10';"):
-                evidence = app.inputs(self.backup, self.metadata, self.root, tags)
+                pins = ("sha256:" + "b" * 64, "sha256:" + "c" * 64)
+                evidence = app.inputs(self.backup, self.metadata, self.root, tags, pins)
             self.assertEqual((evidence["source_version"], evidence["target_version"], evidence["db_tag"]),
                              ("33.0.10", "34.0.5", "mariadb:11.8.9"))
+            self.assertEqual([call.kwargs["expected_index"] for call in verify.call_args_list], [pins[1], pins[0], None])
+            self.assertEqual((evidence["source_index_pin"], evidence["db_index_pin"]), pins)
 
 
 if __name__ == "__main__":

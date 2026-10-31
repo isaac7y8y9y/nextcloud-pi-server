@@ -8,6 +8,8 @@ This changelog records major engineering phases rather than individual commits.
   core rehearsal, preserving the original 30-to-31 CLI.
 - Bind local Docker context, Unix endpoint and daemon identity to single-use
   authority; pin all rehearsal/cleanup commands and stop only owned containers.
+- Permit explicitly pinned immutable source indexes when accepted patch tags
+  have been rebuilt, while retaining fresh target-tag verification.
 - Refresh procedure status without claiming NC34 deployment, full signed-app
   rehearsal or production full-runtime restoration.
 
