@@ -102,6 +102,57 @@ Proposed 2026-09-23 for [issue #26](https://github.com/isaac7y8y9y/nextcloud-pi-
 
 ## Baseline and target
 
+### October 31 preparation plan for the remaining stages
+
+This preparation continues [issue #26](https://github.com/isaac7y8y9y/nextcloud-pi-server/issues/26)
+from the accepted Nextcloud 33.0.10 / PHP 8.4.26 / MariaDB 11.8.9 /
+Caddy 2.10.2 checkpoint. It does not advance the deployed baseline. The separate
+Nextcloud 34, Caddy, host-maintenance and final-client stages retain their order.
+
+1. Refresh read-only health, conformance, app groups, image/store identities,
+   mount/space, database settings, scheduler, clock and protected lifecycle
+   evidence. Store deployment-specific evidence outside Git. An unavailable
+   administrator-only audit is an unresolved gate, not a successful check.
+2. Refresh official source/target maintenance releases, Nextcloud 34 requirements,
+   Docker ARM64 metadata, actual image PHP and exact signed app candidates.
+   Nextcloud 34.0.5 is a research candidate; verify its immutable identity and all
+   compatibility gates before selecting it. Retain MariaDB 11.8.9 for this
+   application stage unless new reviewed evidence requires otherwise.
+3. Extend `scripts/rehearse-nextcloud-upgrade.py` and its tests with explicitly
+   bound exact source/target/database tags and source/target metadata options,
+   preserving the original 30-to-31 CLI. Reject skipped majors and mismatched
+   backup versions. Bind the selected versions into single-use rehearsal
+   authority and verify them on both sides of the isolated core migration.
+   Reject Docker target overrides and remote endpoints; bind the local context,
+   Unix endpoint and daemon identity into the approval, and route every Docker
+   operation, including failure cleanup, through that pinned endpoint. Test
+   remote-target rejection and endpoint/daemon drift between plan and apply.
+   Preserve private copies, no published ports, internal networking and failure
+   retention. This helper proves the core hop only; it must not claim signed-app
+   restoration, required-job completion or full live-stage acceptance.
+4. Prepare the complete stage-specific rehearsal using the retained reviewed
+   application/job/ownership checks where applicable. Bind fresh verified source
+   backups, exact images, signed compatible app packages and preserved app groups.
+   Prove core/app/database integrity, required jobs, scoped logs, preservation of
+   pre-upgrade files, WebDAV and owned-resource cleanup. Review any new executable
+   adapter before use; historical scripts and approvals must never be replayed.
+5. Reconcile obsolete pre-rollout procedure wording with the dated accepted
+   checkpoints, while preserving the unproved production-restore, browser,
+   Office/Talk, reachable-IPv6 and new-reboot limits. Refresh private handoff/state
+   in the task worktree with explicit observation dates and historical labels.
+   Retain unrelated worktrees and all recovery material.
+6. Run focused behavioral tests, the canonical PR suite, Linux privileged CI,
+   publication-safety checks and the required engineering/plan-conformance
+   reviews. Publish a preparation PR without changing the production image lock
+   or Compose baseline. Required machinery must merge before live installation.
+7. Only after fresh recovery and full rehearsal pass, present the exact live
+   application stage with its new freeze/drain/held backup, fetch/activation,
+   separate acceptance, guarded release, client tests and recovery boundaries.
+   Caddy and host maintenance need their own refreshed plans and stages. Never
+   restore historical material automatically over accepted writes.
+
+The September target tables below are retained research, not current approvals.
+
 The September 23 read-only inventory found Debian 13 ARM64/v8, kernel 6.12.62+rpt-rpi-2712, Docker Engine 29.2.1, Compose 5.0.2, containerd.io 2.2.1, Nextcloud 30.0.17/PHP 8.3.28, MariaDB server 11.8.6, and Caddy 2.10.2. Nextcloud is out of maintenance mode with no database upgrade pending. The protected active-image record is in source mode and the running tags/IDs match the tracked lock. The DB has READ-COMMITTED isolation, ROW binary logging, and 169 Dynamic-format InnoDB tables. The storage mount is ext4 with about 209 GB available. Container IDs were inspected but omitted because they are ephemeral; bind them in each protected stage record. September 17 backups are stale for live use.
 
 | Component | Proposed final target | Rationale |

@@ -2,6 +2,15 @@
 
 This changelog records major engineering phases rather than individual commits.
 
+## 2026-10 — Adjacent core rehearsal preparation
+
+- Allow exact source, target and database tags for a single adjacent Nextcloud
+  core rehearsal, preserving the original 30-to-31 CLI.
+- Bind local Docker context, Unix endpoint and daemon identity to single-use
+  authority; pin all rehearsal/cleanup commands and stop only owned containers.
+- Refresh procedure status without claiming NC34 deployment, full signed-app
+  rehearsal or production full-runtime restoration.
+
 ## 2026-10 — Accepted MariaDB 11.8 baseline
 
 - Promote MariaDB 11.8.9 after isolated clean preparation and guarded acceptance

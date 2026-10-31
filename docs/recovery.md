@@ -29,7 +29,7 @@ held backup after writes have reopened. See the
 Recover only from a verified protected artifact bound to the configured target.
 Begin with the read-only validation mode and stop at every stated human approval
 pause. A human approval pause is not a generated approval artifact: deployment,
-image import, and the draft live-runtime restore and activation drivers generate expiring,
+image import, and the live-runtime restore and activation drivers generate expiring,
 single-use authorization files for their separate operations.
 
 Treat all backups, image archives, attestations, disposable extraction paths,
@@ -125,12 +125,13 @@ scripts/test-runtime-recovery.sh --cleanup "$RECOVERY_TEST_ID"
 Success prints that the disposable recovery-test targets are absent. Never
 construct a different path or remove recovery targets manually.
 
-This drill remains the only *live-tested* runtime restore automation. Draft PR
-#37 also contains a planned, single-use approved live-restore driver described
-below. That driver is not yet a production operator procedure: its failure
-paths have local tests, but it and the ingress freeze have not been proved on
-the Pi's actual network path or passed the required code/PR reviews. A passed
-disposable drill alone does not authorize a live restore.
+This drill proves restoration into disposable targets. The merged, single-use
+approved live-restore driver below is not yet a production operator procedure:
+its failure paths have repository tests, but production full-runtime restoration
+remains unproved. The ingress freeze and activation have separate live evidence
+in the [accepted upgrade checkpoints](issue-26-upgrade-plan.md); that evidence
+does not prove a production restore. A passed disposable drill alone does not
+authorize a live restore.
 
 The helper derives every disposable recovery path from that ID beneath the
 policy-bound storage mount. It validates the mount and UUID again before each
@@ -138,7 +139,7 @@ creation, restoration, or recursive cleanup; never substitute a path manually.
 
 ## Draft full-runtime restore after an upgrade boundary
 
-The separate draft `scripts/activate-image-upgrade.py` stages exactly one
+The separate `scripts/activate-image-upgrade.py` stages exactly one
 fetched, verified image under the active ingress freeze. It accepts the same
 candidate, source-rendered baseline, configuration backup, held runtime
 backup, and prior image-recovery directories as the restore driver. Its
@@ -164,15 +165,16 @@ the runtime boundary and candidate configuration writes, then restores the
 exact prior Compose and active record, and
 leaves ingress frozen. It is retryable after interruption and refuses any
 stage that crossed the runtime boundary.
-The draft database path prepares a clean 11.4 directory from the held SQL
+The initial database path prepares a clean 11.4 directory from the held SQL
 under a separate approval, removes the old containers, records the full
 recovery boundary, and promotes that directory before candidate startup.
 The original 11.8 directory is preserved. The root startup guard rejects
 partial switches, and `--resume-db` continues a consumed cutover approval.
-Synthetic fault, Linux directory, and isolated Docker-daemon tests now cover
-the core cutover and recovery boundaries. The remaining CI, engineering/PR
-reviews, and measured Pi proof in the
-[cutover design](issue-26-mariadb-cutover-design.md) still gate live use.
+Synthetic fault, Linux directory and isolated Docker-daemon tests cover
+the core cutover and recovery boundaries. The accepted initial and forward
+database stages are recorded in the [upgrade plan](issue-26-upgrade-plan.md).
+Each later operation retains the fresh recovery, review and measured proof
+gates in the [cutover design](issue-26-mariadb-cutover-design.md).
 
 After separate application/migration, use `--maintenance-off` with the consumed
 `--stage-approval` and the same five directories. This stage-bound action
@@ -189,12 +191,12 @@ release. If staging fails before the root boundary, the driver attempts only
 the approved pre-start configuration rollback and verifies it. At or after an
 ambiguous boundary, never use config-only rollback: preserve the freeze and
 use the full-runtime restore below or a separately approved forward repair.
-This driver is item-4 code under local test, **not a live Pi upgrade procedure**.
-The real ingress/drain path, disposable rehearsal, reviews, and item-5 approval
-remain outstanding.
+The activation driver is one component of a live stage, rather than a complete
+upgrade procedure. Fresh ingress/drain proof, complete isolated rehearsal,
+required reviews and the exact stage's approval remain prerequisites.
 
-`scripts/restore-live-runtime.py` is an item-4 implementation under test, not
-yet an item-5 production instruction. It requires a root-owned upgrade stage
+`scripts/restore-live-runtime.py` has repository failure-path tests but no
+established production full-runtime restoration. It requires a root-owned upgrade stage
 already at `runtime-may-have-changed`, its active-record
 transaction, an active ingress freeze, a matching `runtime-backup-v2` held at
 that freeze, verified prior image recovery, a source-rendered baseline, and a

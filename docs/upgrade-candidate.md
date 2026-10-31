@@ -1,9 +1,10 @@
 # Image upgrade candidate preparation
 
-The [October 15 MariaDB stage result](issue-26-mariadb-stage-result.md) records
-the first completed live clean-database cutover. Historical development and
-rehearsal checkpoints below are superseded only by that dated evidence; later
-stages retain their separate operational gates.
+The [accepted checkpoints](issue-26-upgrade-plan.md) record the initial clean
+database cutover, separate Nextcloud upgrades through 33, and the accepted
+MariaDB 11.8.9 forward stage. The [October 15 result](issue-26-mariadb-stage-result.md)
+retains the first cutover's evidence. Each later stage requires fresh evidence
+and its own operational gates; completed approvals are historical.
 
 
 Upgrade fetch and full-runtime recovery require a v2 exact-source image archive
@@ -13,7 +14,7 @@ Follow the [exact-source archive procedure](recovery.md) before staging an
 upgrade; the legacy platform archive does not satisfy this gate.
 
 
-This is the first, read-only part of [issue #26's upgrade plan](issue-26-upgrade-plan.md).
+Candidate preparation is the read-only part of [issue #26's upgrade plan](issue-26-upgrade-plan.md).
 It does not authorize a pull, container replacement, database migration, or a
 Pi change. The active production Compose and image lock remain unchanged.
 
@@ -54,12 +55,13 @@ options, verification is self-consistency only and is insufficient for an
 upgrade approval. This check does not re-query the registry or assert that a
 running Pi uses the candidate.
 
-The metadata record is not an approval artifact. The draft fetch, activation,
-and restore transactions below bind registry identity, Pi pre-state, and a
-fresh recovery point, but are not reviewed or proved on the Pi's live network
-path. These candidate files remain for offline preparation and tests only.
+The metadata record is not an approval artifact. The fetch and activation
+transactions below bind registry identity, Pi pre-state and a fresh recovery
+point, and have been used in the dated accepted checkpoints. That evidence
+does not authorize another stage. Production full-runtime restoration remains
+unproved; disposable restore checks establish only their documented scope.
 
-`scripts/fetch-image-upgrade.sh` is an in-progress, narrower transaction for
+`scripts/fetch-image-upgrade.sh` is a separate transaction for
 retrieving **one** image without activating it. Its `--plan` validates the
 source-bound candidate, refreshes registry metadata, checks a fresh config
 backup, a held runtime backup, attested prior-image recovery, the Pi's active
@@ -76,22 +78,21 @@ approval cannot be replayed; a pending or failed fetch prevents freeze release
 until recovery is resolved. It does not
 retag an image, replace Compose, start a target container, change the protected
 record, or release the freeze. A failed pull retains the freeze and fetched
-image for diagnosis. This is **not** an operational upgrade procedure until
-measured ingress/drain proof, disposable integration, and code/PR review are
-completed.
+image for diagnosis. Before each live stage, require fresh measured ingress/drain
+proof, successful isolated rehearsal and the applicable code/PR reviews.
 
 The root-owned dispatcher now also has an `upgrade-stage` state marker. It
 consumes one completed fetch and a second short-lived stage approval bound to
 the freeze, source and candidate record/Compose hashes, target tag, and loaded
 ID. `boundary` must be recorded **before** a target container can be started;
 afterward, the marker rejects pre-start abort and prevents freeze release
-until the candidate is accepted. A draft approval-bound full-restore driver
-exists for failures after that boundary, but is not live-proved or reviewed.
+until the candidate is accepted. An approval-bound full-restore driver exists
+for failures after that boundary; production restoration remains unproved.
 `abort` is
 limited to the prepared, pre-start phase and requires the original record and
 Compose to be back in place. `accept` checks the candidate configuration,
 running image IDs, service, and maintenance state while ingress remains
-blocked. The root commands are safety primitives; the separate draft
+blocked. The root commands are safety primitives; the separate
 `scripts/activate-image-upgrade.py` driver uses them to tag the exact fetched
 image, install the candidate record and Compose, mark the boundary before
 restart, and pause for a second health-checked acceptance approval. It leaves
@@ -134,7 +135,7 @@ claims a protected `aborting` phase, which excludes the runtime boundary and
 candidate record/Compose writes. An interrupted abort can resume from that
 phase; startup and ingress release remain blocked until the source configuration
 is verified and the stage is `aborted`.
-For the initial MariaDB 11.8→11.4 stage, the driver now has a draft
+For the initial MariaDB 11.8→11.4 stage, the driver has a separate
 `--plan-prepare-db`/`--prepare-db`/`--resume-prepare-db` sequence. It binds a
 private source inventory and restricted credentials to the held SQL, imports
 into an isolated directory, and attests the stopped target database. A later
@@ -142,11 +143,11 @@ into an isolated directory, and attests the stopped target database. A later
 `--prepare-approval`; `--resume-db` uses the consumed stage approval. The root
 journal removes the old stack containers before moving directories, and the
 launcher blocks startup until configuration and the promoted directory agree.
-`--abort-db` applies only before the directory switch. The cutover driver is
-implementation work with synthetic fault, Linux directory, and isolated
-Docker-daemon tests; it still requires the remaining gates in the
-[reviewed design](issue-26-mariadb-cutover-design.md) and is not a Pi upgrade
-instruction. An interrupted approval-file replacement may be resumed only
+`--abort-db` applies only before the directory switch. The cutover driver's
+completed live evidence is recorded in the accepted checkpoints; its commands
+remain components of the [reviewed design](issue-26-mariadb-cutover-design.md),
+not a standalone authorization for another migration.
+An interrupted approval-file replacement may be resumed only
 when its matching protected single-use marker was already written; an unused
 expired approval remains invalid. For app and Caddy stages, a distinct `--maintenance-off`
 action bound to the consumed stage approval checks the running candidate and
@@ -160,30 +161,30 @@ paused background-job timer against the private candidate. Ordinary
 source-lock conformance remains the post-merge baseline check; it is not a
 substitute for this candidate-bound gate.
 
-## In-progress protected backup boundary
+## Protected backup boundary
 
 The root-owned dispatcher has a transaction-ID-bound `upgrade-freeze`
 check/status/activate/release lifecycle. Its nftables `inet` prerouting rule
-is intended to block host-directed Caddy traffic before Docker destination
+blocks host-directed Caddy traffic before Docker destination
 NAT while retaining loopback checks. Activation pauses the background-job
 timer and enables maintenance mode; interruption leaves that state for an
 operator to resolve. Release requires maintenance mode to be off and restores
 the timer's prior active state. The dispatcher fixture tests its basic state
-transitions and replay denial, but a separate LAN-client test on the deployed
-network backend is still required to prove both IPv4/IPv6 and old/new-flow
-denial. No live Pi firewall change has been made for this implementation.
+transitions and replay denial. The accepted stages include measured deployed
+ingress proof; repeat the separate LAN-client tests before each new stage.
+Record unavailable LAN IPv6 explicitly rather than claiming it was tested.
 
-The draft `upgrade-freeze quiescence` check fails closed unless established
+The `upgrade-freeze quiescence` check fails closed unless established
 app/Caddy TCP sockets and active InnoDB transactions are zero in two samples
 while the freeze, paused timer, and maintenance mode remain in place. Held
-backups now require that protected check. The draft `maintenance-off` action
+backups require that protected check. The `maintenance-off` action
 requires resolved image transactions and repeats quiescence before turning
 maintenance off, while keeping ingress blocked. Neither command establishes
 that the live LAN rule works; the [ingress proof plan](upgrade-ingress-proof.md)
-and a separately approved release still gate production use. The draft
+and a separately approved release still gate each live stage. The
 `scripts/release-upgrade-freeze.py` driver now binds live configuration,
 container identities, freeze hash, and prior timer state to a private
-single-use approval; it has offline tests only. It refuses release until the
+single-use approval. It refuses release until the
 tracked source image lock agrees with the active record. It does not supply
 LAN proof. The Docker boot guard restores a held firewall rule before Docker
 starts and blocks startup during a partial full-runtime promotion. The
@@ -191,19 +192,18 @@ timer's `timer-held` condition keeps it paused until protected release removes
 that hold; the job service separately rejects work while `current.tsv` exists.
 The approval-bound restore driver has a consumed-approval `--resume` path for that
 promotion and for resetting a pre-promotion prepared stage before restaging,
-plus follow-on configuration/health checks. Neither behavior has
-been proved on the Pi.
+plus follow-on configuration/health checks. Production full-runtime restoration
+and a new successful Pi reboot remain unestablished by the accepted checkpoints.
 
 `backup-runtime-state.sh --check-held <id>` and `--apply-held <id>` require
 that protected freeze. The apply mode writes a `runtime-backup-v2` manifest
 bound to the freeze ID and firewall hash, and it deliberately leaves the
 freeze, maintenance mode, and timer unchanged even when capture fails. The
 existing ordinary backup remains `runtime-backup-v1` and still reopens service
-after its capture. The held mode is not yet a complete approved upgrade
-transaction: measured in-flight-write drain, external denial proof, disposable Pi
-rehearsal, and reviews remain hard gates. See the
-[ingress proof plan](upgrade-ingress-proof.md). Do not use it as a live upgrade
-procedure until those gates pass.
+after its capture. Held backup is one component of an approved stage, not the
+whole transaction. Fresh in-flight-write drain, external denial proof, isolated
+rehearsal and reviews remain hard gates. See the
+[ingress proof plan](upgrade-ingress-proof.md).
 
 ## Isolated MariaDB rehearsal
 
@@ -229,16 +229,24 @@ the backup used. Application behavior is tested separately below. A September
 backup cannot substitute for a new quiesced item-5 recovery point; live
 cutover and restoration remain hard gates.
 
-`scripts/rehearse-nextcloud-upgrade.py` adds a separate, single-use approved
-application rehearsal. Its plan verifies the private backup and exact ARM64
-metadata for MariaDB 11.4.13 and Nextcloud 30.0.17/31.0.14. Apply pulls
-those exact digests into the **local** Docker daemon, extracts the backed-up
-Nextcloud tree into a new Docker volume, imports SQL into a clean 11.4 bind
+`scripts/rehearse-nextcloud-upgrade.py` provides a separate, single-use approved
+core rehearsal for one adjacent major hop. Its plan verifies the private backup
+and exact ARM64 metadata for the explicitly selected database/source/target tags.
+The original 30.0.17/31.0.14 and MariaDB 11.4.13 defaults and metadata flags
+remain supported. Select other exact tags with `--mariadb-tag`, `--source-tag`
+and `--target-tag`, and use `--source-metadata` and `--target-metadata` for their
+resolver TSV files. A mismatched backup or skipped major is rejected.
+
+The approval binds the local context, Unix endpoint and daemon ID. Docker target
+overrides and remote endpoints are refused. Apply rechecks that identity and
+uses the pinned endpoint for every Docker operation, including failure cleanup.
+Apply pulls only the bound digests, extracts the backed-up
+Nextcloud tree into a new Docker volume, imports SQL into a clean database bind
 directory, and runs the applications on an internal-only Docker network with
 no published ports. It rewrites only the disposable `config.php` to use the
 isolated database and loopback HTTP. It checks `occ status`, creates a
 synthetic user, and uploads/downloads synthetic files through local WebDAV
-before and after the official-image 30→31 startup migration. Database checks
+before and after the official-image adjacent-major startup migration. Database checks
 use the table prefix bound in the verified backup; older backups without this
 field require a fresh capture before this rehearsal. The six known
 enabled custom apps are disabled before the core hop, matching the reviewed
@@ -247,11 +255,13 @@ database directory; failure stops named containers and retains private state
 for diagnosis. Private user data and credentials never enter Git or command
 output.
 
-The September 25 rehearsal passed against the September 17 backup. It is
-evidence for that backup and those three image digests, **not** a substitute
-for a fresh item-5 quiesced recovery point, live mount and ingress proof,
-approved activation, or live full-runtime restore. It does not test the later
-31→34 hops or custom-app re-enablement.
+The September 25 rehearsal remains historical evidence for its September 17
+backup and three image digests. The generalized helper's repository tests do
+not establish a successful NC33→34 runtime rehearsal. A fresh core rehearsal
+also does not establish custom-app restoration, required-job completion, a
+quiesced recovery point, live ingress proof, approved activation or production
+full-runtime restoration. Require the complete stage-specific rehearsal and
+live gates separately.
 
 ## Image-store repair and remaining recovery gate
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Rehearse Nextcloud 30 to 31 against a private clean MariaDB 11.4 copy."""
+"""Rehearse one adjacent Nextcloud core upgrade against a private database copy."""
 
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import secrets
@@ -23,6 +25,7 @@ base = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(base)
 
 TAGS = ("mariadb:11.4.13", "nextcloud:30.0.17-apache", "nextcloud:31.0.14-apache")
+DOCKER_OVERRIDES = ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH")
 APP_STATUS = re.compile(r"(?m)^\s*-\s*versionstring:\s*(\S+)\s*$")
 MAINTENANCE = re.compile(r"(?m)^\s*-\s*maintenance:\s*false\s*$")
 NO_DB_UPGRADE = re.compile(r"(?m)^\s*-\s*needsDbUpgrade:\s*false\s*$")
@@ -67,13 +70,67 @@ def options() -> argparse.Namespace:
     mode.add_argument("--apply", type=Path, metavar="APPROVAL")
     parser.add_argument("--runtime-backup", required=True, type=Path)
     parser.add_argument("--mariadb-metadata", required=True, type=Path)
-    parser.add_argument("--nextcloud-30-metadata", required=True, type=Path)
-    parser.add_argument("--nextcloud-31-metadata", required=True, type=Path)
+    parser.add_argument("--source-metadata", "--nextcloud-30-metadata", required=True, type=Path)
+    parser.add_argument("--target-metadata", "--nextcloud-31-metadata", required=True, type=Path)
+    parser.add_argument("--mariadb-tag", default=TAGS[0])
+    parser.add_argument("--source-tag", default=TAGS[1])
+    parser.add_argument("--target-tag", default=TAGS[2])
     parser.add_argument("--output-root", required=True, type=Path)
     return parser.parse_args()
 
 
-def inputs(backup: Path, metadata: tuple[Path, Path, Path], root: Path) -> dict[str, str]:
+def versions(tags: tuple[str, str, str]) -> tuple[str, str]:
+    for tag, image in zip(tags, ("mariadb", "nextcloud", "nextcloud"), strict=True):
+        if base.resolver.validate_tag(tag) != image:
+            raise base.RehearsalError("rehearsal image type differs")
+    source, target = (tag.split(":", 1)[1].removesuffix("-apache") for tag in tags[1:])
+    if int(target.split(".")[0]) != int(source.split(".")[0]) + 1:
+        raise base.RehearsalError("rehearsal requires one adjacent major upgrade")
+    return source, target
+
+
+def reject_docker_overrides() -> None:
+    if any(os.environ.get(key) for key in DOCKER_OVERRIDES):
+        raise base.RehearsalError("Docker target overrides are not allowed")
+
+
+def local_daemon() -> dict[str, str]:
+    reject_docker_overrides()
+    context = base.execute(["docker", "context", "show"])
+    endpoint = base.execute(["docker", "context", "inspect", context, "--format", "{{.Endpoints.docker.Host}}"])
+    if not endpoint.startswith("unix:///"):
+        raise base.RehearsalError("rehearsal requires a local Unix Docker endpoint")
+    prefix = ["docker", "--host", endpoint]
+    if base.execute(prefix + ["info", "--format", "{{.OSType}}/{{.Architecture}}"], timeout=20) not in {"linux/aarch64", "linux/arm64"}:
+        raise base.RehearsalError("local Docker daemon is not ARM64 Linux")
+    identifier = base.execute(prefix + ["info", "--format", "{{.ID}}"], timeout=20)
+    if not identifier:
+        raise base.RehearsalError("local Docker daemon identity is unavailable")
+    return {"docker_context": context, "docker_endpoint": endpoint, "docker_id": identifier}
+
+
+@contextmanager
+def pinned_daemon(evidence: dict[str, str]):
+    """Keep shared database helpers and cleanup on the same approved daemon."""
+    previous = base.docker
+
+    def command(*args: str, **kwargs: object) -> str:
+        reject_docker_overrides()
+        prefix = ["docker", "--host", evidence["docker_endpoint"]]
+        if base.execute(prefix + ["info", "--format", "{{.ID}}"], timeout=20) != evidence["docker_id"]:
+            raise base.RehearsalError("approved local Docker daemon changed")
+        return base.execute(prefix + list(args), **kwargs)
+
+    base.docker = command
+    try:
+        yield
+    finally:
+        base.docker = previous
+
+
+def inputs(backup: Path, metadata: tuple[Path, Path, Path], root: Path,
+           tags: tuple[str, str, str] = TAGS) -> dict[str, str]:
+    source, target = versions(tags)
     base.safe_root(root)
     base.execute([str(HERE / "verify-runtime-backup.sh"), str(backup)], capture=False, timeout=180)
     manifest = base.private_file(backup / "manifest.tsv")
@@ -82,18 +139,18 @@ def inputs(backup: Path, metadata: tuple[Path, Path, Path], root: Path) -> dict[
     prefix = base.manifest_value(manifest, "dbtableprefix")
     if not re.fullmatch(r"[A-Za-z0-9_]+", prefix):
         raise base.RehearsalError("backup database table prefix is invalid")
-    if base.execute(["docker", "info", "--format", "{{.OSType}}/{{.Architecture}}"], timeout=20) not in {"linux/aarch64", "linux/arm64"}:
-        raise base.RehearsalError("local Docker daemon is not ARM64 Linux")
+    daemon = local_daemon()
     archive = backup / "nextcloud" / "nextcloud.tar"
     sql = backup / "database" / "nextcloud.sql"
     if not archive.is_file() or archive.is_symlink() or not sql.is_file() or sql.is_symlink():
         raise base.RehearsalError("runtime backup lacks application files or SQL")
     old_version = base.execute(["tar", "-xOf", str(archive), "nextcloud/version.php"], timeout=180)
-    if not re.search(r"(?m)^\$OC_VersionString\s*=\s*'30\.0\.17';$", old_version):
-        raise base.RehearsalError("backup is not the expected Nextcloud 30.0.17 baseline")
+    if not re.search(r"(?m)^\$OC_VersionString\s*=\s*'" + re.escape(source) + r"';$", old_version):
+        raise base.RehearsalError("backup is not the selected source Nextcloud version")
     evidence = {"backup_manifest_sha256": base.digest(backup / "manifest.tsv"),
-                "sql_sha256": base.digest(sql), "dbtableprefix": prefix}
-    for key, path, tag in zip(("db", "app30", "app31"), metadata, TAGS, strict=True):
+                "sql_sha256": base.digest(sql), "dbtableprefix": prefix,
+                "source_version": source, "target_version": target, "db_tag": tags[0], **daemon}
+    for key, path, tag in zip(("db", "source", "target"), metadata, tags, strict=True):
         record, checksum = base.verify_metadata(path, tag)
         evidence[f"{key}_metadata_sha256"] = checksum
         for field in ("index_digest", "manifest_digest", "config_digest"):
@@ -103,16 +160,17 @@ def inputs(backup: Path, metadata: tuple[Path, Path, Path], root: Path) -> dict[
 
 def authority(identifier: str, created: int, evidence: dict[str, str]) -> dict[str, str]:
     return {
-        "format": "nextcloud-30-31-rehearsal-v1", "state": "unused", "id": identifier,
+        "format": "nextcloud-core-rehearsal-v2", "state": "unused", "id": identifier,
         "created": str(created), "expires": str(created + base.APPROVAL_SECONDS),
-        "actions": "pull-three-digests,private-copy,clean-db-import,occ-30,webdav-30,core-31,occ-31,webdav-31,cleanup",
-        "exclusions": "pi,live-runtime,host-ports,external-network,image-prune,tag-overwrite",
+        "actions": "pull-three-digests,private-copy,clean-db-import,source-health-webdav,adjacent-core-upgrade,target-health-webdav,cleanup",
+        "exclusions": "pi,live-runtime,host-ports,external-network,image-prune,tag-overwrite,app-restoration,full-stage-acceptance",
         **evidence,
     }
 
 
-def plan(backup: Path, metadata: tuple[Path, Path, Path], root: Path) -> None:
-    evidence = inputs(backup, metadata, root)
+def plan(backup: Path, metadata: tuple[Path, Path, Path], root: Path,
+         tags: tuple[str, str, str] = TAGS) -> None:
+    evidence = inputs(backup, metadata, root, tags)
     now = int(time.time())
     identifier = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now)) + "-" + secrets.token_hex(6)
     record = authority(identifier, now, evidence)
@@ -120,12 +178,13 @@ def plan(backup: Path, metadata: tuple[Path, Path, Path], root: Path) -> None:
     root.mkdir(mode=0o700, exist_ok=True)
     artifact = root / f"approval-{identifier}.json"
     base.write_private(artifact, (json.dumps(record, sort_keys=True) + "\n").encode())
-    print("Isolated Nextcloud 30→31 rehearsal planned; no Pi or host port will be used")
+    print("Isolated adjacent Nextcloud core rehearsal planned; no Pi or host port will be used")
     print(f"Approval artifact: {artifact}")
 
 
-def apply(artifact: Path, backup: Path, metadata: tuple[Path, Path, Path], root: Path) -> None:
-    evidence = inputs(backup, metadata, root)
+def apply(artifact: Path, backup: Path, metadata: tuple[Path, Path, Path], root: Path,
+          tags: tuple[str, str, str] = TAGS) -> None:
+    evidence = inputs(backup, metadata, root, tags)
     record = json.loads(base.private_file(artifact))
     if not isinstance(record, dict) or set(record) != set(authority("", 0, evidence)) | {"fingerprint"}:
         raise base.RehearsalError("approval schema is invalid")
@@ -145,7 +204,8 @@ def apply(artifact: Path, backup: Path, metadata: tuple[Path, Path, Path], root:
     temporary = root / f".approval-{identifier}.new"
     base.write_private(temporary, (json.dumps(consumed, sort_keys=True) + "\n").encode())
     temporary.replace(artifact)
-    rehearse(identifier, backup, evidence, root)
+    with pinned_daemon(evidence):
+        rehearse(identifier, backup, evidence, root)
 
 
 def inspect_loaded(ref: str, evidence: dict[str, str], key: str) -> None:
@@ -158,9 +218,9 @@ def inspect_loaded(ref: str, evidence: dict[str, str], key: str) -> None:
 
 
 def resource_absent(kind: str, name: str) -> None:
-    result = subprocess.run(["docker", kind, "inspect", name], stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    if result.returncode == 0:
+    field = "{{.Names}}" if kind == "container" else "{{.Name}}"
+    args = ("--all",) if kind == "container" else ()
+    if name in base.docker(kind, "ls", *args, "--format", field).splitlines():
         raise base.RehearsalError("isolated Docker resource already exists")
 
 
@@ -193,10 +253,13 @@ def webdav(name: str, user: str, phase: str, *, put: bool) -> None:
                 user, filename, content, "GET", timeout=90)
 
 
-def stop_if_present(name: str) -> None:
+def stop_if_present(name: str, identifier: str) -> None:
     try:
+        labels = json.loads(base.docker("inspect", "--format", "{{json .Config.Labels}}", name))
+        if not isinstance(labels, dict) or labels.get("nextcloud-pi.rehearsal") != identifier:
+            return
         base.docker("stop", "--time", "30", name, timeout=45)
-    except base.RehearsalError:
+    except (base.RehearsalError, ValueError):
         pass
 
 
@@ -217,11 +280,11 @@ def rehearse(identifier: str, backup: Path, evidence: dict[str, str], root: Path
     names = (db, app30, app31)
     label = f"nextcloud-pi.rehearsal={identifier}"
     refs = {key: f"{image}@{evidence[f'{key}_index_digest']}" for key, image in
-            (("db", "mariadb"), ("app30", "nextcloud"), ("app31", "nextcloud"))}
+            (("db", "mariadb"), ("source", "nextcloud"), ("target", "nextcloud"))}
     try:
         for kind, name in (("volume", volume), ("network", network), *(("container", n) for n in names)):
             resource_absent(kind, name)
-        for key in ("db", "app30", "app31"):
+        for key in ("db", "source", "target"):
             base.docker("pull", "--platform", "linux/arm64/v8", refs[key], timeout=1800)
             inspect_loaded(refs[key], evidence, key)
         base.docker("volume", "create", "--label", label, volume)
@@ -233,18 +296,19 @@ def rehearse(identifier: str, backup: Path, evidence: dict[str, str], root: Path
                     "-C", "/restore", timeout=3600)
         base.docker("run", "--rm", "--pull", "never", "--network", "none", "--env-file", str(db_env),
                     "--mount", f"type=volume,source={volume},target=/var/www/html",
-                    "--entrypoint", "php", refs["app30"], "-r", PHP_CONFIG, timeout=120)
+                    "--entrypoint", "php", refs["source"], "-r", PHP_CONFIG, timeout=120)
         base.docker("run", "-d", "--pull", "never", "--network", network, "--network-alias", "db",
                     "--name", db, "--label", label, "--env-file", str(db_env),
-                    "--mount", f"type=bind,source={data},target=/var/lib/mysql", refs["db"])
+                    "--mount", f"type=bind,source={data},target=/var/lib/mysql", refs["db"],
+                    "--transaction-isolation=READ-COMMITTED", "--binlog-format=ROW")
         base.wait_ready(db)
         base.docker("exec", "-i", db, "sh", "-eu", "-c",
                     'export MYSQL_PWD="$MARIADB_ROOT_PASSWORD"; exec mariadb --protocol=tcp --host=127.0.0.1 -uroot "$MARIADB_DATABASE"',
                     input_file=backup / "database" / "nextcloud.sql", timeout=1800)
         base.check_database(db, evidence["dbtableprefix"])
         base.docker("run", "-d", "--pull", "never", "--network", network, "--name", app30,
-                    "--label", label, "--mount", f"type=volume,source={volume},target=/var/www/html", refs["app30"])
-        status(app30, "30.0.17")
+                    "--label", label, "--mount", f"type=volume,source={volume},target=/var/www/html", refs["source"])
+        status(app30, evidence["source_version"])
         install_auth(app30, auth)
         base.docker("exec", "--user", "www-data", app30, "sh", "-eu", "-c",
                     'export OC_PASS="$(cat /tmp/rehearsal-auth)"; exec php /var/www/html/occ user:add --password-from-env "$1"',
@@ -254,8 +318,8 @@ def rehearse(identifier: str, backup: Path, evidence: dict[str, str], root: Path
             base.docker("exec", "--user", "www-data", app30, "php", "/var/www/html/occ", "app:disable", app, timeout=120)
         base.docker("stop", "--time", "60", app30, timeout=90)
         base.docker("run", "-d", "--pull", "never", "--network", network, "--name", app31,
-                    "--label", label, "--mount", f"type=volume,source={volume},target=/var/www/html", refs["app31"])
-        status(app31, "31.0.14")
+                    "--label", label, "--mount", f"type=volume,source={volume},target=/var/www/html", refs["target"])
+        status(app31, evidence["target_version"])
         install_auth(app31, auth)
         webdav(app31, user, "30", put=False)
         webdav(app31, user, "31", put=True)
@@ -267,22 +331,23 @@ def rehearse(identifier: str, backup: Path, evidence: dict[str, str], root: Path
         base.docker("network", "rm", network)
         base.docker("volume", "rm", volume)
         shutil.rmtree(state)
-    except Exception:
+    except BaseException:
         for name in names:
-            stop_if_present(name)
+            stop_if_present(name, identifier)
         print(f"Nextcloud rehearsal failed; private state and isolated resources retained: {state}", file=sys.stderr)
         raise
-    print("Isolated Nextcloud 30→31 rehearsal passed: occ health and WebDAV file operations on both versions")
+    print("Isolated Nextcloud core rehearsal passed: occ health and WebDAV on both versions; full app/job acceptance remains separate")
 
 
 def main() -> int:
     args = options()
-    metadata = (args.mariadb_metadata, args.nextcloud_30_metadata, args.nextcloud_31_metadata)
+    metadata = (args.mariadb_metadata, args.source_metadata, args.target_metadata)
+    tags = (args.mariadb_tag, args.source_tag, args.target_tag)
     try:
         if args.plan:
-            plan(args.runtime_backup, metadata, args.output_root)
+            plan(args.runtime_backup, metadata, args.output_root, tags)
         else:
-            apply(args.apply, args.runtime_backup, metadata, args.output_root)
+            apply(args.apply, args.runtime_backup, metadata, args.output_root, tags)
     except (base.RehearsalError, OSError, ValueError, UnicodeError, base.resolver.MetadataError) as exc:
         print(f"Nextcloud rehearsal rejected: {exc}", file=sys.stderr)
         return 1
