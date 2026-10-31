@@ -71,7 +71,7 @@ def manifest_value(raw: bytes, key: str) -> str:
     return values[0].decode("utf-8", "strict")
 
 
-def verify_metadata(path: Path, tag: str) -> tuple[dict[str, str], str]:
+def verify_metadata(path: Path, tag: str, *, expected_index: str | None = None) -> tuple[dict[str, str], str]:
     image_name = resolver.validate_tag(tag)
     raw = private_file(path)
     fields = {}
@@ -86,7 +86,10 @@ def verify_metadata(path: Path, tag: str) -> tuple[dict[str, str], str]:
             or fields["platform"] != "linux/arm64/v8"
             or not all(DIGEST.fullmatch(fields[name]) for name in expected if name.endswith("digest"))):
         raise RehearsalError("image metadata is not the selected ARM64 release")
-    index = resolver.registry_raw(tag)
+    if expected_index is not None and (not DIGEST.fullmatch(expected_index) or fields["index_digest"] != expected_index):
+        raise RehearsalError("explicit source index differs from metadata")
+    reference = f"{image_name}@{expected_index}" if expected_index is not None else tag
+    index = resolver.registry_raw(reference)
     if resolver.digest(index) != fields["index_digest"]:
         raise RehearsalError("registry index changed")
     manifest_id = resolver.select_arm64(index)

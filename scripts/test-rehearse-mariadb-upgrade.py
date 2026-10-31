@@ -108,6 +108,32 @@ class RehearsalTests(unittest.TestCase):
                 rehearsal.check_database("db", "cloud_` DROP TABLE")
         self.assertIn("SELECT COUNT(*) FROM `cloud_filecache`", queries)
 
+    def test_metadata_uses_fresh_tag_by_default_or_exact_immutable_source_pin(self) -> None:
+        index = b"reviewed index"
+        digest = rehearsal.resolver.digest(index)
+        manifest = "sha256:" + "b" * 64
+        config = "sha256:" + "c" * 64
+        path = self.metadata[0]
+        record = dict(format="nextcloud-upgrade-image-v1", image="mariadb", tag="mariadb:11.8.9",
+                      platform="linux/arm64/v8", index_digest=digest, manifest_digest=manifest, config_digest=config)
+        path.write_text("".join(f"{key}\t{value}\n" for key, value in record.items()))
+        path.chmod(0o600)
+        for pin, reference in ((None, "mariadb:11.8.9"), (digest, "mariadb@" + digest)):
+            with mock.patch.object(rehearsal.resolver, "registry_raw", side_effect=[index, b"manifest"]) as read, \
+                 mock.patch.object(rehearsal.resolver, "select_arm64", return_value=manifest), \
+                 mock.patch.object(rehearsal.resolver, "image_config", return_value=config):
+                self.assertEqual(rehearsal.verify_metadata(path, record["tag"], expected_index=pin)[0], record)
+                self.assertEqual(read.call_args_list[0].args, (reference,))
+                self.assertEqual(read.call_args_list[1].args, ("mariadb@" + manifest,))
+        for pin in ("invalid", "sha256:" + "d" * 64):
+            with mock.patch.object(rehearsal.resolver, "registry_raw") as read:
+                with self.assertRaises(rehearsal.RehearsalError):
+                    rehearsal.verify_metadata(path, record["tag"], expected_index=pin)
+                read.assert_not_called()
+        with mock.patch.object(rehearsal.resolver, "registry_raw", return_value=b"different index"):
+            with self.assertRaises(rehearsal.RehearsalError):
+                rehearsal.verify_metadata(path, record["tag"], expected_index=digest)
+
 
 if __name__ == "__main__":
     unittest.main()
