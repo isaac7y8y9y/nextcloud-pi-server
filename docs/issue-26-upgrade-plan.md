@@ -102,6 +102,21 @@ Proposed 2026-09-23 for [issue #26](https://github.com/isaac7y8y9y/nextcloud-pi-
 
 ## Baseline and target
 
+### November 4 rehearsal image-store correction
+
+Docker's containerd image store can report the approved multi-platform index as
+the loaded image ID. The core rehearsal must accept that representation only
+when the existing shared image-store classifier proves an explicit containerd
+snapshotter and the image descriptor matches the approved OCI index or Docker
+manifest list. Continue requiring the exact repository digest and ARM64 Linux
+platform. Preserve existing config/manifest ID checks, pinned daemon routing,
+registry-chain verification, single-use authority and owned cleanup.
+
+Add rejection fixtures for unknown or malformed stores, descriptor drift,
+incorrect platform and repository digests. Run focused and canonical PR checks,
+both required reviews and exact-head CI before resuming the isolated rehearsal.
+This correction changes no production image lock or deployed baseline.
+
 ### October 31 preparation plan for the remaining stages
 
 This preparation continues [issue #26](https://github.com/isaac7y8y9y/nextcloud-pi-server/issues/26)
