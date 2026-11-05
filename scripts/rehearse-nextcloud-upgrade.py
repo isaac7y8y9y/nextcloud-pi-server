@@ -16,9 +16,10 @@ import subprocess
 import sys
 import time
 
-
 HERE = Path(__file__).resolve().parent
 sys.dont_write_bytecode = True
+from lib import image_identity
+
 SPEC = importlib.util.spec_from_file_location("mariadb_rehearsal", HERE / "rehearse-mariadb-upgrade.py")
 assert SPEC and SPEC.loader
 base = importlib.util.module_from_spec(SPEC)
@@ -217,11 +218,26 @@ def apply(artifact: Path, backup: Path, metadata: tuple[Path, Path, Path], root:
 
 def inspect_loaded(ref: str, evidence: dict[str, str], key: str) -> None:
     image = json.loads(base.docker("image", "inspect", "--platform", "linux/arm64/v8", "--format", "{{json .}}", ref))
-    if (not isinstance(image, dict) or image.get("Id") not in
-            {evidence[f"{key}_manifest_digest"], evidence[f"{key}_config_digest"]}
-            or image.get("Architecture") != "arm64" or image.get("Os") != "linux"
-            or ref not in image.get("RepoDigests", [])):
+    if (not isinstance(image, dict) or image.get("Architecture") != "arm64" or image.get("Os") != "linux"
+            or not isinstance(image.get("RepoDigests"), list)
+            or any(not isinstance(value, str) for value in image["RepoDigests"])
+            or ref not in image["RepoDigests"]):
         raise base.RehearsalError("loaded image differs from approved ARM64 identity")
+    if image.get("Id") in {evidence[f"{key}_manifest_digest"], evidence[f"{key}_config_digest"]}:
+        return
+    if image.get("Id") == evidence[f"{key}_index_digest"]:
+        try:
+            image_identity.require_store(base.docker("info", "--format",
+                '{"driver":{{json .Driver}},"status":{{json .DriverStatus}}}'), "containerd")
+        except (ValueError, TypeError) as exc:
+            raise base.RehearsalError("index image ID requires the containerd image store") from exc
+        descriptor = image.get("Descriptor")
+        if (isinstance(descriptor, dict) and descriptor.get("digest") == evidence[f"{key}_index_digest"]
+                and descriptor.get("mediaType") in {"application/vnd.oci.image.index.v1+json",
+                                                     "application/vnd.docker.distribution.manifest.list.v2+json"}
+                and image.get("Variant", "") in {"", "v8"}):
+            return
+    raise base.RehearsalError("loaded image differs from approved ARM64 identity")
 
 
 def resource_absent(kind: str, name: str) -> None:

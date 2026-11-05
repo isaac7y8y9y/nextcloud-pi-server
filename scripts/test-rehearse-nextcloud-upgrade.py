@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import json
 import os
 from pathlib import Path
@@ -218,6 +219,54 @@ class NextcloudRehearsalTests(unittest.TestCase):
                              ("33.0.10", "34.0.5", "mariadb:11.8.9"))
             self.assertEqual([call.kwargs["expected_index"] for call in verify.call_args_list], [pins[1], pins[0], None])
             self.assertEqual((evidence["source_index_pin"], evidence["db_index_pin"]), pins)
+
+    def loaded_fixture(self):
+        evidence = {f"target_{key}_digest": "sha256:" + letter * 64 for key, letter in
+                    (("index", "a"), ("manifest", "b"), ("config", "c"))}
+        ref = "nextcloud@" + evidence["target_index_digest"]
+        image = {"Id": evidence["target_index_digest"], "Architecture": "arm64", "Os": "linux", "Variant": "v8",
+                 "RepoDigests": [ref], "Descriptor": {"digest": evidence["target_index_digest"],
+                 "mediaType": "application/vnd.oci.image.index.v1+json"}}
+        store = {"driver": "overlayfs", "status": [["driver-type", "io.containerd.snapshotter.v1"]]}
+        return evidence, ref, image, store
+
+    def test_loaded_config_and_manifest_ids_keep_existing_behavior(self) -> None:
+        evidence, ref, image, _ = self.loaded_fixture()
+        for kind in ("config", "manifest"):
+            image["Id"] = evidence[f"target_{kind}_digest"]
+            image.pop("Descriptor", None)
+            with mock.patch.object(app.base, "docker", return_value=json.dumps(image)) as docker:
+                app.inspect_loaded(ref, evidence, "target")
+                self.assertEqual(docker.call_count, 1)
+
+    def test_loaded_index_requires_explicit_containerd_and_matching_descriptor(self) -> None:
+        evidence, ref, image, store = self.loaded_fixture()
+        for media_type in ("application/vnd.oci.image.index.v1+json",
+                           "application/vnd.docker.distribution.manifest.list.v2+json"):
+            image["Descriptor"]["mediaType"] = media_type
+            with mock.patch.object(app.base, "docker", side_effect=[json.dumps(image), json.dumps(store)]) as docker:
+                app.inspect_loaded(ref, evidence, "target")
+                self.assertEqual(docker.call_args_list[1].args[:2], ("info", "--format"))
+
+    def test_loaded_index_rejects_store_descriptor_and_platform_drift(self) -> None:
+        evidence, ref, image, store = self.loaded_fixture()
+        stores = [{"driver": "overlay2", "status": []}, {"driver": "overlayfs", "status": []},
+                  {"driver": "overlayfs", "status": [["driver-type", "future"]]},
+                  {"driver": "overlayfs", "status": store["status"] * 2}, {}, [], None]
+        for wrong in stores:
+            with self.subTest(store=wrong), mock.patch.object(app.base, "docker", side_effect=[json.dumps(image), json.dumps(wrong)]):
+                with self.assertRaises(app.base.RehearsalError):
+                    app.inspect_loaded(ref, evidence, "target")
+        changes = [{"Id": "sha256:" + "d" * 64}, {"Architecture": "amd64"}, {"Os": "windows"},
+                   {"Variant": "v9"}, {"RepoDigests": []}, {"RepoDigests": {ref: "wrong-schema"}},
+                   {"Descriptor": None}, {"Descriptor": {"digest": evidence["target_manifest_digest"],
+                       "mediaType": image["Descriptor"]["mediaType"]}},
+                   {"Descriptor": {"digest": evidence["target_index_digest"], "mediaType": "application/vnd.oci.image.manifest.v1+json"}}]
+        for change in changes:
+            changed = dict(copy.deepcopy(image), **change)
+            with self.subTest(change=change), mock.patch.object(app.base, "docker", side_effect=[json.dumps(changed), json.dumps(store)]):
+                with self.assertRaises(app.base.RehearsalError):
+                    app.inspect_loaded(ref, evidence, "target")
 
 
 if __name__ == "__main__":
