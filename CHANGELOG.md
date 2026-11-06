@@ -4,6 +4,8 @@ This changelog records major engineering phases rather than individual commits.
 
 ## 2026-11 — Containerd rehearsal image identities
 
+- Resolve approved custom-app paths through the supported app-manager API so
+  activation planning remains compatible with Nextcloud 33.
 - Wait for Apache PID 1 before PHP rehearsal health probes so entrypoint file
   replacement cannot expose partially upgraded core code to the probe.
 - Accept an approved index image ID only with explicit containerd store evidence

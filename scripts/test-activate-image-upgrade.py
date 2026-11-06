@@ -444,6 +444,9 @@ class ActivationTests(unittest.TestCase):
         self.assertLess(program.index("define('OC_CONSOLE', 1)"), program.index("require '/var/www/html/lib/base.php'"))
         # Nextcloud's XML entity-loader policy blocks simplexml_load_file.
         self.assertIn("simplexml_load_string(file_get_contents($file))", program)
+        # The legacy OC_App facade no longer exposes getAppPath on Nextcloud 33.
+        self.assertIn(r"\OCP\Server::get('OCP\App\IAppManager')->getAppPath($id)", program)
+        self.assertNotIn("OC_App::getAppPath", program)
 
     def test_disable_list_manifest_and_version_drift_reject_approval(self) -> None:
         target = FakeTarget()
