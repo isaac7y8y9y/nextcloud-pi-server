@@ -57,10 +57,10 @@ def app_disable_evidence(target: r.Target, ids: list[str]) -> list[dict[str, str
     records = []
     # Resolve the selected code through Nextcloud, rather than trusting a
     # same-named directory that its app manager might not actually use.
-    php = '''define('OC_CONSOLE', 1);
+    php = r'''define('OC_CONSOLE', 1);
 require '/var/www/html/lib/base.php';
 $id = $argv[1]; $base = '/var/www/html/custom_apps'; $path = $base . '/' . $id;
-if (OC_App::getAppPath($id) !== $path) { throw new RuntimeException('Not a custom app'); }
+if (\OCP\Server::get('OCP\App\IAppManager')->getAppPath($id) !== $path) { throw new RuntimeException('Not a custom app'); }
 foreach ([$base, $path, $path . '/appinfo', $path . '/appinfo/info.xml'] as $part) {
     if (is_link($part)) { throw new RuntimeException('Symlink app path'); }
 }
