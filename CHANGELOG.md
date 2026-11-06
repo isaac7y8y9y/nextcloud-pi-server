@@ -4,6 +4,8 @@ This changelog records major engineering phases rather than individual commits.
 
 ## 2026-11 — Containerd rehearsal image identities
 
+- Wait for Apache PID 1 before PHP rehearsal health probes so entrypoint file
+  replacement cannot expose partially upgraded core code to the probe.
 - Accept an approved index image ID only with explicit containerd store evidence
   and a matching index descriptor, retaining ARM64/repository checks and existing
   config/manifest behavior. Production images and deployment state are unchanged.
