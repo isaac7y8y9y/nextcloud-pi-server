@@ -250,10 +250,13 @@ def resource_absent(kind: str, name: str) -> None:
 def status(name: str, version: str) -> None:
     for _ in range(180):
         try:
-            output = base.docker("exec", "--user", "www-data", name, "php", "/var/www/html/occ", "status", timeout=30)
-            match = APP_STATUS.search(output)
-            if match and match.group(1) == version and MAINTENANCE.search(output) and NO_DB_UPGRADE.search(output):
-                return
+            # The entrypoint replaces core files before executing Apache. PHP
+            # probes during that copy can load a mixture of the two versions.
+            if base.docker("exec", name, "cat", "/proc/1/comm", timeout=15) == "apache2":
+                output = base.docker("exec", "--user", "www-data", name, "php", "/var/www/html/occ", "status", timeout=30)
+                match = APP_STATUS.search(output)
+                if match and match.group(1) == version and MAINTENANCE.search(output) and NO_DB_UPGRADE.search(output):
+                    return
         except base.RehearsalError:
             pass
         time.sleep(2)

@@ -62,15 +62,47 @@ class NextcloudRehearsalTests(unittest.TestCase):
 
     def test_status_requires_version_maintenance_and_db_gate(self) -> None:
         healthy = "  - versionstring: 30.0.17\n  - maintenance: false\n  - needsDbUpgrade: false\n"
-        with mock.patch.object(app.base, "docker", return_value=healthy):
+        def response(output):
+            return lambda *args, **kwargs: "apache2" if args[-1] == "/proc/1/comm" else output
+        with mock.patch.object(app.base, "docker", side_effect=response(healthy)):
             app.status("app", "30.0.17")
         for bad in (healthy.replace("30.0.17", "31.0.14"),
                     healthy.replace("maintenance: false", "maintenance: true"),
                     healthy.replace("needsDbUpgrade: false", "needsDbUpgrade: true")):
-            with mock.patch.object(app.base, "docker", return_value=bad):
+            with mock.patch.object(app.base, "docker", side_effect=response(bad)):
                 with mock.patch.object(app.time, "sleep"):
                     with self.assertRaises(app.base.RehearsalError):
                         app.status("app", "30.0.17")
+
+    def test_status_waits_for_apache_before_any_php_probe(self) -> None:
+        healthy = "  - versionstring: 34.0.5\n  - maintenance: false\n  - needsDbUpgrade: false\n"
+        with mock.patch.object(app.base, "docker", side_effect=["docker-entrypoi", "apache2", healthy]) as docker, \
+             mock.patch.object(app.time, "sleep") as sleep:
+            app.status("target", "34.0.5")
+        self.assertEqual([call.args for call in docker.call_args_list[:2]],
+                         [("exec", "target", "cat", "/proc/1/comm")] * 2)
+        self.assertEqual(docker.call_args_list[2].args,
+                         ("exec", "--user", "www-data", "target", "php", "/var/www/html/occ", "status"))
+        sleep.assert_called_once_with(2)
+
+    def test_status_never_runs_php_when_initialization_does_not_finish(self) -> None:
+        for result in ("docker-entrypoi", app.base.RehearsalError("container is not ready")):
+            with self.subTest(result=result), \
+                 mock.patch.object(app.base, "docker", side_effect=result if isinstance(result, Exception) else None,
+                                   return_value=result) as docker, \
+                 mock.patch.object(app.time, "sleep"):
+                with self.assertRaises(app.base.RehearsalError):
+                    app.status("target", "34.0.5")
+                self.assertEqual(docker.call_count, 180)
+                self.assertTrue(all(call.args == ("exec", "target", "cat", "/proc/1/comm")
+                                    for call in docker.call_args_list))
+
+    def test_status_recovers_from_failed_read_without_early_php(self) -> None:
+        healthy = "  - versionstring: 34.0.5\n  - maintenance: false\n  - needsDbUpgrade: false\n"
+        with mock.patch.object(app.base, "docker", side_effect=[app.base.RehearsalError("starting"), "apache2", healthy]) as docker, \
+             mock.patch.object(app.time, "sleep"):
+            app.status("target", "34.0.5")
+        self.assertTrue(all("php" not in call.args for call in docker.call_args_list[:2]))
 
     def test_failed_pull_stops_only_verified_owned_containers_and_retains_state(self) -> None:
         self.root.mkdir(mode=0o700)

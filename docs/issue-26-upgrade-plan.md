@@ -117,6 +117,15 @@ incorrect platform and repository digests. Run focused and canonical PR checks,
 both required reviews and exact-head CI before resuming the isolated rehearsal.
 This correction changes no production image lock or deployed baseline.
 
+The rehearsal must also wait for the official Apache image's PID 1 to become
+`apache2` before invoking PHP status probes. The entrypoint replaces core files
+and completes its upgrade before starting Apache; concurrent PHP probes can
+otherwise load a mixture of source and target code. Read `/proc/1/comm` through
+the pinned Docker endpoint during the existing bounded wait. After Apache starts,
+retain all version, maintenance and database-upgrade status checks. Test delayed
+initialization, failed reads and timeout without executing PHP early. Keep the
+full error-log window and retain failures; do not classify away startup errors.
+
 ### October 31 preparation plan for the remaining stages
 
 This preparation continues [issue #26](https://github.com/isaac7y8y9y/nextcloud-pi-server/issues/26)
