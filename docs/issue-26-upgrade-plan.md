@@ -9,8 +9,8 @@ Fresh source recovery and a complete isolated rehearsal preceded the separate
 exact-image fetch and activation. Core/app/database integrity, required migrations,
 the pinned recurring preview completion, preserved pre-upgrade files and candidate
 file operations passed. Candidate conformance recorded 68 passes with zero warnings,
-failures, unknowns or drift. Only the exact deliberately interrupted transport-test
-event was classified; unexplained scoped events continued to block.
+failures, unknowns or drift. Preacceptance error classification was limited to the exact deliberately interrupted
+transport-test event; unexplained scoped events continued to block.
 
 The six enabled custom apps are Calendar 6.6.2, Contacts 8.9.1, Mail 5.12.4,
 Notes 6.1.0, Office 11.1.2 and Talk 24.0.7. Original app groups were preserved,
@@ -37,6 +37,13 @@ Fresh configuration/runtime backups and exact-source images passed verification,
 empty-daemon image reload and a disposable runtime restore with 193
 tables passing `mariadb-check`. All owned disposable resources were cleaned up;
 final live health and 67 clean baseline conformance checks passed again.
+
+A separate full-window log assessment retained three client maintenance responses
+inside the controlled warm-backup window and bounded initialization/resource
+warnings. One later read-only diagnostic API error was kept with its exact
+provenance. Pinned source, current app/key metadata and trusted postbackup DAV
+checks substantiated the assessment; original preacceptance classifiers and the
+raw log window were unchanged.
 
 Caddy, host maintenance and actual final client checks remain separate stages.
 Browser integrations, Office/Talk calls, reachable LAN IPv6, a newly proved Pi

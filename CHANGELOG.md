@@ -17,6 +17,8 @@ This changelog records major engineering phases rather than individual commits.
   and a disposable 193-table runtime restore with owned cleanup.
 - Align baseline fixtures and document the freeze-bound status interface and
   clean task-commit requirement before strict postpromotion conformance.
+- Assess poststage maintenance/initialization diagnostics separately, retaining
+  exact raw events and diagnostic provenance without changing acceptance filters.
 
 ## 2026-11 — Containerd rehearsal image identities
 
