@@ -1,5 +1,54 @@
 # Issue 26: Nextcloud upgrade plan
 
+November 6 checkpoint: **Nextcloud 34.0.5 / PHP 8.5.12 is accepted and open
+on MariaDB 11.8.9 and Caddy 2.10.2**. The tracked application tag and ARM64
+image ID match the accepted candidate.
+
+Fresh source recovery and a complete isolated rehearsal preceded the separate
+33→34 stage. A new protected ingress/drain proof and verified held backup gated
+exact-image fetch and activation. Core/app/database integrity, required migrations,
+the pinned recurring preview completion, preserved pre-upgrade files and candidate
+file operations passed. Candidate conformance recorded 68 passes with zero warnings,
+failures, unknowns or drift. Preacceptance error classification was limited to the exact deliberately interrupted
+transport-test event; unexplained scoped events continued to block.
+
+The six enabled custom apps are Calendar 6.6.2, Contacts 8.9.1, Mail 5.12.4,
+Notes 6.1.0, Office 11.1.2 and Talk 24.0.7. Original app groups were preserved,
+including enabled `app_api`/`profile` and disabled `richdocumentscode`/`twofactor_totp`.
+Pinned new defaults are `appstore` 1.0.0, `files_lock` 34.0.1 and `office` 1.0.0.
+
+Separate acceptance committed the active source record. A private postrelease
+status guard then queried an interface that requires the original active freeze;
+the safety handler installed a new emergency freeze. The separately reviewed
+continuation verified accepted receipts, consumed authority and exact live
+identities before using new public release authority. A local Git-cleanliness
+warning was resolved by committing only the accepted image values and repeating
+read-only conformance. Original stopped phases, code/seals and raw evidence remain
+retained; no activation, acceptance or restoration was repeated.
+
+Both trusted LAN routes passed PUT/GET/DELETE/404 after guarded reopening.
+Maintenance is off, jobs are active, and the synthetic account/jobs, credentials
+and owned installer staging were removed. Final live health and all 67 baseline
+conformance checks passed without warnings, failures, unknowns or drift. Both
+cold source databases and all earlier recovery material remain retained; accepted
+writes must never be overwritten automatically with historical backups.
+
+Fresh configuration/runtime backups and exact-source images passed verification,
+empty-daemon image reload and a disposable runtime restore with 193
+tables passing `mariadb-check`. All owned disposable resources were cleaned up;
+final live health and 67 clean baseline conformance checks passed again.
+
+A separate full-window log assessment retained three client maintenance responses
+inside the controlled warm-backup window and bounded initialization/resource
+warnings. One later read-only diagnostic API error was kept with its exact
+provenance. Pinned source, current app/key metadata and trusted postbackup DAV
+checks substantiated the assessment; original preacceptance classifiers and the
+raw log window were unchanged.
+
+Caddy, host maintenance and actual final client checks remain separate stages.
+Browser integrations, Office/Talk calls, reachable LAN IPv6, a newly proved Pi
+reboot and production full-runtime restoration remain unestablished.
+
 October 24 checkpoint: **MariaDB 11.8.9 is accepted and open on unchanged
 Nextcloud 33.0.10 / PHP 8.4.26 and Caddy 2.10.2**. The tracked database tag and
 image ID now match that accepted ARM64 candidate. App versions and enabled/disabled
@@ -93,8 +142,8 @@ including enabled `app_api` and disabled `richdocumentscode`; the new shipped
 resolved through reviewed guarded continuation under the same held freeze;
 the driver now checks the exact code and installed versions before restart.
 
-The forward MariaDB stage is accepted. Nextcloud 34, Caddy/host maintenance and
-final client checks remain pending. Refresh compatibility and recovery before each separately
+The forward MariaDB and Nextcloud 34 stages are accepted. Caddy/host maintenance
+and final client checks remain pending. Refresh compatibility and recovery before each separately
 authorized stage. The inventory and candidate tables below retain their original
 research dates and must not be treated as current approvals.
 
@@ -205,7 +254,7 @@ Once 33.0.10 and all required background migrations are healthy, use MariaDB's [
 
 ## Major and app matrix
 
-[Nextcloud requires the latest patch before each adjacent major hop and completed background migrations before the next](https://docs.nextcloud.com/server/stable/admin_manual/maintenance/upgrade.html). The candidate path is **30.0.17 → 31.0.14 → 32.0.15 → 33.0.10 → 34.0.4**. Use the [official Docker image's one-major startup migration](https://github.com/nextcloud/docker/blob/master/README.md#update-to-a-newer-version), not the web updater. Confirm `occ upgrade`/repair status, apps, maintenance state, required jobs, browser and file checks at each destination.
+[Nextcloud requires the latest patch before each adjacent major hop and completed background migrations before the next](https://docs.nextcloud.com/server/stable/admin_manual/maintenance/upgrade.html). The September proposed candidate path was **30.0.17 → 31.0.14 → 32.0.15 → 33.0.10 → 34.0.4**. Use the [official Docker image's one-major startup migration](https://github.com/nextcloud/docker/blob/master/README.md#update-to-a-newer-version), not the web updater. Confirm `occ upgrade`/repair status, apps, maintenance state, required jobs, browser and file checks at each destination.
 
 Seven custom-app directories were inspected. Six are enabled: Calendar, Contacts, Mail, Notes, Office (`richdocuments`), and Talk (`spreed`). `richdocumentscode` is disabled and stays so unless separately validated. The table gives stable versions available in the [official App Store API](https://apps.nextcloud.com/api/v1/apps.json) on September 23 and compatible with the listed server and PHP major. They are compatibility candidates, not mandatory updates. Refresh `occ app:list`, app manifests, release availability, and PHP constraints before each hop. Disable third-party apps for the core migration as [Nextcloud directs](https://docs.nextcloud.com/server/stable/admin_manual/maintenance/upgrade.html), then install/re-enable compatible versions without force-enabling incompatible apps. Verify shipped apps, including `app_api`, after each image change.
 
@@ -262,7 +311,7 @@ implementation alone does not advance the production 11.4 baseline.
 2. Only after a successful isolated rehearsal, cut over a clean MariaDB 11.4.13 database while Nextcloud remains at 30.0.17. Preserve the original 11.8 state. Verify DB, `occ`, HTTPS and read-only application access while writes remain blocked. On failure, recover the complete pre-cutover runtime before accepting new writes.
 3. Upgrade 30→31, 31→32, and 32→33, each as a separate approved stage with its own final quiesced recovery point and MariaDB 11.4.13. Install compatible apps at each endpoint and complete required DB/app migrations and background jobs. Check maintenance off when appropriate, `scripts/health-check.sh`, `scripts/preflight.sh --conformance`, and no direct app host port before reopening. Stop on failure; recurring jobs need not make the total queue zero.
 4. With 33 healthy, perform the separately approved forward MariaDB upgrade to 11.8.9. Verify `mariadb-upgrade`, table integrity, Nextcloud, and a fresh post-upgrade recovery point. Then do 33→34 with the same independent gates and approval. After each accepted reopening, test browser upload/download on macOS and Windows. If that post-open check fails, block new writes and investigate any accepted writes before considering restoration; never blindly restore the pre-open snapshot over later user data.
-5. Upgrade Caddy to 2.11.4 separately, validate the existing Caddyfile against the selected image, and confirm internal HTTPS/certificate behavior. Upgrade Docker Engine/CLI with a compatible containerd.io package in a separate administrator maintenance window. Retain Compose 5.0.2 unless actual testing finds incompatibility. Verify no-pull launcher, storage gate, image identity, isolated recovery helpers, scheduler, shutdown/reboot ordering, and health after the daemon update.
+5. Upgrade Caddy separately to an exact maintained 2.x patch selected from fresh evidence, validate the existing Caddyfile against the selected image, and confirm internal HTTPS/certificate behavior. Upgrade Docker Engine/CLI with a compatible containerd.io package in a separate administrator maintenance window. Retain Compose 5.0.2 unless actual testing finds incompatibility. Verify no-pull launcher, storage gate, image identity, isolated recovery helpers, scheduler, shutdown/reboot ordering, and health after the daemon update.
 6. Verify final versions, no pending required DB/background migrations, source-lock/active-record identity, DB/Caddy/HTTPS, storage mount, macOS and Windows LAN access, and fresh config/runtime/image recovery artifacts. Update current-configuration, deployment, startup, recovery, operations, known-risks, tests, and `CHANGELOG.md` with the **proven** baseline. Require repository CI and publication-safety checks.
 
 Every stage stops if an image/app candidate changes, a backup or restore gate fails, the mount differs, or health fails. Once a schema migration has run, changing an image tag is not a rollback. Full restoration to a matching earlier runtime state needs its own approval. The September 17 one-off PHP preview memory failure should be monitored; a recurrence before the next hop requires diagnosis.

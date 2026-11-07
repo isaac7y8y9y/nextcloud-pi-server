@@ -2,6 +2,24 @@
 
 This changelog records major engineering phases rather than individual commits.
 
+## 2026-11 — Accepted Nextcloud 34 baseline
+
+- Promote Nextcloud 34.0.5 / PHP 8.5.12 after a complete isolated rehearsal and
+  protected live stage, preserving MariaDB 11.8.9 and Caddy 2.10.2.
+- Verify signed Office 11.1.2 / Talk 24.0.7, retained compatible apps and original
+  groups, three pinned shipped defaults, required jobs, integrity and file preservation.
+- Pass 68 clean candidate checks, separate acceptance, guarded reopening and
+  file operations on both trusted LAN routes; remove owned validation data and
+  finish with 67 clean baseline checks.
+- Preserve original stopped phases and complete reviewed release/conformance
+  continuations without repeating activation, acceptance or data restoration.
+- Verify fresh configuration/runtime/exact-image recovery, isolated image reload
+  and a disposable 193-table runtime restore with owned cleanup.
+- Align baseline fixtures and document the freeze-bound status interface and
+  clean task-commit requirement before strict postpromotion conformance.
+- Assess poststage maintenance/initialization diagnostics separately, retaining
+  exact raw events and diagnostic provenance without changing acceptance filters.
+
 ## 2026-11 — Containerd rehearsal image identities
 
 - Resolve approved custom-app paths through the supported app-manager API so

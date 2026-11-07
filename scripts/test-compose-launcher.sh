@@ -60,14 +60,14 @@ fi
 if [[ "$1 $2" == 'image inspect' ]]; then
   if [[ "${LAUNCHER_IMAGE_MODE:-source}" == recovered && " $* " == *' --platform linux/arm64/v8 '* ]]; then
     case "${@: -1}" in
-      nextcloud:33.0.10-apache) printf 'sha256:%064d\n' 4 ;;
+      nextcloud:34.0.5-apache) printf 'sha256:%064d\n' 4 ;;
       mariadb:11.8.9) printf 'sha256:%064d\n' 5 ;;
       caddy:2) printf 'sha256:%064d\n' 6 ;;
       *) exit 1 ;;
     esac
   else
     case "${@: -1}" in
-      nextcloud:33.0.10-apache) printf '%s\n' sha256:a353c1bb14d9d70a4cbd677af586a7848d1e96d26130f225db4af75100609371 ;;
+      nextcloud:34.0.5-apache) printf '%s\n' sha256:b89746a4febc93de82141921417f43b0d5ce69c3746feb485372559e9fbeec3f ;;
       mariadb:11.8.9) printf '%s\n' sha256:f16d7a344413e519dff518f27bdb221388f84b0d274c97c4fb5f2cb0dc1b34fa ;;
       caddy:2) printf '%s\n' sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb ;;
       *) exit 1 ;;
@@ -77,9 +77,9 @@ if [[ "$1 $2" == 'image inspect' ]]; then
 fi
 if [[ "$*" == *" config --format json" ]]; then
   case "$LAUNCHER_SCENARIO" in
-    valid) printf '%s\n' '{"services":{"app":{"image":"nextcloud:33.0.10-apache"},"db":{"image":"mariadb:11.8.9"},"caddy":{"image":"caddy:2"}}}' ;;
+    valid) printf '%s\n' '{"services":{"app":{"image":"nextcloud:34.0.5-apache"},"db":{"image":"mariadb:11.8.9"},"caddy":{"image":"caddy:2"}}}' ;;
     wrong) printf '%s\n' '{"services":{"app":{"image":"evil:cached"},"db":{"image":"mariadb:11.8.9"},"caddy":{"image":"caddy:2"}}}' ;;
-    extra) printf '%s\n' '{"services":{"app":{"image":"nextcloud:33.0.10-apache"},"db":{"image":"mariadb:11.8.9"},"caddy":{"image":"caddy:2"},"extra":{"image":"evil:cached"}}}' ;;
+    extra) printf '%s\n' '{"services":{"app":{"image":"nextcloud:34.0.5-apache"},"db":{"image":"mariadb:11.8.9"},"caddy":{"image":"caddy:2"},"extra":{"image":"evil:cached"}}}' ;;
     *) exit 2 ;;
   esac
   exit 0

@@ -1,7 +1,7 @@
 # Image upgrade candidate preparation
 
 The [accepted checkpoints](issue-26-upgrade-plan.md) record the initial clean
-database cutover, separate Nextcloud upgrades through 33, and the accepted
+database cutover, separate Nextcloud upgrades through 34, and the accepted
 MariaDB 11.8.9 forward stage. The [October 15 result](issue-26-mariadb-stage-result.md)
 retains the first cutover's evidence. Each later stage requires fresh evidence
 and its own operational gates; completed approvals are historical.
@@ -97,6 +97,14 @@ blocked. The root commands are safety primitives; the separate
 image, install the candidate record and Compose, mark the boundary before
 restart, and pause for a second health-checked acceptance approval. It leaves
 the freeze held and does not release ingress or alter the source lock.
+
+`upgrade-stage status <id>` requires that stage's original active freeze.
+After release, verify the consumed release proof, committed active source record,
+exact live files/containers, absent freeze and restored timer. Record the exact
+accepted Compose/image-lock promotion in the task branch before strict
+postpromotion conformance: local Git changes are reported as a warning. Baseline
+publication still requires poststage recovery, reviews, CI and the separate PR.
+
 For Nextcloud activation, repeat `--disable-app ID` on both `--plan` and
 `--apply` for each enabled custom app that must be disabled before the core
 upgrade. The approval binds the sorted list, installed versions and resolved
